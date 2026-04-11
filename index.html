@@ -4,11 +4,131 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Canvas Editor — Base One</title>
+    <title>Canvas Editor — Base Three</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <style>
+        *,
+        *::before,
+        *::after {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: #0e0e10;
+            font-family: 'Inter', sans-serif;
+            color: #a0a0a8;
+        }
+
+        .editor-chrome {
+            position: relative;
+            width: 540px;
+            background: #18181b;
+            border: 1px solid #2a2a2f;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow:
+                0 0 0 1px rgba(255, 255, 255, 0.03),
+                0 20px 60px rgba(0, 0, 0, 0.5),
+                0 4px 16px rgba(0, 0, 0, 0.3);
+        }
+
+        .editor-titlebar {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 12px 16px;
+            background: #1c1c20;
+            border-bottom: 1px solid #2a2a2f;
+            user-select: none;
+        }
+
+        .editor-titlebar .dots {
+            display: flex;
+            gap: 6px;
+        }
+
+        .editor-titlebar .dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+        }
+
+        .editor-titlebar .dot:nth-child(1) {
+            background: #ff5f57;
+        }
+
+        .editor-titlebar .dot:nth-child(2) {
+            background: #febc2e;
+        }
+
+        .editor-titlebar .dot:nth-child(3) {
+            background: #28c840;
+        }
+
+        .editor-titlebar .title {
+            flex: 1;
+            text-align: center;
+            font-size: 12px;
+            font-weight: 500;
+            color: #5a5a64;
+            letter-spacing: 0.03em;
+        }
+
+        .canvas-wrap {
+            padding: 40px;
+        }
+
+        .status-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 16px;
+            border-top: 1px solid #2a2a2f;
+            font-size: 11px;
+            color: #4a4a54;
+            letter-spacing: 0.02em;
+        }
+
+        .status-bar .pipeline-tag {
+            padding: 2px 8px;
+            border-radius: 4px;
+            background: rgba(99, 102, 241, 0.12);
+            color: #818cf8;
+            font-weight: 500;
+        }
+    </style>
 </head>
 
 <body>
-    <script type="module" src="/src/main.ts"></script>
+    <div class="editor-chrome">
+        <div class="editor-titlebar">
+            <div class="dots">
+                <div class="dot"></div>
+                <div class="dot"></div>
+                <div class="dot"></div>
+            </div>
+            <div class="title">canvas-editor — base three</div>
+            <div style="width: 48px;"></div>
+        </div>
+        <div class="canvas-wrap">
+            <div id="editor-container"></div>
+        </div>
+        <div class="status-bar">
+            <span id="status-info">Loading...</span>
+            <span class="pipeline-tag">ProseMirror → Pretext → Canvas</span>
+        </div>
+    </div>
+
+    <script type="module" src="/demo/main.ts"></script>
 </body>
 
 </html>

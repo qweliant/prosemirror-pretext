@@ -1,16 +1,46 @@
 {
-  "name": "canvas-editor-base-one",
-  "version": "0.1.0",
-  "private": true,
+  "name": "prosemirror-pretext",
+  "version": "0.0.0",
+  "description": "Canvas-based text editor powered by ProseMirror and Pretext",
   "type": "module",
+  "packageManager": "bun@1.1.28",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
   "scripts": {
     "dev": "vite",
-    "build": "vite build"
+    "build": "vite build",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "prosemirror",
+    "pretext",
+    "canvas",
+    "editor",
+    "text-layout"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "prosemirror-model": "^1.0.0",
+    "prosemirror-state": "^1.0.0"
   },
   "dependencies": {
-    "@chenglou/pretext": "^0.0.3",
+    "@chenglou/pretext": "^0.0.5"
+  },
+  "devDependencies": {
     "prosemirror-model": "^1.25.4",
     "prosemirror-state": "^1.4.4",
+    "typescript": "^5.7.0",
     "vite": "^8.0.3"
   }
 }
