@@ -67,6 +67,7 @@ async function boot(): Promise<void>
     const editor = new CanvasEditor({
         state: EditorState.create({ doc, schema }),
         container,
+        maxHeight: 480,
         onRender(stats)
         {
             statusEl.textContent =
@@ -79,7 +80,8 @@ async function boot(): Promise<void>
     editor.focus()
 
     console.log('Canvas Editor — Demo')
-    console.log('  Type to edit, arrow keys / click to move the caret, Enter to split.')
+    console.log('  Type to edit. Arrow keys / click to move. Shift-arrow / drag to select.')
+    console.log('  Enter splits; Backspace at block start joins; Home/End jump to line ends.')
 
     // Expose for console debugging
     ;(window as any).editor = editor

@@ -30,6 +30,10 @@ export interface CanvasEditorOptions
     firstLineColor?: string
     /** Caret color. Default: '#a5b4fc'. */
     caretColor?: string
+    /** Selection highlight color. Default: 'rgba(129, 140, 248, 0.25)'. */
+    selectionColor?: string
+    /** If set, the content area scrolls when it exceeds this height in px. */
+    maxHeight?: number
     /** Called after every render with timing/cache stats. */
     onRender?: (stats: RenderStats) => void
 }
@@ -88,6 +92,8 @@ export class CanvasEditor
     private readonly textColor: string
     private readonly firstLineColor: string
     private readonly caretColor: string
+    private readonly selectionColor: string
+    private readonly maxHeight: number | null
     private readonly caretWidth = 2
     private readonly caretBlinkMs = 530
     private readonly caretHoldMs = 500
@@ -98,6 +104,7 @@ export class CanvasEditor
 
     // ─── DOM ───────────────────────────────────────────────────────────
     private readonly container: HTMLElement
+    private readonly scroller: HTMLDivElement | null
     private readonly canvas: HTMLCanvasElement
     private readonly textarea: HTMLTextAreaElement
     private readonly measureCtx: CanvasRenderingContext2D
@@ -119,6 +126,13 @@ export class CanvasEditor
     // ─── Input ─────────────────────────────────────────────────────────
     private composing = false
     private abortController: AbortController | null = null
+    private dragging = false
+
+    // ─── Vertical Navigation ───────────────────────────────────────────
+    // Target X pinned across consecutive vertical moves so the caret
+    // drifts back to its original column when passing through short lines.
+    // Reset by any horizontal motion (see dispatch).
+    private phantomX: number | null = null
 
     constructor(options: CanvasEditorOptions)
     {
@@ -131,6 +145,8 @@ export class CanvasEditor
         this.textColor = options.textColor ?? '#d4d4d8'
         this.firstLineColor = options.firstLineColor ?? '#818cf8'
         this.caretColor = options.caretColor ?? '#a5b4fc'
+        this.selectionColor = options.selectionColor ?? 'rgba(129, 140, 248, 0.25)'
+        this.maxHeight = options.maxHeight ?? null
         this.onRender = options.onRender
 
         // Build DOM
@@ -161,7 +177,21 @@ export class CanvasEditor
 
         stack.appendChild(this.canvas)
         stack.appendChild(this.textarea)
-        this.container.appendChild(stack)
+
+        if (this.maxHeight !== null)
+        {
+            this.scroller = document.createElement('div')
+            this.scroller.style.maxHeight = `${this.maxHeight}px`
+            this.scroller.style.overflowY = 'auto'
+            this.scroller.style.width = `${this.containerWidth}px`
+            this.scroller.appendChild(stack)
+            this.container.appendChild(this.scroller)
+        }
+        else
+        {
+            this.scroller = null
+            this.container.appendChild(stack)
+        }
 
         // Dedicated measurement context (avoids touching the paint context)
         const mc = document.createElement('canvas')
@@ -179,6 +209,9 @@ export class CanvasEditor
         this.state = this.state.apply(tr)
         this.lastInputTime = performance.now()
         this.caretVisible = true
+        // Horizontal motion resets the phantom X. moveVertical restores
+        // it after dispatching.
+        this.phantomX = null
         this.scheduleRender()
     }
 
@@ -306,6 +339,13 @@ export class CanvasEditor
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
         ctx.clearRect(0, 0, cssWidth, cssHeight)
 
+        const sel = this.state.selection
+        if (!sel.empty)
+        {
+            ctx.fillStyle = this.selectionColor
+            this.paintSelectionRects(ctx, layouts, sel.from, sel.to)
+        }
+
         ctx.font = this.font
         ctx.textBaseline = 'top'
 
@@ -316,6 +356,74 @@ export class CanvasEditor
                 const line = block.lines[i]
                 ctx.fillStyle = i === 0 ? this.firstLineColor : this.textColor
                 ctx.fillText(line.text, line.x, line.y)
+            }
+        }
+    }
+
+    private paintSelectionRects(
+        ctx: CanvasRenderingContext2D,
+        layouts: BlockLayout[],
+        from: number,
+        to: number,
+    ): void
+    {
+        this.measureCtx.font = this.font
+        const stubWidth = this.lineHeight / 3
+
+        for (const block of layouts)
+        {
+            if (block.pmEndPos < from || block.pmStartPos > to) continue
+
+            // Empty paragraph fully inside the selection range: paint a stub.
+            if (block.text.length === 0)
+            {
+                if (from <= block.pmStartPos && to >= block.pmEndPos)
+                {
+                    const line = block.lines[0]
+                    ctx.fillRect(line.x, line.y, stubWidth, this.lineHeight)
+                }
+                continue
+            }
+
+            let consumed = 0
+            for (let li = 0; li < block.lines.length; li++)
+            {
+                const line = block.lines[li]
+                const lineStart = block.pmStartPos + consumed
+                const lineEnd = lineStart + line.text.length
+                consumed += line.text.length
+
+                if (lineEnd < from) continue
+                if (lineStart > to) break
+
+                const selStartInLine = Math.max(0, from - lineStart)
+                const selEndInLine = Math.min(line.text.length, to - lineStart)
+
+                const x1 = selStartInLine === 0
+                    ? line.x
+                    : line.x + this.measureCtx.measureText(
+                        line.text.substring(0, selStartInLine),
+                    ).width
+
+                let x2: number
+                if (to > lineEnd)
+                {
+                    // Selection continues past this line — trail to container edge.
+                    x2 = line.x + this.containerWidth
+                }
+                else
+                {
+                    x2 = selEndInLine === 0
+                        ? line.x
+                        : line.x + this.measureCtx.measureText(
+                            line.text.substring(0, selEndInLine),
+                        ).width
+                }
+
+                if (x2 > x1)
+                {
+                    ctx.fillRect(x1, line.y, x2 - x1, this.lineHeight)
+                }
             }
         }
     }
@@ -368,9 +476,27 @@ export class CanvasEditor
         return { x: 0, y: block.yOffset }
     }
 
+    private ensureCaretVisible(coords: { x: number, y: number }): void
+    {
+        if (!this.scroller) return
+        const scrollTop = this.scroller.scrollTop
+        const viewH = this.scroller.clientHeight
+        const caretTop = coords.y
+        const caretBottom = coords.y + this.lineHeight
+        if (caretTop < scrollTop)
+        {
+            this.scroller.scrollTop = caretTop
+        }
+        else if (caretBottom > scrollTop + viewH)
+        {
+            this.scroller.scrollTop = caretBottom - viewH
+        }
+    }
+
     private paintCaret(coords: { x: number, y: number } | null): void
     {
         if (!coords || !this.caretVisible) return
+        if (!this.state.selection.empty) return
         const ctx = this.canvas.getContext('2d')!
         ctx.fillStyle = this.caretColor
         ctx.fillRect(coords.x, coords.y, this.caretWidth, this.lineHeight)
@@ -471,6 +597,7 @@ export class CanvasEditor
         {
             this.textarea.style.transform =
                 `translate(${caretCoords.x}px, ${caretCoords.y}px)`
+            this.ensureCaretVisible(caretCoords)
         }
 
         const dt = performance.now() - t0
@@ -531,16 +658,33 @@ export class CanvasEditor
                 case 'deleteByCut':
                 {
                     const sel = this.state.selection
-                    if (sel.empty)
-                    {
-                        if (sel.from > 1)
-                        {
-                            this.dispatch(this.state.tr.delete(sel.from - 1, sel.from))
-                        }
-                    }
-                    else
+                    if (!sel.empty)
                     {
                         this.dispatch(this.state.tr.deleteSelection())
+                        break
+                    }
+                    const $from = sel.$from
+                    // At the start of a paragraph that isn't the first block:
+                    // join it into the previous paragraph.
+                    if ($from.parentOffset === 0 && $from.depth === 1)
+                    {
+                        const joinPos = $from.before()
+                        if (joinPos > 0)
+                        {
+                            try
+                            {
+                                this.dispatch(this.state.tr.join(joinPos))
+                            }
+                            catch
+                            {
+                                // Incompatible blocks — silently ignore.
+                            }
+                            break
+                        }
+                    }
+                    if (sel.from > 1)
+                    {
+                        this.dispatch(this.state.tr.delete(sel.from - 1, sel.from))
                     }
                     break
                 }
@@ -575,23 +719,27 @@ export class CanvasEditor
             {
                 case 'ArrowLeft':
                     e.preventDefault()
-                    this.moveSelection(-1)
+                    this.moveSelection(-1, e.shiftKey)
                     break
                 case 'ArrowRight':
                     e.preventDefault()
-                    this.moveSelection(1)
+                    this.moveSelection(1, e.shiftKey)
                     break
                 case 'ArrowUp':
+                    e.preventDefault()
+                    this.moveVertical(-1, e.shiftKey)
+                    break
                 case 'ArrowDown':
                     e.preventDefault()
+                    this.moveVertical(1, e.shiftKey)
                     break
                 case 'Home':
                     e.preventDefault()
-                    this.moveToBlockBoundary('start')
+                    this.moveToBlockBoundary('start', e.shiftKey)
                     break
                 case 'End':
                     e.preventDefault()
-                    this.moveToBlockBoundary('end')
+                    this.moveToBlockBoundary('end', e.shiftKey)
                     break
                 case 'Enter':
                     e.preventDefault()
@@ -602,19 +750,30 @@ export class CanvasEditor
 
         this.canvas.addEventListener('mousedown', (e) =>
         {
+            if (e.button !== 0) return
             e.preventDefault()
             const rect = this.canvas.getBoundingClientRect()
             const x = e.clientX - rect.left
             const y = e.clientY - rect.top
             const pos = this.clickToPos(this.lastLayouts, x, y)
-            if (pos !== null)
-            {
-                const $pos = this.state.doc.resolve(
-                    clamp(pos, 0, this.state.doc.content.size),
-                )
-                this.dispatch(this.state.tr.setSelection(TextSelection.near($pos)))
-            }
+            if (pos !== null) this.setHead(pos, e.shiftKey)
+            this.dragging = true
             this.textarea.focus()
+        }, { signal })
+
+        window.addEventListener('mousemove', (e) =>
+        {
+            if (!this.dragging) return
+            const rect = this.canvas.getBoundingClientRect()
+            const x = e.clientX - rect.left
+            const y = e.clientY - rect.top
+            const pos = this.clickToPos(this.lastLayouts, x, y)
+            if (pos !== null) this.setHead(pos, true)
+        }, { signal })
+
+        window.addEventListener('mouseup', () =>
+        {
+            this.dragging = false
         }, { signal })
 
         this.textarea.focus()
@@ -622,24 +781,128 @@ export class CanvasEditor
 
     private splitBlock(): void
     {
-        const { $from } = this.state.selection
-        // Only split if we're inside a block that supports it
+        const sel = this.state.selection
+        let tr = this.state.tr
+        if (!sel.empty) tr = tr.deleteSelection()
+        const $from = tr.selection.$from
         if ($from.parent.type.name === 'paragraph')
         {
-            this.dispatch(this.state.tr.split($from.pos))
+            tr = tr.split($from.pos)
+            this.dispatch(tr)
         }
     }
 
-    private moveSelection(delta: number): void
+    private setHead(newHead: number, extend: boolean, bias: 1 | -1 = 1): void
     {
-        const newPos = this.state.selection.head + delta
-        const clamped = clamp(newPos, 0, this.state.doc.content.size)
-        const $pos = this.state.doc.resolve(clamped)
-        const sel = TextSelection.near($pos, delta < 0 ? -1 : 1)
-        this.dispatch(this.state.tr.setSelection(sel))
+        const size = this.state.doc.content.size
+        const $head = this.state.doc.resolve(clamp(newHead, 0, size))
+        if (extend)
+        {
+            const $anchor = this.state.doc.resolve(
+                clamp(this.state.selection.anchor, 0, size),
+            )
+            this.dispatch(this.state.tr.setSelection(
+                TextSelection.between($anchor, $head, bias),
+            ))
+        }
+        else
+        {
+            this.dispatch(this.state.tr.setSelection(TextSelection.near($head, bias)))
+        }
     }
 
-    private moveToBlockBoundary(end: 'start' | 'end'): void
+    private moveSelection(delta: number, extend: boolean): void
+    {
+        this.setHead(
+            this.state.selection.head + delta,
+            extend,
+            delta < 0 ? -1 : 1,
+        )
+    }
+
+    private moveVertical(direction: 1 | -1, extend: boolean): void
+    {
+        if (this.lastLayouts.length === 0) return
+
+        const head = this.state.selection.head
+        const currentCoords = this.posToCoords(this.lastLayouts, head)
+        if (!currentCoords) return
+
+        // Locate current block by PM position, current line by caret Y.
+        let currentBlockIdx = -1
+        for (let bi = 0; bi < this.lastLayouts.length; bi++)
+        {
+            const b = this.lastLayouts[bi]
+            if (head >= b.pmStartPos && head <= b.pmEndPos)
+            {
+                currentBlockIdx = bi
+                break
+            }
+        }
+        if (currentBlockIdx === -1) return
+
+        const currentBlock = this.lastLayouts[currentBlockIdx]
+        let currentLineIdx = 0
+        for (let li = 0; li < currentBlock.lines.length; li++)
+        {
+            if (currentBlock.lines[li].y === currentCoords.y)
+            {
+                currentLineIdx = li
+                break
+            }
+        }
+
+        // Capture the phantom X from the current caret on the first vertical
+        // move of a run. Subsequent vertical moves reuse it.
+        const targetX = this.phantomX ?? currentCoords.x
+
+        // Pick the target line (wrapping across block boundaries).
+        let targetBlockIdx = currentBlockIdx
+        let targetLineIdx = currentLineIdx + direction
+
+        if (targetLineIdx < 0)
+        {
+            if (currentBlockIdx === 0)
+            {
+                // Top of doc — clamp to very start.
+                this.setHead(0, extend)
+                this.phantomX = targetX
+                return
+            }
+            targetBlockIdx = currentBlockIdx - 1
+            const prev = this.lastLayouts[targetBlockIdx]
+            targetLineIdx = Math.max(0, prev.lines.length - 1)
+        }
+        else if (targetLineIdx >= currentBlock.lines.length)
+        {
+            if (currentBlockIdx === this.lastLayouts.length - 1)
+            {
+                // Bottom of doc — clamp to very end.
+                this.setHead(this.state.doc.content.size, extend)
+                this.phantomX = targetX
+                return
+            }
+            targetBlockIdx = currentBlockIdx + 1
+            targetLineIdx = 0
+        }
+
+        const targetBlock = this.lastLayouts[targetBlockIdx]
+        const targetLine = targetBlock.lines[targetLineIdx]
+
+        // Re-use clickToPos against the target line's midline — it already
+        // handles empty lines, binary search, and nearest-char snap.
+        const pos = this.clickToPos(
+            this.lastLayouts,
+            targetX,
+            targetLine.y + this.lineHeight / 2,
+        )
+        if (pos !== null) this.setHead(pos, extend)
+
+        // Pin phantom X after dispatch (which clears it).
+        this.phantomX = targetX
+    }
+
+    private moveToBlockBoundary(end: 'start' | 'end', extend: boolean): void
     {
         for (const block of this.lastLayouts)
         {
@@ -647,8 +910,7 @@ export class CanvasEditor
             if (head >= block.pmStartPos && head <= block.pmEndPos)
             {
                 const target = end === 'start' ? block.pmStartPos : block.pmEndPos
-                const $pos = this.state.doc.resolve(target)
-                this.dispatch(this.state.tr.setSelection(TextSelection.near($pos)))
+                this.setHead(target, extend, end === 'start' ? -1 : 1)
                 return
             }
         }

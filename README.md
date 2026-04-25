@@ -41,10 +41,28 @@ const state = EditorState.create({
 const editor = new CanvasEditor({
   state,
   container: document.getElementById('editor')!,
+  maxHeight: 480, // optional — content scrolls past this height
 })
 ```
 
 The container element should be an empty block-level element. The editor creates a `<canvas>` and a hidden `<textarea>` (for input/IME) inside it.
+
+### Options
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `state` | *(required)* | ProseMirror `EditorState` with schema + initial doc |
+| `container` | *(required)* | Element that will host the canvas + textarea |
+| `font` | `'16px Inter'` | CSS font string for text rendering |
+| `lineHeight` | `26` | Line height in px |
+| `width` | `460` | Content area width in px |
+| `blockGap` | `20` | Vertical gap between block nodes in px |
+| `maxHeight` | `null` | If set, scrolls when content exceeds this height |
+| `textColor` | `'#d4d4d8'` | Main text color |
+| `firstLineColor` | `'#818cf8'` | First-line accent color |
+| `caretColor` | `'#a5b4fc'` | Caret color |
+| `selectionColor` | `'rgba(129, 140, 248, 0.25)'` | Selection highlight color |
+| `onRender` | — | Called after every render with cache + timing stats |
 
 ## Demo
 
@@ -65,17 +83,18 @@ Actively being built. Not yet published to npm.
 - [x] Incremental layout cache (only changed blocks re-segment)
 - [x] Caret rendering with blink
 - [x] Click-to-position
-- [x] Arrow key navigation (left/right, home/end)
-- [ ] Enter key / paragraph splitting
-- [ ] Arrow up/down (line-aware vertical movement)
-- [ ] Selection rendering
-- [ ] Scroll virtualization
-- [ ] Marks (bold, italic, code)
+- [x] Arrow key navigation (left/right, home/end, up/down with phantom X)
+- [x] Enter key / paragraph splitting
+- [x] Backspace joins adjacent paragraphs at block start
+- [x] Selection rendering (shift+arrows, shift+click, mouse drag)
+- [x] Scroll container with `ensureCaretVisible`
+- [ ] Scroll virtualization (viewport-sized canvas + spatial index)
+- [ ] Marks (bold, italic, code) — needs mid-line font changes in layout pipeline
 - [ ] Variable-width layout (text around floated elements)
 
 ## Architecture
 
-```
+```text
 ProseMirror EditorState (headless)
   -> computeLayout(): walks doc, runs Pretext per block (cached via WeakMap)
   -> paintToCanvas(): iterates positioned lines, calls ctx.fillText()

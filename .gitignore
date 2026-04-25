@@ -5,3 +5,4 @@ dist/
 
 # OS
 .DS_Store
+.claude/
