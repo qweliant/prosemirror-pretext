@@ -10,6 +10,7 @@ export default defineConfig({
         },
         rollupOptions: {
             external: [
+                'prosemirror-commands',
                 'prosemirror-model',
                 'prosemirror-state',
             ],

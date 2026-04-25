@@ -1,5 +1,6 @@
 import { type Node as PMNode } from 'prosemirror-model'
 import { EditorState, TextSelection, type Transaction } from 'prosemirror-state'
+import { joinBackward, joinForward } from 'prosemirror-commands'
 import {
     prepareWithSegments,
     layoutWithLines,
@@ -133,6 +134,14 @@ export class CanvasEditor
     // drifts back to its original column when passing through short lines.
     // Reset by any horizontal motion (see dispatch).
     private phantomX: number | null = null
+
+    // ─── Grapheme Awareness ────────────────────────────────────────────
+    // PM positions are UTF-16 code units; perceived characters can span
+    // multiple. We use Intl.Segmenter to step/delete by grapheme so emoji,
+    // flags, and combining marks behave atomically.
+    private readonly segmenter = new Intl.Segmenter(undefined, {
+        granularity: 'grapheme',
+    })
 
     constructor(options: CanvasEditorOptions)
     {
@@ -540,22 +549,33 @@ export class CanvasEditor
         this.measureCtx.font = this.font
         const targetX = Math.max(0, canvasX - line.x)
 
+        // Search only over grapheme boundaries so we never land mid-grapheme
+        // (avoids splitting surrogate pairs, ZWJ sequences, combining marks).
+        const bounds = this.graphemeBoundaries(line.text)
         let lo = 0
-        let hi = line.text.length
+        let hi = bounds.length - 1
         while (lo < hi)
         {
             const mid = (lo + hi + 1) >> 1
-            const w = this.measureCtx.measureText(line.text.substring(0, mid)).width
+            const w = this.measureCtx.measureText(
+                line.text.substring(0, bounds[mid]),
+            ).width
             if (w <= targetX) lo = mid
             else hi = mid - 1
         }
 
-        let offsetInLine = lo
-        if (lo < line.text.length)
+        let offsetInLine = bounds[lo]
+        if (lo < bounds.length - 1)
         {
-            const wLo = lo === 0 ? 0 : this.measureCtx.measureText(line.text.substring(0, lo)).width
-            const wHi = this.measureCtx.measureText(line.text.substring(0, lo + 1)).width
-            if ((targetX - wLo) > (wHi - targetX)) offsetInLine = lo + 1
+            const wLo = bounds[lo] === 0
+                ? 0
+                : this.measureCtx.measureText(
+                    line.text.substring(0, bounds[lo]),
+                ).width
+            const wHi = this.measureCtx.measureText(
+                line.text.substring(0, bounds[lo + 1]),
+            ).width
+            if ((targetX - wLo) > (wHi - targetX)) offsetInLine = bounds[lo + 1]
         }
 
         let charOffsetInBlock = 0
@@ -656,56 +676,13 @@ export class CanvasEditor
                 case 'deleteContentBackward':
                 case 'deleteWordBackward':
                 case 'deleteByCut':
-                {
-                    const sel = this.state.selection
-                    if (!sel.empty)
-                    {
-                        this.dispatch(this.state.tr.deleteSelection())
-                        break
-                    }
-                    const $from = sel.$from
-                    // At the start of a paragraph that isn't the first block:
-                    // join it into the previous paragraph.
-                    if ($from.parentOffset === 0 && $from.depth === 1)
-                    {
-                        const joinPos = $from.before()
-                        if (joinPos > 0)
-                        {
-                            try
-                            {
-                                this.dispatch(this.state.tr.join(joinPos))
-                            }
-                            catch
-                            {
-                                // Incompatible blocks — silently ignore.
-                            }
-                            break
-                        }
-                    }
-                    if (sel.from > 1)
-                    {
-                        this.dispatch(this.state.tr.delete(sel.from - 1, sel.from))
-                    }
+                    this.deleteBackward()
                     break
-                }
 
                 case 'deleteContentForward':
                 case 'deleteWordForward':
-                {
-                    const sel = this.state.selection
-                    if (sel.empty)
-                    {
-                        if (sel.to < this.state.doc.content.size - 1)
-                        {
-                            this.dispatch(this.state.tr.delete(sel.to, sel.to + 1))
-                        }
-                    }
-                    else
-                    {
-                        this.dispatch(this.state.tr.deleteSelection())
-                    }
+                    this.deleteForward()
                     break
-                }
             }
 
             this.textarea.value = ''
@@ -745,6 +722,17 @@ export class CanvasEditor
                     e.preventDefault()
                     this.splitBlock()
                     break
+                case 'Backspace':
+                    // The textarea is permanently empty (we clear value=''
+                    // after each input event), so the browser fires no input
+                    // event for Backspace. Handle it here directly.
+                    e.preventDefault()
+                    this.deleteBackward()
+                    break
+                case 'Delete':
+                    e.preventDefault()
+                    this.deleteForward()
+                    break
             }
         }, { signal })
 
@@ -779,6 +767,60 @@ export class CanvasEditor
         this.textarea.focus()
     }
 
+    private deleteBackward(): void
+    {
+        const sel = this.state.selection
+        if (!sel.empty)
+        {
+            this.dispatch(this.state.tr.deleteSelection())
+            return
+        }
+        // PM's joinBackward handles "at start of textblock" for any schema
+        // (paragraphs, list items, blockquotes, …). Returns false otherwise.
+        if (joinBackward(this.state, (tr) => this.dispatch(tr))) return
+        const $from = sel.$from
+        if ($from.parent.isTextblock)
+        {
+            const text = $from.parent.textContent
+            const prev = this.prevGraphemeBoundary(text, $from.parentOffset)
+            const delta = $from.parentOffset - prev
+            if (delta > 0)
+            {
+                this.dispatch(this.state.tr.delete(sel.from - delta, sel.from))
+            }
+        }
+        else if (sel.from > 1)
+        {
+            this.dispatch(this.state.tr.delete(sel.from - 1, sel.from))
+        }
+    }
+
+    private deleteForward(): void
+    {
+        const sel = this.state.selection
+        if (!sel.empty)
+        {
+            this.dispatch(this.state.tr.deleteSelection())
+            return
+        }
+        if (joinForward(this.state, (tr) => this.dispatch(tr))) return
+        const $to = sel.$to
+        if ($to.parent.isTextblock)
+        {
+            const text = $to.parent.textContent
+            const next = this.nextGraphemeBoundary(text, $to.parentOffset)
+            const delta = next - $to.parentOffset
+            if (delta > 0)
+            {
+                this.dispatch(this.state.tr.delete(sel.to, sel.to + delta))
+            }
+        }
+        else if (sel.to < this.state.doc.content.size - 1)
+        {
+            this.dispatch(this.state.tr.delete(sel.to, sel.to + 1))
+        }
+    }
+
     private splitBlock(): void
     {
         const sel = this.state.selection
@@ -790,6 +832,63 @@ export class CanvasEditor
             tr = tr.split($from.pos)
             this.dispatch(tr)
         }
+    }
+
+    // ─── Grapheme helpers ──────────────────────────────────────────────
+
+    private nextGraphemeBoundary(text: string, pos: number): number
+    {
+        if (pos >= text.length) return text.length
+        for (const { index } of this.segmenter.segment(text))
+        {
+            if (index > pos) return index
+        }
+        return text.length
+    }
+
+    private prevGraphemeBoundary(text: string, pos: number): number
+    {
+        if (pos <= 0) return 0
+        let prev = 0
+        for (const { index } of this.segmenter.segment(text))
+        {
+            if (index >= pos) return prev
+            prev = index
+        }
+        return prev
+    }
+
+    private graphemeBoundaries(text: string): number[]
+    {
+        const boundaries: number[] = []
+        for (const { index } of this.segmenter.segment(text))
+        {
+            boundaries.push(index)
+        }
+        boundaries.push(text.length)
+        return boundaries
+    }
+
+    /**
+     * Step `direction` graphemes from `pos` within the current textblock.
+     * Falls through to a single-position step when at a block edge so
+     * cross-block navigation still works via TextSelection.near.
+     */
+    private steppedGraphemePos(pos: number, direction: 1 | -1): number
+    {
+        const $pos = this.state.doc.resolve(pos)
+        if (!$pos.parent.isTextblock) return pos + direction
+        const text = $pos.parent.textContent
+        const offset = $pos.parentOffset
+        if (direction > 0)
+        {
+            const next = this.nextGraphemeBoundary(text, offset)
+            if (next > offset) return pos + (next - offset)
+            return pos + 1
+        }
+        const prev = this.prevGraphemeBoundary(text, offset)
+        if (prev < offset) return pos - (offset - prev)
+        return pos - 1
     }
 
     private setHead(newHead: number, extend: boolean, bias: 1 | -1 = 1): void
@@ -813,11 +912,11 @@ export class CanvasEditor
 
     private moveSelection(delta: number, extend: boolean): void
     {
-        this.setHead(
-            this.state.selection.head + delta,
-            extend,
-            delta < 0 ? -1 : 1,
-        )
+        const head = this.state.selection.head
+        const target = (delta === 1 || delta === -1)
+            ? this.steppedGraphemePos(head, delta)
+            : head + delta
+        this.setHead(target, extend, delta < 0 ? -1 : 1)
     }
 
     private moveVertical(direction: 1 | -1, extend: boolean): void

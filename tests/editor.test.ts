@@ -299,6 +299,41 @@ describe('split and join', () =>
         ed.destroy()
     })
 
+    test('Backspace via keydown deletes the previous character', () =>
+    {
+        // The textarea is empty between inputs, so Backspace must be
+        // handled in the keydown path — the browser won't fire an
+        // input event for it.
+        const { ed } = makeEditor(['hello'])
+        ed.dispatch(ed.state.tr.setSelection(
+            TextSelection.near(ed.state.doc.resolve(4)),
+        ))
+        const ta = (ed as any).textarea as HTMLTextAreaElement
+        ta.dispatchEvent(new KeyboardEvent('keydown', {
+            key: 'Backspace',
+            bubbles: true,
+            cancelable: true,
+        }))
+        expect(ed.state.doc.firstChild!.textContent).toBe('helo')
+        ed.destroy()
+    })
+
+    test('Delete via keydown removes the next character', () =>
+    {
+        const { ed } = makeEditor(['hello'])
+        ed.dispatch(ed.state.tr.setSelection(
+            TextSelection.near(ed.state.doc.resolve(3)),
+        ))
+        const ta = (ed as any).textarea as HTMLTextAreaElement
+        ta.dispatchEvent(new KeyboardEvent('keydown', {
+            key: 'Delete',
+            bubbles: true,
+            cancelable: true,
+        }))
+        expect(ed.state.doc.firstChild!.textContent).toBe('helo')
+        ed.destroy()
+    })
+
     test('Backspace at the start of a non-first paragraph joins it backward', () =>
     {
         const { ed } = makeEditor(['hello', 'world'])
@@ -328,6 +363,75 @@ describe('split and join', () =>
             inputType: 'deleteContentBackward',
         } as InputEventInit))
         expect(ed.state.doc.toString()).toBe(before)
+        ed.destroy()
+    })
+})
+
+
+describe('graphemes', () =>
+{
+    // 🇺🇸 = two regional indicator code points (U+1F1FA U+1F1F8).
+    // Each lives in the supplementary plane so each takes 2 UTF-16 code
+    // units → 4 total. The pair renders as a single perceived character.
+    const flag = '\u{1F1FA}\u{1F1F8}'
+
+    test('flag emoji length sanity check', () =>
+    {
+        expect(flag.length).toBe(4)
+    })
+
+    test('ArrowRight steps over a multi-code-unit grapheme', () =>
+    {
+        const { ed } = makeEditor([flag + 'abc'])
+        ed.dispatch(ed.state.tr.setSelection(
+            TextSelection.near(ed.state.doc.resolve(1)),
+        ))
+        ;(ed as any).moveSelection(1, false)
+        // Past the flag (4 code units) → pos 5
+        expect(ed.state.selection.head).toBe(5)
+        ed.destroy()
+    })
+
+    test('ArrowLeft steps back over a multi-code-unit grapheme', () =>
+    {
+        const { ed } = makeEditor(['a' + flag])
+        // Caret right after the flag: 'a' (1) + flag (4) = offset 5,
+        // pmStartPos 1 → pos 6.
+        ed.dispatch(ed.state.tr.setSelection(
+            TextSelection.near(ed.state.doc.resolve(6)),
+        ))
+        ;(ed as any).moveSelection(-1, false)
+        // Should land before the flag, after 'a' → pos 2
+        expect(ed.state.selection.head).toBe(2)
+        ed.destroy()
+    })
+
+    test('Backspace removes a whole multi-code-unit grapheme', () =>
+    {
+        const { ed } = makeEditor(['a' + flag])
+        ed.dispatch(ed.state.tr.setSelection(
+            TextSelection.near(ed.state.doc.resolve(6)),
+        ))
+        const ta = (ed as any).textarea as HTMLTextAreaElement
+        ta.dispatchEvent(new InputEvent('input', {
+            inputType: 'deleteContentBackward',
+        } as InputEventInit))
+        expect(ed.state.doc.firstChild!.textContent).toBe('a')
+        ed.destroy()
+    })
+
+    test('Delete (forward) removes a whole multi-code-unit grapheme', () =>
+    {
+        const { ed } = makeEditor([flag + 'a'])
+        // Caret at start of paragraph content → pos 1
+        ed.dispatch(ed.state.tr.setSelection(
+            TextSelection.near(ed.state.doc.resolve(1)),
+        ))
+        const ta = (ed as any).textarea as HTMLTextAreaElement
+        ta.dispatchEvent(new InputEvent('input', {
+            inputType: 'deleteContentForward',
+        } as InputEventInit))
+        expect(ed.state.doc.firstChild!.textContent).toBe('a')
         ed.destroy()
     })
 })
