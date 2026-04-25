@@ -723,9 +723,6 @@ export class CanvasEditor
                     this.splitBlock()
                     break
                 case 'Backspace':
-                    // The textarea is permanently empty (we clear value=''
-                    // after each input event), so the browser fires no input
-                    // event for Backspace. Handle it here directly.
                     e.preventDefault()
                     this.deleteBackward()
                     break
