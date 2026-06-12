@@ -106,6 +106,7 @@ export class CanvasEditor
     // ─── DOM ───────────────────────────────────────────────────────────
     private readonly container: HTMLElement
     private readonly scroller: HTMLDivElement | null
+    private readonly stack: HTMLDivElement
     private readonly canvas: HTMLCanvasElement
     private readonly textarea: HTMLTextAreaElement
     private readonly measureCtx: CanvasRenderingContext2D
@@ -118,6 +119,10 @@ export class CanvasEditor
 
     // ─── Render ────────────────────────────────────────────────────────
     private pendingRender = false
+    // Set when the caret moves (dispatch) so the next render scrolls it into
+    // view. Renders from plain scrolling or caret blink leave it false, so the
+    // user can freely scroll away from the caret without the view snapping back.
+    private scrollCaretIntoView = false
 
     // ─── Caret ─────────────────────────────────────────────────────────
     private caretVisible = true
@@ -134,6 +139,15 @@ export class CanvasEditor
     // drifts back to its original column when passing through short lines.
     // Reset by any horizontal motion (see dispatch).
     private phantomX: number | null = null
+
+    // ─── Caret Bias (soft-wrap affinity) ───────────────────────────────
+    // A PM position at a soft-wrap boundary is ambiguous: it is both the end
+    // of the upper line and the start of the lower line. caretBias picks which
+    // one the caret renders on. -1 = end of upper line (the default, matching
+    // a click/step that arrives from the left); +1 = start of lower line.
+    // Reset to -1 on every dispatch; re-pinned by click / vertical motion so
+    // the caret lands on the line the user actually moved to.
+    private caretBias: -1 | 1 = -1
 
     // ─── Grapheme Awareness ────────────────────────────────────────────
     // PM positions are UTF-16 code units; perceived characters can span
@@ -162,6 +176,7 @@ export class CanvasEditor
         const stack = document.createElement('div')
         stack.style.position = 'relative'
         stack.style.cursor = 'text'
+        this.stack = stack
 
         this.canvas = document.createElement('canvas')
         this.canvas.style.display = 'block'
@@ -218,9 +233,11 @@ export class CanvasEditor
         this.state = this.state.apply(tr)
         this.lastInputTime = performance.now()
         this.caretVisible = true
-        // Horizontal motion resets the phantom X. moveVertical restores
-        // it after dispatching.
+        this.scrollCaretIntoView = true
+        // Horizontal motion resets the phantom X and caret bias. Click and
+        // moveVertical restore them after dispatching.
         this.phantomX = null
+        this.caretBias = -1
         this.scheduleRender()
     }
 
@@ -327,11 +344,47 @@ export class CanvasEditor
 
     // ─── Painting ──────────────────────────────────────────────────────
 
-    private paintToCanvas(layouts: BlockLayout[], totalHeight: number): void
+    /**
+     * Pin the canvas to the viewport and stretch the stack to the full
+     * document height when virtualizing, so the scroller's scrollbar spans
+     * the whole document while the canvas only ever covers one viewport.
+     * Reverts to in-flow, full-height painting otherwise.
+     */
+    private applyVirtualLayout(virtualized: boolean, totalHeight: number): void
+    {
+        if (virtualized)
+        {
+            if (this.canvas.style.position !== 'sticky')
+            {
+                this.canvas.style.position = 'sticky'
+                this.canvas.style.top = '0'
+            }
+            this.stack.style.height = `${totalHeight}px`
+        }
+        else if (this.canvas.style.position === 'sticky')
+        {
+            this.canvas.style.position = ''
+            this.canvas.style.top = ''
+            this.stack.style.height = ''
+        }
+    }
+
+    private paintToCanvas(
+        layouts: BlockLayout[],
+        totalHeight: number,
+        virtualized: boolean,
+    ): void
     {
         const dpr = window.devicePixelRatio || 1
         const cssWidth = this.containerWidth
-        const cssHeight = totalHeight
+
+        const viewH = virtualized ? this.scroller!.clientHeight : 0
+        const scrollTop = virtualized ? this.scroller!.scrollTop : 0
+        // When the doc is shorter than the viewport there is nothing to
+        // scroll, so the canvas need only cover the content.
+        const cssHeight = virtualized
+            ? Math.min(viewH, totalHeight)
+            : totalHeight
 
         const targetW = Math.round(cssWidth * dpr)
         const targetH = Math.round(cssHeight * dpr)
@@ -345,8 +398,14 @@ export class CanvasEditor
         }
 
         const ctx = this.canvas.getContext('2d')!
-        ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-        ctx.clearRect(0, 0, cssWidth, cssHeight)
+        // Scale for HiDPI, then shift document-space coords up by scrollTop so
+        // only the visible slice lands on the canvas. All downstream painting
+        // (selection, caret) keeps working in document space unchanged.
+        ctx.setTransform(dpr, 0, 0, dpr, 0, -scrollTop * dpr)
+        ctx.clearRect(0, scrollTop, cssWidth, cssHeight)
+
+        const viewTop = scrollTop
+        const viewBottom = scrollTop + cssHeight
 
         const sel = this.state.selection
         if (!sel.empty)
@@ -360,6 +419,17 @@ export class CanvasEditor
 
         for (const block of layouts)
         {
+            // Cull blocks fully outside the viewport — the per-block yOffsets
+            // are the spatial index.
+            if (
+                virtualized
+                && (block.yOffset + block.height < viewTop
+                    || block.yOffset > viewBottom)
+            )
+            {
+                continue
+            }
+
             for (let i = 0; i < block.lines.length; i++)
             {
                 const line = block.lines[i]
@@ -469,8 +539,15 @@ export class CanvasEditor
             const line = block.lines[i]
             const lineLen = line.text.length
             const isLast = i === block.lines.length - 1
+            const lineEnd = consumed + lineLen
 
-            if (offsetInBlock <= consumed + lineLen || isLast)
+            // A position exactly at this line's end boundary normally renders
+            // here, but a +1 bias leans it onto the next line's start instead
+            // (the two are the same PM offset across a soft wrap).
+            const leansToNextLine =
+                offsetInBlock === lineEnd && !isLast && this.caretBias === 1
+
+            if (!leansToNextLine && (offsetInBlock <= lineEnd || isLast))
             {
                 const offsetInLine = Math.max(0, Math.min(lineLen, offsetInBlock - consumed))
                 const w = offsetInLine === 0
@@ -479,7 +556,7 @@ export class CanvasEditor
                 return { x: line.x + w, y: line.y }
             }
 
-            consumed += lineLen
+            consumed = lineEnd
         }
 
         return { x: 0, y: block.yOffset }
@@ -513,7 +590,25 @@ export class CanvasEditor
 
     // ─── Click → Doc Position ──────────────────────────────────────────
 
-    private clickToPos(layouts: BlockLayout[], canvasX: number, canvasY: number): number | null
+    /**
+     * Map a mouse event to document-space canvas coords. When virtualized the
+     * canvas is pinned to the viewport, so its rect is viewport-relative —
+     * adding scrollTop recovers the document Y. scrollTop is 0 otherwise.
+     */
+    private eventToDocCoords(e: MouseEvent): { x: number, y: number }
+    {
+        const rect = this.canvas.getBoundingClientRect()
+        return {
+            x: e.clientX - rect.left,
+            y: e.clientY - rect.top + (this.scroller?.scrollTop ?? 0),
+        }
+    }
+
+    private clickToPos(
+        layouts: BlockLayout[],
+        canvasX: number,
+        canvasY: number,
+    ): { pos: number, bias: -1 | 1 } | null
     {
         if (layouts.length === 0) return null
 
@@ -528,9 +623,23 @@ export class CanvasEditor
         }
         if (!block)
         {
-            block = canvasY < layouts[0].yOffset
-                ? layouts[0]
-                : layouts[layouts.length - 1]
+            // canvasY landed in an inter-block gap (or past either end). Snap
+            // to the vertically nearest block — defaulting to the last block
+            // would teleport the caret to the end of the document whenever a
+            // click or drag crossed the gap between two paragraphs.
+            let bestDist = Infinity
+            for (const b of layouts)
+            {
+                const dist = canvasY < b.yOffset
+                    ? b.yOffset - canvasY
+                    : canvasY - (b.yOffset + b.height)
+                if (dist < bestDist)
+                {
+                    bestDist = dist
+                    block = b
+                }
+            }
+            block = block ?? layouts[layouts.length - 1]
         }
 
         let lineIdx = 0
@@ -544,7 +653,7 @@ export class CanvasEditor
             if (i === block.lines.length - 1) lineIdx = i
         }
         const line = block.lines[lineIdx]
-        if (line.text.length === 0) return block.pmStartPos
+        if (line.text.length === 0) return { pos: block.pmStartPos, bias: -1 }
 
         this.measureCtx.font = this.font
         const targetX = Math.max(0, canvasX - line.x)
@@ -585,7 +694,13 @@ export class CanvasEditor
         }
         charOffsetInBlock = Math.min(block.text.length, charOffsetInBlock + offsetInLine)
 
-        return block.pmStartPos + charOffsetInBlock
+        // When the click lands at the very start of a wrapped line (not the
+        // first line of the block), that offset is shared with the previous
+        // line's end — bias +1 so the caret renders on the line clicked, not
+        // the one above. Every other case keeps the default -1.
+        const bias: -1 | 1 = lineIdx > 0 && offsetInLine === 0 ? 1 : -1
+
+        return { pos: block.pmStartPos + charOffsetInBlock, bias }
     }
 
     // ─── Render Loop ───────────────────────────────────────────────────
@@ -608,16 +723,32 @@ export class CanvasEditor
         const { layouts, totalHeight } = this.computeLayout()
         this.lastLayouts = layouts
 
-        this.paintToCanvas(layouts, totalHeight)
+        // Virtualize only when the scroller has a measurable viewport. In
+        // headless/zero-height environments we fall back to painting the
+        // whole document (the canvas is sized to totalHeight).
+        const virtualized =
+            this.scroller !== null && this.scroller.clientHeight > 0
+        this.applyVirtualLayout(virtualized, totalHeight)
 
         const caretCoords = this.posToCoords(layouts, this.state.selection.head)
+
+        // Adjust the scroll position before painting so the visible slice we
+        // draw already reflects where the caret needs to be — but only when the
+        // caret actually moved. Renders from scrolling or blinking must not
+        // fight the user's scroll position.
+        if (caretCoords && this.scrollCaretIntoView)
+        {
+            this.ensureCaretVisible(caretCoords)
+            this.scrollCaretIntoView = false
+        }
+
+        this.paintToCanvas(layouts, totalHeight, virtualized)
         this.paintCaret(caretCoords)
 
         if (caretCoords)
         {
             this.textarea.style.transform =
                 `translate(${caretCoords.x}px, ${caretCoords.y}px)`
-            this.ensureCaretVisible(caretCoords)
         }
 
         const dt = performance.now() - t0
@@ -737,11 +868,13 @@ export class CanvasEditor
         {
             if (e.button !== 0) return
             e.preventDefault()
-            const rect = this.canvas.getBoundingClientRect()
-            const x = e.clientX - rect.left
-            const y = e.clientY - rect.top
-            const pos = this.clickToPos(this.lastLayouts, x, y)
-            if (pos !== null) this.setHead(pos, e.shiftKey)
+            const { x, y } = this.eventToDocCoords(e)
+            const hit = this.clickToPos(this.lastLayouts, x, y)
+            if (hit !== null)
+            {
+                this.setHead(hit.pos, e.shiftKey)
+                this.caretBias = hit.bias
+            }
             this.dragging = true
             this.textarea.focus()
         }, { signal })
@@ -749,16 +882,24 @@ export class CanvasEditor
         window.addEventListener('mousemove', (e) =>
         {
             if (!this.dragging) return
-            const rect = this.canvas.getBoundingClientRect()
-            const x = e.clientX - rect.left
-            const y = e.clientY - rect.top
-            const pos = this.clickToPos(this.lastLayouts, x, y)
-            if (pos !== null) this.setHead(pos, true)
+            const { x, y } = this.eventToDocCoords(e)
+            const hit = this.clickToPos(this.lastLayouts, x, y)
+            if (hit !== null)
+            {
+                this.setHead(hit.pos, true)
+                this.caretBias = hit.bias
+            }
         }, { signal })
 
         window.addEventListener('mouseup', () =>
         {
             this.dragging = false
+        }, { signal })
+
+        // Repaint the visible slice as the user scrolls (virtualized mode).
+        this.scroller?.addEventListener('scroll', () =>
+        {
+            this.scheduleRender()
         }, { signal })
 
         this.textarea.focus()
@@ -914,6 +1055,36 @@ export class CanvasEditor
             ? this.steppedGraphemePos(head, delta)
             : head + delta
         this.setHead(target, extend, delta < 0 ? -1 : 1)
+        // If the step lands on a soft-wrap boundary, bias the caret in the
+        // direction of travel: rightward shows it at the start of the next
+        // visual line, leftward at the end of the previous one. setHead's
+        // dispatch reset bias to -1, so we only need to override for rightward.
+        if (this.isAtSoftWrapBoundary(this.state.selection.head))
+        {
+            this.caretBias = delta > 0 ? 1 : -1
+        }
+    }
+
+    /**
+     * True when `pos` sits exactly on an internal soft-wrap boundary — the end
+     * of one visual line and the start of the next within the same block
+     * (block starts/ends and hard paragraph breaks don't count).
+     */
+    private isAtSoftWrapBoundary(pos: number): boolean
+    {
+        for (const block of this.lastLayouts)
+        {
+            if (pos < block.pmStartPos || pos > block.pmEndPos) continue
+            const offsetInBlock = pos - block.pmStartPos
+            let consumed = 0
+            for (let i = 0; i < block.lines.length - 1; i++)
+            {
+                consumed += block.lines[i].text.length
+                if (consumed === offsetInBlock) return true
+            }
+            return false
+        }
+        return false
     }
 
     private moveVertical(direction: 1 | -1, extend: boolean): void
@@ -986,16 +1157,19 @@ export class CanvasEditor
         const targetLine = targetBlock.lines[targetLineIdx]
 
         // Re-use clickToPos against the target line's midline — it already
-        // handles empty lines, binary search, and nearest-char snap.
-        const pos = this.clickToPos(
+        // handles empty lines, binary search, and nearest-char snap, and hands
+        // back the bias that keeps the caret on the target line even when the
+        // landing offset sits on a soft-wrap boundary.
+        const hit = this.clickToPos(
             this.lastLayouts,
             targetX,
             targetLine.y + this.lineHeight / 2,
         )
-        if (pos !== null) this.setHead(pos, extend)
+        if (hit !== null) this.setHead(hit.pos, extend)
 
-        // Pin phantom X after dispatch (which clears it).
+        // Pin phantom X and bias after dispatch (which clears them).
         this.phantomX = targetX
+        if (hit !== null) this.caretBias = hit.bias
     }
 
     private moveToBlockBoundary(end: 'start' | 'end', extend: boolean): void

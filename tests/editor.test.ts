@@ -437,6 +437,216 @@ describe('graphemes', () =>
 })
 
 
+describe('scroll virtualization', () =>
+{
+    // Give a scroller a real viewport so the editor switches into its
+    // virtualized paint path (happy-dom reports clientHeight 0 by default).
+    function giveViewport(ed: CanvasEditor, height: number, scrollTop = 0): HTMLElement
+    {
+        const scroller = (ed as any).scroller as HTMLElement
+        Object.defineProperty(scroller, 'clientHeight', {
+            value: height, configurable: true,
+        })
+        Object.defineProperty(scroller, 'scrollTop', {
+            value: scrollTop, writable: true, configurable: true,
+        })
+        return scroller
+    }
+
+    test('viewport present: canvas is pinned and the stack spans the doc', () =>
+    {
+        const { ed } = makeEditor(['a', 'b', 'c', 'd', 'e'], { maxHeight: 100 })
+        giveViewport(ed, 100)
+        ;(ed as any).render()
+        expect((ed as any).canvas.style.position).toBe('sticky')
+        // Spacer height = full document height (single-line mock: 26px lines).
+        expect((ed as any).stack.style.height).not.toBe('')
+        ed.destroy()
+    })
+
+    test('no measurable viewport: canvas stays in normal flow', () =>
+    {
+        // happy-dom leaves clientHeight at 0, so virtualization stays off.
+        const { ed } = makeEditor(['a', 'b'], { maxHeight: 100 })
+        ;(ed as any).render()
+        expect((ed as any).canvas.style.position).not.toBe('sticky')
+        ed.destroy()
+    })
+
+    test('click coords are offset by scrollTop when virtualized', () =>
+    {
+        const { ed } = makeEditor(['a', 'b', 'c'], { maxHeight: 100 })
+        giveViewport(ed, 100, 40)
+        // happy-dom getBoundingClientRect is all zeros, so the only Y shift
+        // is the scrollTop the editor adds back to reach document space.
+        const coords = (ed as any).eventToDocCoords({ clientX: 10, clientY: 5 })
+        expect(coords.x).toBe(10)
+        expect(coords.y).toBe(45)
+        ed.destroy()
+    })
+
+    test('scrolling the scroller schedules a repaint', async () =>
+    {
+        const { ed, stats } = makeEditor(['a', 'b', 'c'], { maxHeight: 100 })
+        const scroller = giveViewport(ed, 100)
+        const before = stats.length
+        scroller.dispatchEvent(new Event('scroll'))
+        await nextFrame()
+        expect(stats.length).toBeGreaterThan(before)
+        ed.destroy()
+    })
+
+    test('clicking in the gap between blocks snaps to the nearest block, not the last', () =>
+    {
+        // Single-line mock: each block is 26px tall, blockGap 20px.
+        // block a: y[0,26], gap [26,46], block b: y[46,72], block c: y[92,118].
+        const { ed } = makeEditor(['aaaa', 'bbbb', 'cccc'])
+        const layouts = (ed as any).lastLayouts
+        // Click 4px into the gap after block a (y=30) → nearest is block a.
+        const inGapNearA = (ed as any).clickToPos(layouts, 0, 30)
+        expect(inGapNearA.pos).toBeGreaterThanOrEqual(layouts[0].pmStartPos)
+        expect(inGapNearA.pos).toBeLessThanOrEqual(layouts[0].pmEndPos)
+        // Click 4px above block b (y=42) → nearest is block b, NOT last block c.
+        const inGapNearB = (ed as any).clickToPos(layouts, 0, 42)
+        expect(inGapNearB.pos).toBeLessThanOrEqual(layouts[1].pmEndPos)
+        ed.destroy()
+    })
+
+    test('blocks outside the viewport are culled from painting', () =>
+    {
+        // 5 single-line paragraphs. lineHeight 26, blockGap 20 →
+        // yOffsets: a=0, b=46, c=92, d=138, e=184.
+        const { ed } = makeEditor(['a', 'b', 'c', 'd', 'e'], { maxHeight: 50 })
+        // Park the caret inside 'c' (pos 7) so ensureCaretVisible doesn't pull
+        // the scroll back to the top before we paint.
+        ed.dispatch(ed.state.tr.setSelection(
+            TextSelection.near(ed.state.doc.resolve(7)),
+        ))
+        giveViewport(ed, 50, 92) // viewport [92, 142) → only c and d intersect
+
+        const drawn: string[] = []
+        const recCtx = {
+            setTransform() {}, clearRect() {}, fillRect() {},
+            fillText(text: string) { drawn.push(text) },
+            measureText(s: string) { return { width: s.length * 8 } },
+            set fillStyle(_v: unknown) {}, set font(_v: unknown) {},
+            set textBaseline(_v: unknown) {},
+        }
+        ;(ed as any).canvas.getContext = () => recCtx
+        ;(ed as any).render()
+
+        expect(drawn).toEqual(['c', 'd'])
+        ed.destroy()
+    })
+})
+
+
+describe('caret bias (soft-wrap affinity)', () =>
+{
+    // The pretext mock collapses every block to one line, so build a synthetic
+    // two-line block to exercise the soft-wrap boundary directly. Lines
+    // "hello" + "world": the PM offset 5 is shared (end of line 0 / start of
+    // line 1).
+    function twoLineBlock()
+    {
+        return {
+            type: 'paragraph', node: {} as any, text: 'helloworld',
+            yOffset: 0, height: 52, pmStartPos: 1, pmEndPos: 11,
+            lines: [
+                { text: 'hello', width: 40, x: 0, y: 0 },
+                { text: 'world', width: 40, x: 0, y: 26 },
+            ],
+        }
+    }
+
+    test('boundary offset renders on the upper line when bias is -1', () =>
+    {
+        const { ed } = makeEditor(['x'])
+        ;(ed as any).caretBias = -1
+        const c = (ed as any).offsetToCoordsInBlock(twoLineBlock(), 5)
+        expect(c.y).toBe(0) // end of line 0
+        ed.destroy()
+    })
+
+    test('boundary offset renders on the lower line when bias is +1', () =>
+    {
+        const { ed } = makeEditor(['x'])
+        ;(ed as any).caretBias = 1
+        const c = (ed as any).offsetToCoordsInBlock(twoLineBlock(), 5)
+        expect(c.y).toBe(26) // start of line 1
+        expect(c.x).toBe(0)
+        ed.destroy()
+    })
+
+    test('clicking the start of a wrapped line returns bias +1', () =>
+    {
+        const { ed } = makeEditor(['x'])
+        const layouts = [twoLineBlock()]
+        // Click at the very start of line 1 (x≈0, y in [26,52]).
+        const hit = (ed as any).clickToPos(layouts, 0, 31)
+        expect(hit.pos).toBe(6) // pmStartPos(1) + offset 5
+        expect(hit.bias).toBe(1)
+        ed.destroy()
+    })
+
+    test('clicking mid-line keeps the default bias -1', () =>
+    {
+        const { ed } = makeEditor(['x'])
+        const layouts = [twoLineBlock()]
+        // Mock measureText: width = len*8, so x=16 → 2 graphemes into line 1.
+        const hit = (ed as any).clickToPos(layouts, 16, 31)
+        expect(hit.pos).toBe(8) // 1 + 5 + 2
+        expect(hit.bias).toBe(-1)
+        ed.destroy()
+    })
+
+    test('dispatch resets bias to -1', () =>
+    {
+        const { ed } = makeEditor(['hello'])
+        ;(ed as any).caretBias = 1
+        ed.dispatch(ed.state.tr.insertText('x', 1))
+        expect((ed as any).caretBias).toBe(-1)
+        ed.destroy()
+    })
+
+    test('isAtSoftWrapBoundary detects an internal wrap, not block edges', () =>
+    {
+        const { ed } = makeEditor(['helloworld'])
+        // Inject a two-line layout for the single paragraph: wrap at offset 5.
+        ;(ed as any).lastLayouts = [twoLineBlock()]
+        expect((ed as any).isAtSoftWrapBoundary(6)).toBe(true)  // boundary (offset 5)
+        expect((ed as any).isAtSoftWrapBoundary(1)).toBe(false) // block start
+        expect((ed as any).isAtSoftWrapBoundary(11)).toBe(false) // block end
+        expect((ed as any).isAtSoftWrapBoundary(8)).toBe(false) // mid line 2
+        ed.destroy()
+    })
+
+    test('stepping right onto a wrap boundary biases the caret to the next line (+1)', () =>
+    {
+        const { ed } = makeEditor(['helloworld'])
+        // Caret just before the boundary (pos 5), then step right onto it.
+        ed.dispatch(ed.state.tr.setSelection(TextSelection.near(ed.state.doc.resolve(5))))
+        ;(ed as any).lastLayouts = [twoLineBlock()] // dispatch's render reset it
+        ;(ed as any).moveSelection(1, false)
+        expect(ed.state.selection.head).toBe(6)
+        expect((ed as any).caretBias).toBe(1)
+        ed.destroy()
+    })
+
+    test('stepping left onto a wrap boundary biases the caret to the previous line (-1)', () =>
+    {
+        const { ed } = makeEditor(['helloworld'])
+        ed.dispatch(ed.state.tr.setSelection(TextSelection.near(ed.state.doc.resolve(7))))
+        ;(ed as any).lastLayouts = [twoLineBlock()]
+        ;(ed as any).caretBias = 1 // pretend we were leaning to the next line
+        ;(ed as any).moveSelection(-1, false) // step left to the boundary (pos 6)
+        expect(ed.state.selection.head).toBe(6)
+        expect((ed as any).caretBias).toBe(-1)
+        ed.destroy()
+    })
+})
+
+
 describe('input handler', () =>
 {
     test('insertText input event inserts a character', () =>
