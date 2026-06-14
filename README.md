@@ -62,7 +62,38 @@ The container element should be an empty block-level element. The editor creates
 | `firstLineColor` | `'#818cf8'` | First-line accent color |
 | `caretColor` | `'#a5b4fc'` | Caret color |
 | `selectionColor` | `'rgba(129, 140, 248, 0.25)'` | Selection highlight color |
+| `markStyles` | bold/italic/code defaults | Maps mark names → `{ fontWeight, fontStyle, fontFamily, color }` |
+| `keymap` | `{}` | ProseMirror key bindings, checked before built-in keys |
 | `onRender` | — | Called after every render with cache + timing stats |
+
+## Marks (bold / italic / code)
+
+Marks live in your ProseMirror schema — the editor just *renders* them (no
+`prosemirror-view`, so mid-line font changes are laid out by hand via Pretext's
+rich-inline and painted per run). `markStyles` maps mark names to styling and is
+schema-agnostic; the defaults cover `strong`, `em`, and `code`.
+
+A starter schema + key bindings are exported for convenience (bring your own if
+you prefer):
+
+```ts
+import { CanvasEditor, markSpecs, buildMarkKeymap } from 'prosemirror-pretext'
+import { toggleMark } from 'prosemirror-commands'
+
+const schema = new Schema({ nodes, marks: markSpecs })
+
+const editor = new CanvasEditor({
+  state: EditorState.create({ doc, schema }),
+  container,
+  keymap: buildMarkKeymap(schema), // Cmd-B / Cmd-I / Cmd-`
+})
+
+// Toolbar buttons run commands directly:
+button.onmousedown = (e) => { e.preventDefault(); editor.command(toggleMark(schema.marks.strong)) }
+```
+
+Typing at a collapsed cursor inherits stored marks, so `Cmd-B` then typing
+produces bold text.
 
 ## Demo
 
@@ -88,8 +119,8 @@ Actively being built. Not yet published to npm.
 - [x] Backspace joins adjacent paragraphs at block start
 - [x] Selection rendering (shift+arrows, shift+click, mouse drag)
 - [x] Scroll container with `ensureCaretVisible`
-- [ ] Scroll virtualization (viewport-sized canvas + spatial index)
-- [ ] Marks (bold, italic, code) — needs mid-line font changes in layout pipeline
+- [x] Scroll virtualization (viewport-sized canvas + spatial index)
+- [x] Marks (bold, italic, code) — per-run fonts via Pretext rich-inline, with toggling keymap
 - [ ] Variable-width layout (text around floated elements)
 
 ## Architecture

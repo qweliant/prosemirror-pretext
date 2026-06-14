@@ -1,12 +1,20 @@
-import { type Node as PMNode } from 'prosemirror-model'
-import { EditorState, TextSelection, type Transaction } from 'prosemirror-state'
+import { type Mark, type Node as PMNode } from 'prosemirror-model'
+import {
+    EditorState, TextSelection, type Command, type Transaction,
+} from 'prosemirror-state'
 import { joinBackward, joinForward } from 'prosemirror-commands'
+import { keydownHandler } from 'prosemirror-keymap'
 import {
     prepareWithSegments,
     layoutWithLines,
-    type LayoutLine,
     type PreparedTextWithSegments,
 } from '@chenglou/pretext'
+import {
+    prepareRichInline,
+    walkRichInlineLineRanges,
+    materializeRichInlineLineRange,
+    type RichInlineItem,
+} from '@chenglou/pretext/rich-inline'
 
 
 // ─── Public Types ──────────────────────────────────────────────────────────
@@ -35,8 +43,41 @@ export interface CanvasEditorOptions
     selectionColor?: string
     /** If set, the content area scrolls when it exceeds this height in px. */
     maxHeight?: number
+    /**
+     * Maps ProseMirror mark names to text styling. Keeps the renderer
+     * schema-agnostic: the consumer names their marks, we map names → font
+     * weight/style/family + color. Merged over the built-in defaults for
+     * `strong` (bold), `em` (italic), and `code` (monospace + green). Pass
+     * `{ strong: null }` to disable a default.
+     */
+    markStyles?: Record<string, MarkStyle | null>
+    /**
+     * ProseMirror key bindings, e.g. `{ 'Mod-b': toggleMark(schema.marks.strong) }`.
+     * Checked on keydown before the editor's built-in navigation/editing keys.
+     * Use `buildMarkKeymap(schema)` for sensible bold/italic/code defaults.
+     */
+    keymap?: Record<string, Command>
     /** Called after every render with timing/cache stats. */
     onRender?: (stats: RenderStats) => void
+}
+
+/** Styling applied to text carrying a given ProseMirror mark. */
+export interface MarkStyle
+{
+    /** CSS font-weight, e.g. 'bold' or 700. */
+    fontWeight?: string | number
+    /** CSS font-style. */
+    fontStyle?: 'normal' | 'italic' | 'oblique'
+    /** CSS font-family override, e.g. 'monospace' for code. */
+    fontFamily?: string
+    /** Fill color override. When omitted the run uses the editor's line color. */
+    color?: string
+}
+
+const DEFAULT_MARK_STYLES: Record<string, MarkStyle> = {
+    strong: { fontWeight: 700 },
+    em: { fontStyle: 'italic' },
+    code: { fontFamily: 'monospace', color: '#9ece6a' },
 }
 
 export interface RenderStats
@@ -48,12 +89,34 @@ export interface RenderStats
     renderTimeMs: number
 }
 
+/**
+ * A styled run within a line. Present only on lines that carry marks; plain
+ * lines leave `LineLayout.fragments` undefined and use the single-font path.
+ */
+export interface LineFragment
+{
+    text: string
+    /** CSS font string for this run. */
+    font: string
+    /** Fill color, or null to use the editor's default line color. */
+    color: string | null
+    /** Left offset relative to the line's `x`. */
+    x: number
+    width: number
+    /** Char offset within the block where this run's first character sits. */
+    pmStart: number
+}
+
 export interface LineLayout
 {
     text: string
     width: number
     x: number
     y: number
+    /** Char offset within the block where this line's content begins. */
+    pmStart: number
+    /** Styled runs, when the line carries marks. Undefined for plain text. */
+    fragments?: LineFragment[]
 }
 
 export interface BlockLayout
@@ -71,12 +134,30 @@ export interface BlockLayout
 
 // ─── Internal Types ────────────────────────────────────────────────────────
 
+interface CachedFragment
+{
+    text: string
+    font: string
+    color: string | null
+    x: number
+    width: number
+    pmStart: number
+}
+
+interface CachedLine
+{
+    text: string
+    width: number
+    pmStart: number
+    fragments?: CachedFragment[]
+}
+
 interface CachedBlock
 {
     prepared: PreparedTextWithSegments | null
     width: number
     lineHeight: number
-    lines: LayoutLine[]
+    lines: CachedLine[]
     height: number
 }
 
@@ -100,6 +181,15 @@ export class CanvasEditor
     private readonly caretHoldMs = 500
     private readonly onRender?: (stats: RenderStats) => void
 
+    // ─── Marks ─────────────────────────────────────────────────────────
+    private readonly markStyles: Record<string, MarkStyle>
+    // Compiled key bindings (prosemirror-keymap); consulted before built-ins.
+    private readonly keymapHandler: (event: KeyboardEvent) => boolean
+    // Base font split into size + family so marked runs can compose new font
+    // strings (weight/style/family) on top of the editor's base size.
+    private readonly baseFontSize: number
+    private readonly baseFontFamily: string
+
     // ─── State ─────────────────────────────────────────────────────────
     state: EditorState
 
@@ -112,7 +202,10 @@ export class CanvasEditor
     private readonly measureCtx: CanvasRenderingContext2D
 
     // ─── Layout ────────────────────────────────────────────────────────
-    private readonly layoutCache = new WeakMap<PMNode, CachedBlock>()
+    // Not readonly: replaced wholesale to invalidate when web fonts load
+    // (WeakMap has no clear()). Marked-block geometry is measured at layout
+    // time, so it must be recomputed once the real font is available.
+    private layoutCache = new WeakMap<PMNode, CachedBlock>()
     private lastLayouts: BlockLayout[] = []
     private cacheHits = 0
     private cacheMisses = 0
@@ -156,6 +249,10 @@ export class CanvasEditor
     private readonly segmenter = new Intl.Segmenter(undefined, {
         granularity: 'grapheme',
     })
+    // Word boundaries for double-click selection.
+    private readonly wordSegmenter = new Intl.Segmenter(undefined, {
+        granularity: 'word',
+    })
 
     constructor(options: CanvasEditorOptions)
     {
@@ -171,6 +268,26 @@ export class CanvasEditor
         this.selectionColor = options.selectionColor ?? 'rgba(129, 140, 248, 0.25)'
         this.maxHeight = options.maxHeight ?? null
         this.onRender = options.onRender
+
+        // Merge caller mark styles over the defaults; an explicit null disables
+        // a default mark.
+        this.markStyles = { ...DEFAULT_MARK_STYLES }
+        for (const [name, style] of Object.entries(options.markStyles ?? {}))
+        {
+            if (style === null) delete this.markStyles[name]
+            else this.markStyles[name] = style
+        }
+
+        // Split the base font into size + family for composing marked runs.
+        const fontMatch = this.font.match(/(\d+(?:\.\d+)?)px\s+(.+)$/)
+        this.baseFontSize = fontMatch ? parseFloat(fontMatch[1]) : 16
+        this.baseFontFamily = fontMatch ? fontMatch[2].trim() : 'sans-serif'
+
+        // keydownHandler is typed against prosemirror-view's EditorView, but
+        // only touches state/dispatch — feed it our minimal shim.
+        const compiled = keydownHandler(options.keymap ?? {})
+        this.keymapHandler = (event) =>
+            compiled(this.commandView() as never, event)
 
         // Build DOM
         const stack = document.createElement('div')
@@ -241,6 +358,24 @@ export class CanvasEditor
         this.scheduleRender()
     }
 
+    /**
+     * Run a ProseMirror command against the current state (e.g. `toggleMark`).
+     * Returns whether the command applied. Handy for wiring toolbar buttons:
+     * `editor.command(toggleMark(schema.marks.strong))`.
+     */
+    command(cmd: Command): boolean
+    {
+        const handled = cmd(this.state, (tr) => this.dispatch(tr))
+        this.textarea.focus()
+        return handled
+    }
+
+    /** Minimal view shim so ProseMirror commands/keymaps can dispatch. */
+    private commandView(): { state: EditorState, dispatch: (tr: Transaction) => void }
+    {
+        return { state: this.state, dispatch: (tr) => this.dispatch(tr) }
+    }
+
     focus(): void
     {
         this.textarea.focus()
@@ -258,6 +393,186 @@ export class CanvasEditor
     }
 
     // ─── Layout (cache-aware) ──────────────────────────────────────────
+
+    /** Lay out one block, choosing the single-font fast path or the marked path. */
+    private layoutBlock(node: PMNode): CachedBlock
+    {
+        const text = node.textContent
+        if (text.length === 0)
+        {
+            return {
+                prepared: null,
+                width: this.containerWidth,
+                lineHeight: this.lineHeight,
+                lines: [],
+                height: 0,
+            }
+        }
+
+        if (this.blockHasMarks(node))
+        {
+            return this.layoutMarkedBlock(node)
+        }
+
+        // Fast path: a single font for the whole block.
+        const prepared = prepareWithSegments(text, this.font)
+        const { lines, height } = layoutWithLines(
+            prepared, this.containerWidth, this.lineHeight,
+        )
+        let acc = 0
+        const cachedLines: CachedLine[] = lines.map((l) =>
+        {
+            const cl = { text: l.text, width: l.width, pmStart: acc }
+            acc += l.text.length
+            return cl
+        })
+        return {
+            prepared,
+            width: this.containerWidth,
+            lineHeight: this.lineHeight,
+            lines: cachedLines,
+            height,
+        }
+    }
+
+    private blockHasMarks(node: PMNode): boolean
+    {
+        let has = false
+        node.forEach((child) =>
+        {
+            if (child.marks.length > 0) has = true
+        })
+        return has
+    }
+
+    /**
+     * Resolve a run's marks to a CSS font string + fill color, composing
+     * weight/style/family over the base font size. Color is null when no mark
+     * overrides it (so the caller can fall back to the line color / accent).
+     */
+    private resolveRunStyle(marks: readonly Mark[]): { font: string, color: string | null }
+    {
+        let fontStyle = ''
+        let fontWeight = ''
+        let family = this.baseFontFamily
+        let color: string | null = null
+
+        for (const mark of marks)
+        {
+            const ms = this.markStyles[mark.type.name]
+            if (!ms) continue
+            if (ms.fontStyle) fontStyle = ms.fontStyle
+            if (ms.fontWeight !== undefined) fontWeight = String(ms.fontWeight)
+            if (ms.fontFamily) family = ms.fontFamily
+            if (ms.color) color = ms.color
+        }
+
+        const font = `${fontStyle} ${fontWeight} ${this.baseFontSize}px ${family}`
+            .replace(/\s+/g, ' ')
+            .trim()
+        return { font, color }
+    }
+
+    /**
+     * Lay out a block whose inline content carries marks. Adjacent runs that
+     * resolve to the same style are merged into one Pretext rich-inline item;
+     * we track each item's PM start so fragment text can be mapped back to
+     * document offsets later (Pretext trims boundary whitespace into gaps, so
+     * mapping is item-relative, not a flat character count).
+     */
+    private layoutMarkedBlock(node: PMNode): CachedBlock
+    {
+        const items: RichInlineItem[] = []
+        // Per item: PM offset (within block) of its first char, the leading
+        // whitespace Pretext will trim, and the run's resolved color.
+        const meta: { pmStart: number, leadTrim: number, font: string, color: string | null }[] = []
+
+        let offset = 0
+        let cur: { font: string, color: string | null, text: string, pmStart: number } | null = null
+        const flush = () =>
+        {
+            if (!cur) return
+            const leadTrim = cur.text.length - cur.text.trimStart().length
+            items.push({ text: cur.text, font: cur.font })
+            meta.push({ pmStart: cur.pmStart, leadTrim, font: cur.font, color: cur.color })
+            cur = null
+        }
+
+        node.forEach((child) =>
+        {
+            const childText = child.isText ? (child.text ?? '') : ''
+            const { font, color } = this.resolveRunStyle(child.marks)
+            if (cur && cur.font === font && cur.color === color)
+            {
+                cur.text += childText
+            }
+            else
+            {
+                flush()
+                cur = { font, color, text: childText, pmStart: offset }
+            }
+            offset += child.nodeSize
+        })
+        flush()
+
+        const prepared = prepareRichInline(items)
+        const consumed = new Array(items.length).fill(0)
+        const lines: CachedLine[] = []
+        let prevLineEnd = 0
+
+        // Pretext decides which runs land on which line; we measure geometry
+        // ourselves with the paint context so fragment widths match what
+        // fillText draws (Pretext's occupiedWidth is a narrower fit advance)
+        // and stay consistent with measureText-based caret/click hit-testing.
+        walkRichInlineLineRanges(prepared, this.containerWidth, (range) =>
+        {
+            const mat = materializeRichInlineLineRange(prepared, range)
+            const fragments: CachedFragment[] = []
+            let x = 0
+            let lineText = ''
+            let prevPmEnd = -1
+            for (const f of mat.fragments)
+            {
+                const m = meta[f.itemIndex]
+                const pmStart = m.pmStart + m.leadTrim + consumed[f.itemIndex]
+                consumed[f.itemIndex] += f.text.length
+
+                // A jump in PM offset means Pretext collapsed boundary
+                // whitespace between the runs — paint one space to fill it
+                // (never at the line start).
+                if (fragments.length > 0 && pmStart > prevPmEnd)
+                {
+                    this.measureCtx.font = fragments[fragments.length - 1].font
+                    x += this.measureCtx.measureText(' ').width
+                }
+
+                this.measureCtx.font = m.font
+                const width = this.measureCtx.measureText(f.text).width
+                fragments.push({ text: f.text, font: m.font, color: m.color, x, width, pmStart })
+                x += width
+                lineText += f.text
+                prevPmEnd = pmStart + f.text.length
+            }
+            // Line 0 owns the block start (offset 0); each later line begins at
+            // its first fragment, so the whitespace collapsed at a wrap belongs
+            // to the line before it. This tiles [0, blockLen) with no gaps.
+            const linePmStart = lines.length === 0
+                ? 0
+                : (fragments.length > 0 ? fragments[0].pmStart : prevLineEnd)
+            prevLineEnd = fragments.length > 0
+                ? fragments[fragments.length - 1].pmStart + fragments[fragments.length - 1].text.length
+                : prevLineEnd
+            lines.push({ text: lineText, width: x, pmStart: linePmStart, fragments })
+        })
+
+        return {
+            prepared: null,
+            width: this.containerWidth,
+            lineHeight: this.lineHeight,
+            lines,
+            height: lines.length * this.lineHeight,
+        }
+    }
 
     private computeLayout(): { layouts: BlockLayout[], totalHeight: number }
     {
@@ -277,31 +592,7 @@ export class CanvasEditor
                 || cached.lineHeight !== this.lineHeight
             )
             {
-                const text = node.textContent
-                if (text.length === 0)
-                {
-                    cached = {
-                        prepared: null,
-                        width: this.containerWidth,
-                        lineHeight: this.lineHeight,
-                        lines: [],
-                        height: 0,
-                    }
-                }
-                else
-                {
-                    const prepared = prepareWithSegments(text, this.font)
-                    const { lines, height } = layoutWithLines(
-                        prepared, this.containerWidth, this.lineHeight,
-                    )
-                    cached = {
-                        prepared,
-                        width: this.containerWidth,
-                        lineHeight: this.lineHeight,
-                        lines,
-                        height,
-                    }
-                }
+                cached = this.layoutBlock(node)
                 this.layoutCache.set(node, cached)
                 this.cacheMisses++
             }
@@ -315,11 +606,13 @@ export class CanvasEditor
                 width: line.width,
                 x: 0,
                 y: cursorY + i * this.lineHeight,
+                pmStart: line.pmStart,
+                fragments: line.fragments,
             }))
 
             if (positioned.length === 0)
             {
-                positioned.push({ text: '', width: 0, x: 0, y: cursorY })
+                positioned.push({ text: '', width: 0, x: 0, y: cursorY, pmStart: 0 })
             }
 
             const blockHeight = positioned.length * this.lineHeight
@@ -433,8 +726,26 @@ export class CanvasEditor
             for (let i = 0; i < block.lines.length; i++)
             {
                 const line = block.lines[i]
-                ctx.fillStyle = i === 0 ? this.firstLineColor : this.textColor
-                ctx.fillText(line.text, line.x, line.y)
+                const lineColor = i === 0 ? this.firstLineColor : this.textColor
+
+                if (line.fragments)
+                {
+                    // Marked line: paint each run with its own font/color. A
+                    // null fragment color falls back to the line color so plain
+                    // runs keep the first-line accent.
+                    for (const frag of line.fragments)
+                    {
+                        ctx.font = frag.font
+                        ctx.fillStyle = frag.color ?? lineColor
+                        ctx.fillText(frag.text, line.x + frag.x, line.y)
+                    }
+                    ctx.font = this.font
+                }
+                else
+                {
+                    ctx.fillStyle = lineColor
+                    ctx.fillText(line.text, line.x, line.y)
+                }
             }
         }
     }
@@ -464,40 +775,25 @@ export class CanvasEditor
                 continue
             }
 
-            let consumed = 0
             for (let li = 0; li < block.lines.length; li++)
             {
                 const line = block.lines[li]
-                const lineStart = block.pmStartPos + consumed
-                const lineEnd = lineStart + line.text.length
-                consumed += line.text.length
+                const isLast = li === block.lines.length - 1
+                const lineStart = block.pmStartPos + line.pmStart
+                const lineEnd = block.pmStartPos
+                    + (isLast ? block.text.length : block.lines[li + 1].pmStart)
 
                 if (lineEnd < from) continue
                 if (lineStart > to) break
 
-                const selStartInLine = Math.max(0, from - lineStart)
-                const selEndInLine = Math.min(line.text.length, to - lineStart)
+                const a = Math.max(from, lineStart)
+                const x1 = this.xForOffsetInLine(line, a - block.pmStartPos)
 
-                const x1 = selStartInLine === 0
-                    ? line.x
-                    : line.x + this.measureCtx.measureText(
-                        line.text.substring(0, selStartInLine),
-                    ).width
-
-                let x2: number
-                if (to > lineEnd)
-                {
-                    // Selection continues past this line — trail to container edge.
-                    x2 = line.x + this.containerWidth
-                }
-                else
-                {
-                    x2 = selEndInLine === 0
-                        ? line.x
-                        : line.x + this.measureCtx.measureText(
-                            line.text.substring(0, selEndInLine),
-                        ).width
-                }
+                // Selection continuing past this line trails to the container
+                // edge; otherwise stop at the selection end on this line.
+                const x2 = to > lineEnd
+                    ? line.x + this.containerWidth
+                    : this.xForOffsetInLine(line, Math.min(to, lineEnd) - block.pmStartPos)
 
                 if (x2 > x1)
                 {
@@ -531,15 +827,12 @@ export class CanvasEditor
         offsetInBlock: number,
     ): { x: number, y: number }
     {
-        this.measureCtx.font = this.font
-
-        let consumed = 0
-        for (let i = 0; i < block.lines.length; i++)
+        const lines = block.lines
+        for (let i = 0; i < lines.length; i++)
         {
-            const line = block.lines[i]
-            const lineLen = line.text.length
-            const isLast = i === block.lines.length - 1
-            const lineEnd = consumed + lineLen
+            const line = lines[i]
+            const isLast = i === lines.length - 1
+            const lineEnd = isLast ? block.text.length : lines[i + 1].pmStart
 
             // A position exactly at this line's end boundary normally renders
             // here, but a +1 bias leans it onto the next line's start instead
@@ -549,17 +842,43 @@ export class CanvasEditor
 
             if (!leansToNextLine && (offsetInBlock <= lineEnd || isLast))
             {
-                const offsetInLine = Math.max(0, Math.min(lineLen, offsetInBlock - consumed))
-                const w = offsetInLine === 0
-                    ? 0
-                    : this.measureCtx.measureText(line.text.substring(0, offsetInLine)).width
-                return { x: line.x + w, y: line.y }
+                return { x: this.xForOffsetInLine(line, offsetInBlock), y: line.y }
             }
-
-            consumed = lineEnd
         }
 
         return { x: 0, y: block.yOffset }
+    }
+
+    /**
+     * Absolute x of a PM offset (within the block) on a given line. Dispatches
+     * to the line's styled fragments (each measured in its own font) or, for a
+     * plain line, a single measureText over the line text.
+     */
+    private xForOffsetInLine(line: LineLayout, offsetInBlock: number): number
+    {
+        if (line.fragments)
+        {
+            for (const f of line.fragments)
+            {
+                const fEnd = f.pmStart + f.text.length
+                if (offsetInBlock <= f.pmStart) return line.x + f.x
+                if (offsetInBlock <= fEnd)
+                {
+                    this.measureCtx.font = f.font
+                    const w = this.measureCtx.measureText(
+                        f.text.substring(0, offsetInBlock - f.pmStart),
+                    ).width
+                    return line.x + f.x + w
+                }
+            }
+            const last = line.fragments[line.fragments.length - 1]
+            return last ? line.x + last.x + last.width : line.x
+        }
+
+        const offsetInLine = Math.max(0, Math.min(line.text.length, offsetInBlock - line.pmStart))
+        if (offsetInLine === 0) return line.x
+        this.measureCtx.font = this.font
+        return line.x + this.measureCtx.measureText(line.text.substring(0, offsetInLine)).width
     }
 
     private ensureCaretVisible(coords: { x: number, y: number }): void
@@ -655,52 +974,89 @@ export class CanvasEditor
         const line = block.lines[lineIdx]
         if (line.text.length === 0) return { pos: block.pmStartPos, bias: -1 }
 
-        this.measureCtx.font = this.font
         const targetX = Math.max(0, canvasX - line.x)
-
-        // Search only over grapheme boundaries so we never land mid-grapheme
-        // (avoids splitting surrogate pairs, ZWJ sequences, combining marks).
-        const bounds = this.graphemeBoundaries(line.text)
-        let lo = 0
-        let hi = bounds.length - 1
-        while (lo < hi)
-        {
-            const mid = (lo + hi + 1) >> 1
-            const w = this.measureCtx.measureText(
-                line.text.substring(0, bounds[mid]),
-            ).width
-            if (w <= targetX) lo = mid
-            else hi = mid - 1
-        }
-
-        let offsetInLine = bounds[lo]
-        if (lo < bounds.length - 1)
-        {
-            const wLo = bounds[lo] === 0
-                ? 0
-                : this.measureCtx.measureText(
-                    line.text.substring(0, bounds[lo]),
-                ).width
-            const wHi = this.measureCtx.measureText(
-                line.text.substring(0, bounds[lo + 1]),
-            ).width
-            if ((targetX - wLo) > (wHi - targetX)) offsetInLine = bounds[lo + 1]
-        }
-
-        let charOffsetInBlock = 0
-        for (let i = 0; i < lineIdx; i++)
-        {
-            charOffsetInBlock += block.lines[i].text.length
-        }
-        charOffsetInBlock = Math.min(block.text.length, charOffsetInBlock + offsetInLine)
+        const offsetInBlock = Math.min(block.text.length, this.hitTestX(line, targetX))
 
         // When the click lands at the very start of a wrapped line (not the
         // first line of the block), that offset is shared with the previous
         // line's end — bias +1 so the caret renders on the line clicked, not
         // the one above. Every other case keeps the default -1.
-        const bias: -1 | 1 = lineIdx > 0 && offsetInLine === 0 ? 1 : -1
+        const bias: -1 | 1 = lineIdx > 0 && offsetInBlock === line.pmStart ? 1 : -1
 
-        return { pos: block.pmStartPos + charOffsetInBlock, bias }
+        return { pos: block.pmStartPos + offsetInBlock, bias }
+    }
+
+    /**
+     * The PM offset (within the block) nearest to a horizontal position on a
+     * line. Snaps to grapheme boundaries. For styled lines it finds the
+     * fragment under `targetX` (or the nearest one across a gap) and hit-tests
+     * within it using that run's font.
+     */
+    private hitTestX(line: LineLayout, targetX: number): number
+    {
+        if (line.fragments)
+        {
+            const frags = line.fragments
+            if (frags.length === 0) return line.pmStart
+            if (targetX <= frags[0].x)
+            {
+                return frags[0].pmStart + this.hitTestInText(frags[0].text, frags[0].font, targetX - frags[0].x)
+            }
+            for (let i = 0; i < frags.length; i++)
+            {
+                const f = frags[i]
+                const right = f.x + f.width
+                if (targetX <= right)
+                {
+                    if (targetX < f.x)
+                    {
+                        // In the collapsed-whitespace gap between two runs —
+                        // snap to whichever boundary is nearer.
+                        const prev = frags[i - 1]
+                        const mid = (prev.x + prev.width + f.x) / 2
+                        return targetX < mid
+                            ? prev.pmStart + prev.text.length
+                            : f.pmStart
+                    }
+                    return f.pmStart + this.hitTestInText(f.text, f.font, targetX - f.x)
+                }
+            }
+            const last = frags[frags.length - 1]
+            return last.pmStart + last.text.length
+        }
+
+        return line.pmStart + this.hitTestInText(line.text, this.font, targetX)
+    }
+
+    /**
+     * Binary-search grapheme boundaries of `text` (rendered in `font`) for the
+     * boundary nearest `targetX`, returning a UTF-16 offset into `text`. Never
+     * splits a surrogate pair, ZWJ sequence, or combining mark.
+     */
+    private hitTestInText(text: string, font: string, targetX: number): number
+    {
+        this.measureCtx.font = font
+        const bounds = this.graphemeBoundaries(text)
+        let lo = 0
+        let hi = bounds.length - 1
+        while (lo < hi)
+        {
+            const mid = (lo + hi + 1) >> 1
+            const w = this.measureCtx.measureText(text.substring(0, bounds[mid])).width
+            if (w <= targetX) lo = mid
+            else hi = mid - 1
+        }
+
+        let offset = bounds[lo]
+        if (lo < bounds.length - 1)
+        {
+            const wLo = bounds[lo] === 0
+                ? 0
+                : this.measureCtx.measureText(text.substring(0, bounds[lo])).width
+            const wHi = this.measureCtx.measureText(text.substring(0, bounds[lo + 1])).width
+            if ((targetX - wLo) > (wHi - targetX)) offset = bounds[lo + 1]
+        }
+        return offset
     }
 
     // ─── Render Loop ───────────────────────────────────────────────────
@@ -770,6 +1126,21 @@ export class CanvasEditor
         this.abortController = ac
         const signal = ac.signal
 
+        // Web fonts often finish loading after construction (document.fonts.ready
+        // can resolve before a font is even requested). Cached marked-block
+        // geometry is measured at layout time, so drop the cache and repaint
+        // when fonts settle — otherwise marked runs keep fallback-font metrics.
+        if (typeof document !== 'undefined' && document.fonts)
+        {
+            const onFontsLoaded = () =>
+            {
+                this.layoutCache = new WeakMap()
+                this.scheduleRender()
+            }
+            document.fonts.ready.then(onFontsLoaded)
+            document.fonts.addEventListener('loadingdone', onFontsLoaded, { signal })
+        }
+
         this.textarea.addEventListener('compositionstart', () =>
         {
             this.composing = true
@@ -822,6 +1193,14 @@ export class CanvasEditor
         this.textarea.addEventListener('keydown', (e) =>
         {
             if (this.composing || e.isComposing) return
+
+            // Consumer key bindings (mark toggles, etc.) take precedence over
+            // the built-in navigation/editing keys below.
+            if (this.keymapHandler(e))
+            {
+                e.preventDefault()
+                return
+            }
 
             switch (e.key)
             {
@@ -894,6 +1273,44 @@ export class CanvasEditor
         window.addEventListener('mouseup', () =>
         {
             this.dragging = false
+        }, { signal })
+
+        this.canvas.addEventListener('dblclick', (e) =>
+        {
+            if (e.button !== 0) return
+            e.preventDefault()
+            this.dragging = false
+            const { x, y } = this.eventToDocCoords(e)
+            const hit = this.clickToPos(this.lastLayouts, x, y)
+            if (hit === null) return
+            const word = this.wordRangeAt(hit.pos)
+            if (word)
+            {
+                const $a = this.state.doc.resolve(word.from)
+                const $b = this.state.doc.resolve(word.to)
+                this.dispatch(this.state.tr.setSelection(TextSelection.between($a, $b)))
+            }
+            this.textarea.focus()
+        }, { signal })
+
+        // The canvas selection lives in ProseMirror, not the DOM, so the
+        // browser would copy the (empty) textarea. Serialize the selection
+        // ourselves. Cut additionally deletes the range.
+        this.textarea.addEventListener('copy', (e) =>
+        {
+            const text = this.selectionText()
+            if (text === null) return
+            e.preventDefault()
+            e.clipboardData?.setData('text/plain', text)
+        }, { signal })
+
+        this.textarea.addEventListener('cut', (e) =>
+        {
+            const text = this.selectionText()
+            if (text === null) return
+            e.preventDefault()
+            e.clipboardData?.setData('text/plain', text)
+            this.dispatch(this.state.tr.deleteSelection())
         }, { signal })
 
         // Repaint the visible slice as the user scrolls (virtualized mode).
@@ -970,6 +1387,48 @@ export class CanvasEditor
             tr = tr.split($from.pos)
             this.dispatch(tr)
         }
+    }
+
+    // ─── Selection helpers ─────────────────────────────────────────────
+
+    /** Plain text of the current selection, or null when it's empty. */
+    private selectionText(): string | null
+    {
+        const sel = this.state.selection
+        if (sel.empty) return null
+        return this.state.doc.textBetween(sel.from, sel.to, '\n')
+    }
+
+    /**
+     * The document range of the word at a doc position, for double-click
+     * selection. Returns the Intl word segment under the cursor (or the last
+     * segment when the position sits at the block's end). Null if not in a
+     * non-empty text block.
+     */
+    private wordRangeAt(pos: number): { from: number, to: number } | null
+    {
+        let block: BlockLayout | null = null
+        for (const b of this.lastLayouts)
+        {
+            if (pos >= b.pmStartPos && pos <= b.pmEndPos) { block = b; break }
+        }
+        if (!block || block.text.length === 0) return null
+
+        const offset = pos - block.pmStartPos
+        let last: { start: number, end: number } | null = null
+        for (const seg of this.wordSegmenter.segment(block.text))
+        {
+            const start = seg.index
+            const end = start + seg.segment.length
+            if (offset >= start && offset < end)
+            {
+                return { from: block.pmStartPos + start, to: block.pmStartPos + end }
+            }
+            last = { start, end }
+        }
+        // Position at the very end of the block — select the last segment.
+        if (last) return { from: block.pmStartPos + last.start, to: block.pmStartPos + last.end }
+        return null
     }
 
     // ─── Grapheme helpers ──────────────────────────────────────────────
@@ -1076,11 +1535,11 @@ export class CanvasEditor
         {
             if (pos < block.pmStartPos || pos > block.pmEndPos) continue
             const offsetInBlock = pos - block.pmStartPos
-            let consumed = 0
-            for (let i = 0; i < block.lines.length - 1; i++)
+            // Every line after the first begins at an internal soft-wrap
+            // boundary (the block start at offset 0 doesn't count).
+            for (let i = 1; i < block.lines.length; i++)
             {
-                consumed += block.lines[i].text.length
-                if (consumed === offsetInBlock) return true
+                if (block.lines[i].pmStart === offsetInBlock) return true
             }
             return false
         }

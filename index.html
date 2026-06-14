@@ -87,6 +87,40 @@
             padding: 40px;
         }
 
+        .toolbar {
+            display: flex;
+            gap: 6px;
+            margin-bottom: 20px;
+        }
+
+        .toolbar .tb {
+            min-width: 32px;
+            height: 28px;
+            padding: 0 8px;
+            border: 1px solid #2a2a2f;
+            border-radius: 6px;
+            background: #1c1c20;
+            color: #a0a0a8;
+            font-family: 'Inter', sans-serif;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .toolbar .tb:nth-child(2) { font-style: italic; }
+        .toolbar .tb:nth-child(3) { font-family: monospace; }
+
+        .toolbar .tb:hover {
+            border-color: #3a3a42;
+            color: #d4d4d8;
+        }
+
+        .toolbar .tb.active {
+            background: rgba(129, 140, 248, 0.15);
+            border-color: #818cf8;
+            color: #a5b4fc;
+        }
+
         .status-bar {
             display: flex;
             align-items: center;
@@ -120,6 +154,7 @@
             <div style="width: 48px;"></div>
         </div>
         <div class="canvas-wrap">
+            <div id="toolbar" class="toolbar"></div>
             <div id="editor-container"></div>
         </div>
         <div class="status-bar">

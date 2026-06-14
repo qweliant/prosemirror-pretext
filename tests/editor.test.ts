@@ -1,7 +1,9 @@
 import { describe, test, expect } from 'bun:test'
-import { Schema, type NodeSpec } from 'prosemirror-model'
+import { Schema, type NodeSpec, type MarkSpec } from 'prosemirror-model'
 import { EditorState, TextSelection } from 'prosemirror-state'
+import { toggleMark } from 'prosemirror-commands'
 import { CanvasEditor, type RenderStats } from '../src/editor'
+import { markSpecs, buildMarkKeymap } from '../src/marks'
 
 const nodes: Record<string, NodeSpec> = {
     doc: { content: 'paragraph+' },
@@ -12,7 +14,18 @@ const nodes: Record<string, NodeSpec> = {
     },
     text: { inline: true },
 }
-const schema = new Schema({ nodes })
+const marks: Record<string, MarkSpec> = {
+    strong: { toDOM: () => ['strong', 0], parseDOM: [{ tag: 'strong' }] },
+    em: { toDOM: () => ['em', 0], parseDOM: [{ tag: 'em' }] },
+    code: { toDOM: () => ['code', 0], parseDOM: [{ tag: 'code' }] },
+}
+const schema = new Schema({ nodes, marks })
+
+/** Build a text node carrying the named marks. */
+function mtext(s: string, ...markNames: string[])
+{
+    return schema.text(s, markNames.map((n) => schema.marks[n].create()))
+}
 
 function makeDoc(...paragraphs: string[])
 {
@@ -553,8 +566,8 @@ describe('caret bias (soft-wrap affinity)', () =>
             type: 'paragraph', node: {} as any, text: 'helloworld',
             yOffset: 0, height: 52, pmStartPos: 1, pmEndPos: 11,
             lines: [
-                { text: 'hello', width: 40, x: 0, y: 0 },
-                { text: 'world', width: 40, x: 0, y: 26 },
+                { text: 'hello', width: 40, x: 0, y: 0, pmStart: 0 },
+                { text: 'world', width: 40, x: 0, y: 26, pmStart: 5 },
             ],
         }
     }
@@ -642,6 +655,234 @@ describe('caret bias (soft-wrap affinity)', () =>
         ;(ed as any).moveSelection(-1, false) // step left to the boundary (pos 6)
         expect(ed.state.selection.head).toBe(6)
         expect((ed as any).caretBias).toBe(-1)
+        ed.destroy()
+    })
+})
+
+
+describe('marked text coordinates', () =>
+{
+    // "ab CD ef" with CD bold. textContent: a0 b1 ' '2 C3 D4 ' '5 e6 f7.
+    // Mock geometry (len*8, 8px collapsed-space gaps):
+    //   frag 'ab' pm0 x0 w16 | 'CD' pm3 x24 w16 | 'ef' pm6 x48 w16
+    function markedEditor()
+    {
+        const doc = schema.node('doc', null, [
+            schema.node('paragraph', null, [
+                mtext('ab '), mtext('CD', 'strong'), mtext(' ef'),
+            ]),
+        ])
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        const ed = new CanvasEditor({ state: EditorState.create({ doc, schema }), container })
+        return ed
+    }
+
+    test('lays out fragments with per-run fonts, x positions, and PM offsets', () =>
+    {
+        const ed = markedEditor()
+        const frags = (ed as any).lastLayouts[0].lines[0].fragments
+        expect(frags.map((f: any) => f.text)).toEqual(['ab', 'CD', 'ef'])
+        expect(frags.map((f: any) => f.pmStart)).toEqual([0, 3, 6])
+        expect(frags.map((f: any) => Math.round(f.x))).toEqual([0, 24, 48])
+        expect(frags[0].font).toBe('16px Inter')
+        expect(frags[1].font).toBe('700 16px Inter')
+        expect(frags[1].color).toBeNull()
+        ed.destroy()
+    })
+
+    test('caret x is measured in each run\'s own font', () =>
+    {
+        const ed = markedEditor()
+        const block = (ed as any).lastLayouts[0]
+        const x = (o: number) => (ed as any).offsetToCoordsInBlock(block, o).x
+        expect(x(0)).toBe(0)   // start
+        expect(x(2)).toBe(16)  // end of 'ab'
+        expect(x(3)).toBe(24)  // start of bold 'CD' (past the collapsed space)
+        expect(x(5)).toBe(40)  // end of 'CD'
+        expect(x(6)).toBe(48)  // start of 'ef'
+        expect(x(8)).toBe(64)  // end of line
+        ed.destroy()
+    })
+
+    test('clicking inside a marked run hits the right PM position', () =>
+    {
+        const ed = markedEditor()
+        const layouts = (ed as any).lastLayouts
+        // x=34 → 10px into the 'CD' run (x 24..40) → past 'C' (8) → offset 1 → pm 4 → pos 5.
+        expect((ed as any).clickToPos(layouts, 34, 13).pos).toBe(5)
+        // x=4 → start of 'ab' → pos 1.
+        expect((ed as any).clickToPos(layouts, 4, 13).pos).toBe(1)
+        // x=50 → 2px into 'ef' (x 48..64) → offset 0 → pm 6 → pos 7.
+        expect((ed as any).clickToPos(layouts, 50, 13).pos).toBe(7)
+        ed.destroy()
+    })
+
+    test('clicking the collapsed-space gap snaps to the nearer run boundary', () =>
+    {
+        const ed = markedEditor()
+        const layouts = (ed as any).lastLayouts
+        // Gap between 'ab' (ends x16) and 'CD' (starts x24), midpoint 20.
+        expect((ed as any).clickToPos(layouts, 17, 13).pos).toBe(3) // nearer 'ab' end → pm2 → pos3
+        expect((ed as any).clickToPos(layouts, 23, 13).pos).toBe(4) // nearer 'CD' start → pm3 → pos4
+        ed.destroy()
+    })
+
+    test('selection rect spans a marked run using its run font widths', () =>
+    {
+        const ed = markedEditor()
+        // Select the bold 'CD' run: PM positions 4..6 (block pmStart 1 + offsets 3..5).
+        ed.dispatch(ed.state.tr.setSelection(TextSelection.create(ed.state.doc, 4, 6)))
+        const rects: { x: number, w: number }[] = []
+        const recCtx = {
+            setTransform() {}, clearRect() {}, fillText() {},
+            fillRect(x: number, _y: number, w: number) { rects.push({ x: Math.round(x), w: Math.round(w) }) },
+            measureText(s: string) { return { width: s.length * 8 } },
+            set fillStyle(_v: unknown) {}, set font(_v: unknown) {}, set textBaseline(_v: unknown) {},
+        }
+        ;(ed as any).canvas.getContext = () => recCtx
+        ;(ed as any).render()
+        // 'CD' occupies x 24..40 → one selection rect there.
+        expect(rects).toContainEqual({ x: 24, w: 16 })
+        ed.destroy()
+    })
+})
+
+
+describe('marks: input & extensions', () =>
+{
+    function editorWith(text: string, opts: { keymap?: any } = {})
+    {
+        const doc = schema.node('doc', null, [
+            schema.node('paragraph', null, text ? [schema.text(text)] : []),
+        ])
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        return new CanvasEditor({ state: EditorState.create({ doc, schema }), container, ...opts })
+    }
+
+    test('command(toggleMark) applies a mark to the selection', () =>
+    {
+        const ed = editorWith('hello')
+        ed.dispatch(ed.state.tr.setSelection(TextSelection.create(ed.state.doc, 1, 4)))
+        const applied = ed.command(toggleMark(schema.marks.strong))
+        expect(applied).toBe(true)
+        // "hel" should now carry strong.
+        expect(ed.state.doc.firstChild!.firstChild!.marks.some((m) => m.type.name === 'strong')).toBe(true)
+        ed.destroy()
+    })
+
+    test('toggleMark on an empty selection sets storedMarks, and typing inherits them', () =>
+    {
+        const ed = editorWith('hello')
+        ed.dispatch(ed.state.tr.setSelection(TextSelection.near(ed.state.doc.resolve(1))))
+        ed.command(toggleMark(schema.marks.strong))
+        expect(ed.state.storedMarks?.some((m) => m.type.name === 'strong')).toBe(true)
+
+        const ta = (ed as any).textarea as HTMLTextAreaElement
+        ta.dispatchEvent(new InputEvent('input', {
+            inputType: 'insertText', data: 'X',
+        } as InputEventInit))
+
+        // The inserted "X" carries the stored strong mark; "hello" does not.
+        const para = ed.state.doc.firstChild!
+        expect(para.firstChild!.text).toBe('X')
+        expect(para.firstChild!.marks.some((m) => m.type.name === 'strong')).toBe(true)
+        ed.destroy()
+    })
+
+    test('a keydown binding toggles a mark and is preventDefaulted', () =>
+    {
+        // Use Ctrl- (platform-independent) so the test doesn't depend on Mod resolution.
+        const ed = editorWith('hello', {
+            keymap: { 'Ctrl-b': toggleMark(schema.marks.strong) },
+        })
+        ed.dispatch(ed.state.tr.setSelection(TextSelection.create(ed.state.doc, 1, 4)))
+        const ta = (ed as any).textarea as HTMLTextAreaElement
+        const ev = new KeyboardEvent('keydown', {
+            key: 'b', ctrlKey: true, bubbles: true, cancelable: true,
+        })
+        ta.dispatchEvent(ev)
+        expect(ev.defaultPrevented).toBe(true)
+        expect(ed.state.doc.firstChild!.firstChild!.marks.some((m) => m.type.name === 'strong')).toBe(true)
+        ed.destroy()
+    })
+
+    test('buildMarkKeymap binds present marks and skips missing ones', () =>
+    {
+        const full = buildMarkKeymap(schema)
+        expect(Object.keys(full).sort()).toEqual(['Mod-`', 'Mod-b', 'Mod-i'])
+
+        const partial = new Schema({ nodes, marks: { strong: markSpecs.strong } })
+        const keys = buildMarkKeymap(partial)
+        expect(Object.keys(keys)).toEqual(['Mod-b'])
+        expect(typeof keys['Mod-b']).toBe('function')
+    })
+})
+
+
+describe('double-click & clipboard', () =>
+{
+    test('double-click selects the word under the cursor', () =>
+    {
+        const { ed } = makeEditor(['hello world'])
+        const canvas = (ed as any).canvas as HTMLCanvasElement
+        // Mock measureText = len*8; click at x=64 lands inside "world".
+        canvas.dispatchEvent(new MouseEvent('dblclick', {
+            button: 0, clientX: 64, clientY: 13, bubbles: true, cancelable: true,
+        }))
+        const { from, to } = ed.state.selection
+        expect(ed.state.doc.textBetween(from, to)).toBe('world')
+        ed.destroy()
+    })
+
+    test('wordRangeAt returns word bounds, null in an empty block', () =>
+    {
+        const { ed } = makeEditor(['hi there'])
+        const r = (ed as any).wordRangeAt(2) // pos 2 → inside "hi"
+        expect(ed.state.doc.textBetween(r.from, r.to)).toBe('hi')
+        const { ed: ed2 } = makeEditor([''])
+        expect((ed2 as any).wordRangeAt(1)).toBeNull()
+        ed.destroy(); ed2.destroy()
+    })
+
+    test('copy writes the selection text and prevents the default', () =>
+    {
+        const { ed } = makeEditor(['hello world'])
+        ed.dispatch(ed.state.tr.setSelection(TextSelection.create(ed.state.doc, 7, 12)))
+        const ta = (ed as any).textarea as HTMLTextAreaElement
+        const box: { v: string | null } = { v: null }
+        const ev = new Event('copy', { cancelable: true, bubbles: true })
+        ;(ev as any).clipboardData = { setData: (_t: string, d: string) => { box.v = d } }
+        ta.dispatchEvent(ev)
+        expect(box.v).toBe('world')
+        expect(ev.defaultPrevented).toBe(true)
+        ed.destroy()
+    })
+
+    test('cut copies then deletes the selection', () =>
+    {
+        const { ed } = makeEditor(['hello world'])
+        ed.dispatch(ed.state.tr.setSelection(TextSelection.create(ed.state.doc, 1, 7)))
+        const ta = (ed as any).textarea as HTMLTextAreaElement
+        const box: { v: string | null } = { v: null }
+        const ev = new Event('cut', { cancelable: true, bubbles: true })
+        ;(ev as any).clipboardData = { setData: (_t: string, d: string) => { box.v = d } }
+        ta.dispatchEvent(ev)
+        expect(box.v).toBe('hello ')
+        expect(ed.state.doc.firstChild!.textContent).toBe('world')
+        ed.destroy()
+    })
+
+    test('copy with an empty selection is a no-op', () =>
+    {
+        const { ed } = makeEditor(['hello'])
+        ed.dispatch(ed.state.tr.setSelection(TextSelection.near(ed.state.doc.resolve(1))))
+        const ta = (ed as any).textarea as HTMLTextAreaElement
+        const ev = new Event('copy', { cancelable: true, bubbles: true })
+        ;(ev as any).clipboardData = { setData: () => { throw new Error('should not copy') } }
+        ta.dispatchEvent(ev)
+        expect(ev.defaultPrevented).toBe(false)
         ed.destroy()
     })
 })
