@@ -206,6 +206,9 @@ export class CanvasEditor
     // (WeakMap has no clear()). Marked-block geometry is measured at layout
     // time, so it must be recomputed once the real font is available.
     private layoutCache = new WeakMap<PMNode, CachedBlock>()
+    // Memoized full-run widths (key: "<font> <text>") so re-laying out a
+    // marked block on each keystroke only measures the run that changed.
+    private readonly widthCache = new Map<string, number>()
     private lastLayouts: BlockLayout[] = []
     private cacheHits = 0
     private cacheMisses = 0
@@ -394,6 +397,21 @@ export class CanvasEditor
 
     // ─── Layout (cache-aware) ──────────────────────────────────────────
 
+    /** measureText for a whole string, memoized by font+text (see widthCache). */
+    private measureWidth(text: string, font: string): number
+    {
+        const key = `${font} ${text}`
+        let w = this.widthCache.get(key)
+        if (w === undefined)
+        {
+            this.measureCtx.font = font
+            w = this.measureCtx.measureText(text).width
+            if (this.widthCache.size > 8000) this.widthCache.clear()
+            this.widthCache.set(key, w)
+        }
+        return w
+    }
+
     /** Lay out one block, choosing the single-font fast path or the marked path. */
     private layoutBlock(node: PMNode): CachedBlock
     {
@@ -542,12 +560,10 @@ export class CanvasEditor
                 // (never at the line start).
                 if (fragments.length > 0 && pmStart > prevPmEnd)
                 {
-                    this.measureCtx.font = fragments[fragments.length - 1].font
-                    x += this.measureCtx.measureText(' ').width
+                    x += this.measureWidth(' ', fragments[fragments.length - 1].font)
                 }
 
-                this.measureCtx.font = m.font
-                const width = this.measureCtx.measureText(f.text).width
+                const width = this.measureWidth(f.text, m.font)
                 fragments.push({ text: f.text, font: m.font, color: m.color, x, width, pmStart })
                 x += width
                 lineText += f.text
@@ -787,13 +803,13 @@ export class CanvasEditor
                 if (lineStart > to) break
 
                 const a = Math.max(from, lineStart)
-                const x1 = this.xForOffsetInLine(line, a - block.pmStartPos)
+                const x1 = this.xForOffsetInLine(block, line, a - block.pmStartPos)
 
                 // Selection continuing past this line trails to the container
                 // edge; otherwise stop at the selection end on this line.
                 const x2 = to > lineEnd
                     ? line.x + this.containerWidth
-                    : this.xForOffsetInLine(line, Math.min(to, lineEnd) - block.pmStartPos)
+                    : this.xForOffsetInLine(block, line, Math.min(to, lineEnd) - block.pmStartPos)
 
                 if (x2 > x1)
                 {
@@ -842,7 +858,7 @@ export class CanvasEditor
 
             if (!leansToNextLine && (offsetInBlock <= lineEnd || isLast))
             {
-                return { x: this.xForOffsetInLine(line, offsetInBlock), y: line.y }
+                return { x: this.xForOffsetInLine(block, line, offsetInBlock), y: line.y }
             }
         }
 
@@ -854,7 +870,7 @@ export class CanvasEditor
      * to the line's styled fragments (each measured in its own font) or, for a
      * plain line, a single measureText over the line text.
      */
-    private xForOffsetInLine(line: LineLayout, offsetInBlock: number): number
+    private xForOffsetInLine(block: BlockLayout, line: LineLayout, offsetInBlock: number): number
     {
         if (line.fragments)
         {
@@ -872,7 +888,17 @@ export class CanvasEditor
                 }
             }
             const last = line.fragments[line.fragments.length - 1]
-            return last ? line.x + last.x + last.width : line.x
+            if (!last) return line.x
+            // Past the last run: the offset is in collapsed trailing whitespace
+            // (e.g. a space just typed at the end of a styled run). Pretext
+            // dropped it from the run text, so advance the caret by the real
+            // width of those characters — otherwise the caret looks "stuck".
+            const lastEnd = last.pmStart + last.text.length
+            this.measureCtx.font = last.font
+            const trail = this.measureCtx.measureText(
+                block.text.substring(lastEnd, offsetInBlock),
+            ).width
+            return line.x + last.x + last.width + trail
         }
 
         const offsetInLine = Math.max(0, Math.min(line.text.length, offsetInBlock - line.pmStart))
@@ -1135,6 +1161,7 @@ export class CanvasEditor
             const onFontsLoaded = () =>
             {
                 this.layoutCache = new WeakMap()
+                this.widthCache.clear()
                 this.scheduleRender()
             }
             document.fonts.ready.then(onFontsLoaded)

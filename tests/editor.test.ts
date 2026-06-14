@@ -719,6 +719,23 @@ describe('marked text coordinates', () =>
         ed.destroy()
     })
 
+    test('caret advances through a trailing space collapsed out of a marked run', () =>
+    {
+        // One bold run "bold " — Pretext trims the trailing space into a gap,
+        // so the fragment is just "bold" (width 32). The caret after the space
+        // must still advance, not sit stuck at the end of "bold".
+        const doc = schema.node('doc', null, [
+            schema.node('paragraph', null, [mtext('bold ', 'strong')]),
+        ])
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        const ed = new CanvasEditor({ state: EditorState.create({ doc, schema }), container })
+        const block = (ed as any).lastLayouts[0]
+        expect((ed as any).offsetToCoordsInBlock(block, 4).x).toBe(32) // after "bold"
+        expect((ed as any).offsetToCoordsInBlock(block, 5).x).toBe(40) // after the space (+8)
+        ed.destroy()
+    })
+
     test('clicking the collapsed-space gap snaps to the nearer run boundary', () =>
     {
         const ed = markedEditor()
