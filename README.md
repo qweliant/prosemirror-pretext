@@ -143,28 +143,56 @@ bun install
 bun run dev
 ```
 
-## Current State
+## Rendering roadmap
 
-Actively being built. Not yet published to npm.
+Actively being built; not yet published to npm. Editing, selection, marks
+(bold/italic/code), floats, undo/redo, clipboard, and viewport virtualization
+already work (see the sections above).
 
-- [x] Headless ProseMirror state (`doc > paragraph+ > text*`)
-- [x] Pretext-powered layout (segmentation, line breaking, positioning)
-- [x] Canvas rendering with HiDPI support
-- [x] Live editing via hidden textarea overlay
-- [x] IME composition support (CJK input methods)
-- [x] Incremental layout cache (only changed blocks re-segment)
-- [x] Caret rendering with blink
-- [x] Click-to-position
-- [x] Arrow key navigation (left/right, home/end, up/down with phantom X)
-- [x] Enter key / paragraph splitting
-- [x] Backspace joins adjacent paragraphs at block start
-- [x] Selection rendering (shift+arrows, shift+click, mouse drag)
-- [x] Scroll container with `ensureCaretVisible`
-- [x] Scroll virtualization (viewport-sized canvas + spatial index)
-- [x] Marks (bold, italic, code) — per-run fonts via Pretext rich-inline, with toggling keymap
-- [x] Double-click word selection + clipboard copy/cut
-- [x] Undo / redo via `prosemirror-history`
-- [x] Variable-width layout — text flows around float rects (single-sided per line)
+Because this editor replaces `prosemirror-view` with canvas, **everything the
+DOM would normally render has to be drawn by us.** The list below is the rest
+of that surface — capabilities `prosemirror-view` gives you for free that this
+editor needs to implement.
+
+### Inline — marks & styling
+
+- [ ] **Links** — styled `link` mark plus click-to-follow and a hover cursor (per-run hit-testing)
+- [ ] **Underline / strikethrough** — drawn lines, not font properties, so they need their own paint pass
+- [ ] **Text & highlight color** — fill color per run, plus a rect painted behind the glyphs
+- [ ] **Superscript / subscript** — baseline shift + reduced size threaded through the layout pipeline
+
+### Block types
+
+- [ ] **Text alignment** — `left | right | center | justify` block attribute (distribute space; last line ragged)
+- [ ] **Headings** (h1–h6) — per-level font size/weight; mixed line heights within a block
+- [ ] **Blockquote** — indent + left rule
+- [ ] **Code block** — monospace, background fill, preserved whitespace
+- [ ] **Lists** (bullet / ordered) — markers, indentation, nesting
+- [ ] **Horizontal rule** — drawn leaf block
+- [ ] **Tables** — grid layout with per-cell text flow
+
+### Media & embeds — needs leaf/atom-node rendering (not built yet)
+
+- [ ] **Images** — draw to canvas, node selection, resize handles; reuse the float engine for wrap
+- [ ] **Video / iframe / interactive embeds** — overlay a real DOM element positioned by us (canvas can't host them); the float engine reserves the space
+- [ ] **Inline atoms** — mentions/chips, emoji images, hard breaks, inline math
+
+### Selection & affordances
+
+- [ ] **Node selection** — select an image / atom / block as a unit
+- [ ] **Gap cursor** — caret between non-text blocks
+- [ ] **Placeholder text** — prompt rendered in empty blocks / empty doc
+
+### Decorations
+
+- [ ] **Inline decorations** — search highlights, spellcheck squiggles
+- [ ] **Collaborative cursors / selections** — remote carets and ranges
+- [ ] **Widget decorations** — inline buttons / annotations
+
+### Input
+
+- [ ] **Rich paste** — HTML → marks/nodes (currently plain text only)
+- [ ] **Drag & drop** — move nodes, drop images
 
 ## Architecture
 
