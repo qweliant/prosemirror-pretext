@@ -412,6 +412,38 @@ export class CanvasEditor
         return w
     }
 
+    /**
+     * Map a fragment's collapsed text back onto its source run, preserving the
+     * original (uncollapsed) whitespace. Non-space characters align exactly;
+     * each collapsed space stands for a run of whitespace in the source. Any
+     * whitespace trimmed at a line start is skipped first. Returns the real
+     * slice and the new source index.
+     */
+    private expandCollapsedWhitespace(
+        source: string, start: number, collapsed: string,
+    ): [string, number]
+    {
+        const ws = /\s/
+        let si = start
+        // Leading whitespace dropped at a line/wrap start.
+        if (collapsed.length > 0 && collapsed[0] !== ' ')
+        {
+            while (si < source.length && ws.test(source[si])) si++
+        }
+        for (let ci = 0; ci < collapsed.length; ci++)
+        {
+            if (collapsed[ci] === ' ')
+            {
+                while (si < source.length && ws.test(source[si])) si++
+            }
+            else if (si < source.length)
+            {
+                si++
+            }
+        }
+        return [source.slice(start, si), si]
+    }
+
     /** Lay out one block, choosing the single-font fast path or the marked path. */
     private layoutBlock(node: PMNode): CachedBlock
     {
@@ -432,8 +464,11 @@ export class CanvasEditor
             return this.layoutMarkedBlock(node)
         }
 
-        // Fast path: a single font for the whole block.
-        const prepared = prepareWithSegments(text, this.font)
+        // Fast path: a single font for the whole block. 'pre-wrap' keeps every
+        // space as a real character (default 'normal' collapses runs of
+        // whitespace), so line text stays in lockstep with PM offsets and the
+        // caret doesn't drift when you type consecutive spaces.
+        const prepared = prepareWithSegments(text, this.font, { whiteSpace: 'pre-wrap' })
         const { lines, height } = layoutWithLines(
             prepared, this.containerWidth, this.lineHeight,
         )
@@ -500,10 +535,15 @@ export class CanvasEditor
      */
     private layoutMarkedBlock(node: PMNode): CachedBlock
     {
+        const blockText = node.textContent
         const items: RichInlineItem[] = []
         // Per item: PM offset (within block) of its first char, the leading
-        // whitespace Pretext will trim, and the run's resolved color.
-        const meta: { pmStart: number, leadTrim: number, font: string, color: string | null }[] = []
+        // whitespace Pretext trims, the run's style, and the trimmed source
+        // text (used to re-expand whitespace Pretext collapses in fragments).
+        const meta: {
+            pmStart: number, leadTrim: number, font: string,
+            color: string | null, trimmed: string,
+        }[] = []
 
         let offset = 0
         let cur: { font: string, color: string | null, text: string, pmStart: number } | null = null
@@ -511,8 +551,9 @@ export class CanvasEditor
         {
             if (!cur) return
             const leadTrim = cur.text.length - cur.text.trimStart().length
+            const trimmed = cur.text.replace(/^\s+/, '').replace(/\s+$/, '')
             items.push({ text: cur.text, font: cur.font })
-            meta.push({ pmStart: cur.pmStart, leadTrim, font: cur.font, color: cur.color })
+            meta.push({ pmStart: cur.pmStart, leadTrim, font: cur.font, color: cur.color, trimmed })
             cur = null
         }
 
@@ -552,22 +593,35 @@ export class CanvasEditor
             for (const f of mat.fragments)
             {
                 const m = meta[f.itemIndex]
-                const pmStart = m.pmStart + m.leadTrim + consumed[f.itemIndex]
-                consumed[f.itemIndex] += f.text.length
+                const start = consumed[f.itemIndex]
+                // Pretext collapses runs of whitespace inside a fragment;
+                // re-expand against the source so every space stays a real
+                // editable character (caret/width must match the PM text).
+                const [text, end] = this.expandCollapsedWhitespace(m.trimmed, start, f.text)
+                consumed[f.itemIndex] = end
+                const pmStart = m.pmStart + m.leadTrim + start
 
-                // A jump in PM offset means Pretext collapsed boundary
-                // whitespace between the runs — paint one space to fill it
-                // (never at the line start).
+                // A jump in PM offset means Pretext trimmed whitespace between
+                // the runs into a gap. Append the real boundary whitespace to
+                // the previous run so every space stays a navigable character
+                // (rather than collapsing several spaces to one). Never at a
+                // line start, where leading whitespace is intentionally dropped.
                 if (fragments.length > 0 && pmStart > prevPmEnd)
                 {
-                    x += this.measureWidth(' ', fragments[fragments.length - 1].font)
+                    const prev = fragments[fragments.length - 1]
+                    const gap = blockText.substring(prevPmEnd, pmStart)
+                    const gapWidth = this.measureWidth(gap, prev.font)
+                    prev.text += gap
+                    prev.width += gapWidth
+                    x += gapWidth
+                    lineText += gap
                 }
 
-                const width = this.measureWidth(f.text, m.font)
-                fragments.push({ text: f.text, font: m.font, color: m.color, x, width, pmStart })
+                const width = this.measureWidth(text, m.font)
+                fragments.push({ text, font: m.font, color: m.color, x, width, pmStart })
                 x += width
-                lineText += f.text
-                prevPmEnd = pmStart + f.text.length
+                lineText += text
+                prevPmEnd = pmStart + text.length
             }
             // Line 0 owns the block start (offset 0); each later line begins at
             // its first fragment, so the whitespace collapsed at a wrap belongs

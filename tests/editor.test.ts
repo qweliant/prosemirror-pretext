@@ -683,7 +683,8 @@ describe('marked text coordinates', () =>
     {
         const ed = markedEditor()
         const frags = (ed as any).lastLayouts[0].lines[0].fragments
-        expect(frags.map((f: any) => f.text)).toEqual(['ab', 'CD', 'ef'])
+        // Boundary spaces are appended to the preceding run, not dropped.
+        expect(frags.map((f: any) => f.text)).toEqual(['ab ', 'CD ', 'ef'])
         expect(frags.map((f: any) => f.pmStart)).toEqual([0, 3, 6])
         expect(frags.map((f: any) => Math.round(f.x))).toEqual([0, 24, 48])
         expect(frags[0].font).toBe('16px Inter')
@@ -716,6 +717,20 @@ describe('marked text coordinates', () =>
         expect((ed as any).clickToPos(layouts, 4, 13).pos).toBe(1)
         // x=50 → 2px into 'ef' (x 48..64) → offset 0 → pm 6 → pos 7.
         expect((ed as any).clickToPos(layouts, 50, 13).pos).toBe(7)
+        ed.destroy()
+    })
+
+    test('expandCollapsedWhitespace re-expands runs of spaces from the source', () =>
+    {
+        const { ed } = makeEditor(['x'])
+        const ex = (s: string, start: number, c: string) =>
+            (ed as any).expandCollapsedWhitespace(s, start, c)
+        // Pretext collapsed "hello   world" → "hello world"; restore all spaces.
+        expect(ex('hello   world', 0, 'hello world')).toEqual(['hello   world', 13])
+        // Already single-spaced: unchanged.
+        expect(ex('a b c', 0, 'a b c')).toEqual(['a b c', 5])
+        // Continuing a run across a wrap (start offset into source).
+        expect(ex('foo   bar baz', 0, 'foo bar')).toEqual(['foo   bar', 9])
         ed.destroy()
     })
 
