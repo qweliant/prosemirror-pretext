@@ -108,7 +108,6 @@ async function boot(): Promise<void>
     const editor = new CanvasEditor({
         state: EditorState.create({ doc, schema, plugins: [history()] }),
         container,
-        maxHeight: 480,
         keymap: {
             ...buildMarkKeymap(schema),
             'Mod-z': undo,
@@ -127,9 +126,58 @@ async function boot(): Promise<void>
 
     syncToolbar = buildToolbar(editor)
     syncToolbar()
+    setupFloat(editor)
     editor.focus()
 
     ;(window as any).editor = editor
+}
+
+// ─── Draggable float ─────────────────────────────────────────────────────────
+
+const CONTENT_WIDTH = 460
+const CANVAS_PAD = 40
+
+function setupFloat(editor: CanvasEditor): void
+{
+    const wrap = document.querySelector('.canvas-wrap') as HTMLElement
+    const box = document.createElement('div')
+    box.className = 'float-box'
+    box.textContent = 'float — drag me'
+    wrap.appendChild(box)
+
+    // Content-space rect; text flows around it.
+    const f = { x: 250, y: 34, width: 190, height: 132 }
+    const place = () =>
+    {
+        box.style.left = `${CANVAS_PAD + f.x}px`
+        box.style.top = `${CANVAS_PAD + f.y}px`
+        box.style.width = `${f.width}px`
+        box.style.height = `${f.height}px`
+        editor.setFloats([{ ...f }])
+    }
+    place()
+
+    let drag: { sx: number, sy: number, fx: number, fy: number } | null = null
+    box.addEventListener('pointerdown', (e) =>
+    {
+        e.preventDefault()
+        box.setPointerCapture(e.pointerId)
+        drag = { sx: e.clientX, sy: e.clientY, fx: f.x, fy: f.y }
+    })
+    box.addEventListener('pointermove', (e) =>
+    {
+        if (!drag) return
+        f.x = Math.max(0, Math.min(CONTENT_WIDTH - f.width, drag.fx + (e.clientX - drag.sx)))
+        f.y = Math.max(0, drag.fy + (e.clientY - drag.sy))
+        place()
+    })
+    const end = (e: PointerEvent) =>
+    {
+        drag = null
+        box.releasePointerCapture(e.pointerId)
+    }
+    box.addEventListener('pointerup', end)
+    box.addEventListener('pointercancel', end)
 }
 
 boot()

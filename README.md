@@ -64,6 +64,7 @@ The container element should be an empty block-level element. The editor creates
 | `selectionColor` | `'rgba(129, 140, 248, 0.25)'` | Selection highlight color |
 | `markStyles` | bold/italic/code defaults | Maps mark names → `{ fontWeight, fontStyle, fontFamily, color }` |
 | `keymap` | `{}` | ProseMirror key bindings, checked before built-in keys |
+| `floats` | `[]` | Rects (`{ x, y, width, height }`) the text flows around |
 | `onRender` | — | Called after every render with cache + timing stats |
 
 ## Marks (bold / italic / code)
@@ -94,6 +95,25 @@ button.onmousedown = (e) => { e.preventDefault(); editor.command(toggleMark(sche
 
 Typing at a collapsed cursor inherits stored marks, so `Cmd-B` then typing
 produces bold text.
+
+## Floats (text wrapping around elements)
+
+Text flows around exclusion rectangles. The editor only reserves the space —
+you render the actual element (image, callout, …) and keep the rect in sync:
+
+```ts
+editor.setFloats([{ x: 250, y: 30, width: 190, height: 130 }])
+```
+
+Coordinates are content-space (`x` from the content's left edge, `y` matches
+`BlockLayout.yOffset`). Each line uses the **wider** free side of a rect, so a
+rect on the right wraps text on the left and vice-versa; a full-width rect
+pushes text below it. Pretext lays out each line at its own width via
+`layoutNextLine`, so reflow on drag/resize is sub-millisecond.
+
+Notes: text wraps on one side per line (no split-both-sides yet), and with
+floats present the layout cache is bypassed (recomputed each frame) — the
+no-float path stays fully cached.
 
 ## Undo / redo
 
@@ -143,7 +163,7 @@ Actively being built. Not yet published to npm.
 - [x] Marks (bold, italic, code) — per-run fonts via Pretext rich-inline, with toggling keymap
 - [x] Double-click word selection + clipboard copy/cut
 - [x] Undo / redo via `prosemirror-history`
-- [ ] Variable-width layout (text around floated elements)
+- [x] Variable-width layout — text flows around float rects (single-sided per line)
 
 ## Architecture
 

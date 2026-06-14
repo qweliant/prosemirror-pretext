@@ -85,6 +85,32 @@
 
         .canvas-wrap {
             padding: 40px;
+            position: relative;
+        }
+
+        .float-box {
+            position: absolute;
+            display: flex;
+            align-items: flex-end;
+            padding: 10px;
+            border-radius: 8px;
+            background:
+                linear-gradient(135deg, rgba(129, 140, 248, 0.45), rgba(232, 100, 130, 0.4));
+            border: 1px solid rgba(165, 180, 252, 0.5);
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+            color: #e8e8ef;
+            font-family: 'Inter', sans-serif;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.03em;
+            cursor: grab;
+            user-select: none;
+            touch-action: none;
+            z-index: 3;
+        }
+
+        .float-box:active {
+            cursor: grabbing;
         }
 
         .toolbar {

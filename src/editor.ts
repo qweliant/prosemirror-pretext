@@ -7,13 +7,19 @@ import { keydownHandler } from 'prosemirror-keymap'
 import {
     prepareWithSegments,
     layoutWithLines,
+    layoutNextLine,
+    type LayoutCursor,
     type PreparedTextWithSegments,
 } from '@chenglou/pretext'
 import {
     prepareRichInline,
     walkRichInlineLineRanges,
+    layoutNextRichInlineLineRange,
     materializeRichInlineLineRange,
     type RichInlineItem,
+    type RichInlineCursor,
+    type PreparedRichInline,
+    type RichInlineLineRange,
 } from '@chenglou/pretext/rich-inline'
 
 
@@ -57,8 +63,25 @@ export interface CanvasEditorOptions
      * Use `buildMarkKeymap(schema)` for sensible bold/italic/code defaults.
      */
     keymap?: Record<string, Command>
+    /**
+     * Rectangles the text must flow around (e.g. a floated image). Coordinates
+     * are content-space: `x` from the content's left edge, `y` in document
+     * space (matching `BlockLayout.yOffset`). The editor only reserves the
+     * space — render the actual element yourself and keep the rects in sync
+     * via `setFloats`. Text wraps on the wider free side of each rect.
+     */
+    floats?: FloatRect[]
     /** Called after every render with timing/cache stats. */
     onRender?: (stats: RenderStats) => void
+}
+
+/** A rectangle that text flows around, in content-space coordinates. */
+export interface FloatRect
+{
+    x: number
+    y: number
+    width: number
+    height: number
 }
 
 /** Styling applied to text carrying a given ProseMirror mark. */
@@ -150,6 +173,10 @@ interface CachedLine
     width: number
     pmStart: number
     fragments?: CachedFragment[]
+    // Set only by float-aware layout (lines aren't uniformly placed then):
+    // absolute left edge, and top relative to the block (bands may be skipped).
+    x?: number
+    yOffset?: number
 }
 
 interface CachedBlock
@@ -159,6 +186,18 @@ interface CachedBlock
     lineHeight: number
     lines: CachedLine[]
     height: number
+}
+
+/** Per-item run metadata threaded through marked line building. */
+interface MarkedLineCtx
+{
+    meta: {
+        pmStart: number, leadTrim: number, font: string,
+        color: string | null, trimmed: string,
+    }[]
+    blockText: string
+    consumed: number[]
+    prevLineEnd: number
 }
 
 
@@ -189,6 +228,13 @@ export class CanvasEditor
     // strings (weight/style/family) on top of the editor's base size.
     private readonly baseFontSize: number
     private readonly baseFontFamily: string
+
+    // ─── Floats ────────────────────────────────────────────────────────
+    // Exclusion rects the text flows around. Empty by default — the cached,
+    // fixed-width layout path is used whenever there are no floats.
+    private floats: FloatRect[]
+    // Below this, a slot is too narrow to set text; the line flows past it.
+    private readonly minSlotWidth = 24
 
     // ─── State ─────────────────────────────────────────────────────────
     state: EditorState
@@ -292,6 +338,8 @@ export class CanvasEditor
         this.keymapHandler = (event) =>
             compiled(this.commandView() as never, event)
 
+        this.floats = options.floats ?? []
+
         // Build DOM
         const stack = document.createElement('div')
         stack.style.position = 'relative'
@@ -382,6 +430,16 @@ export class CanvasEditor
     focus(): void
     {
         this.textarea.focus()
+    }
+
+    /**
+     * Replace the float rectangles the text flows around and re-layout. Call
+     * this as a floated element moves or resizes (e.g. while dragging).
+     */
+    setFloats(floats: FloatRect[]): void
+    {
+        this.floats = floats
+        this.scheduleRender()
     }
 
     destroy(): void
@@ -533,17 +591,14 @@ export class CanvasEditor
      * document offsets later (Pretext trims boundary whitespace into gaps, so
      * mapping is item-relative, not a flat character count).
      */
-    private layoutMarkedBlock(node: PMNode): CachedBlock
+    private prepareMarkedBlock(node: PMNode): { prepared: PreparedRichInline, ctx: MarkedLineCtx }
     {
         const blockText = node.textContent
         const items: RichInlineItem[] = []
         // Per item: PM offset (within block) of its first char, the leading
         // whitespace Pretext trims, the run's style, and the trimmed source
         // text (used to re-expand whitespace Pretext collapses in fragments).
-        const meta: {
-            pmStart: number, leadTrim: number, font: string,
-            color: string | null, trimmed: string,
-        }[] = []
+        const meta: MarkedLineCtx['meta'] = []
 
         let offset = 0
         let cur: { font: string, color: string | null, text: string, pmStart: number } | null = null
@@ -574,65 +629,23 @@ export class CanvasEditor
         })
         flush()
 
-        const prepared = prepareRichInline(items)
-        const consumed = new Array(items.length).fill(0)
-        const lines: CachedLine[] = []
-        let prevLineEnd = 0
+        return {
+            prepared: prepareRichInline(items),
+            ctx: { meta, blockText, consumed: new Array(items.length).fill(0), prevLineEnd: 0 },
+        }
+    }
 
-        // Pretext decides which runs land on which line; we measure geometry
-        // ourselves with the paint context so fragment widths match what
-        // fillText draws (Pretext's occupiedWidth is a narrower fit advance)
-        // and stay consistent with measureText-based caret/click hit-testing.
+    private layoutMarkedBlock(node: PMNode): CachedBlock
+    {
+        const { prepared, ctx } = this.prepareMarkedBlock(node)
+        const lines: CachedLine[] = []
+
+        // Pretext decides which runs land on which line; buildMarkedLine then
+        // measures geometry with the paint context so fragment widths match
+        // fillText and stay consistent with measureText-based hit-testing.
         walkRichInlineLineRanges(prepared, this.containerWidth, (range) =>
         {
-            const mat = materializeRichInlineLineRange(prepared, range)
-            const fragments: CachedFragment[] = []
-            let x = 0
-            let lineText = ''
-            let prevPmEnd = -1
-            for (const f of mat.fragments)
-            {
-                const m = meta[f.itemIndex]
-                const start = consumed[f.itemIndex]
-                // Pretext collapses runs of whitespace inside a fragment;
-                // re-expand against the source so every space stays a real
-                // editable character (caret/width must match the PM text).
-                const [text, end] = this.expandCollapsedWhitespace(m.trimmed, start, f.text)
-                consumed[f.itemIndex] = end
-                const pmStart = m.pmStart + m.leadTrim + start
-
-                // A jump in PM offset means Pretext trimmed whitespace between
-                // the runs into a gap. Append the real boundary whitespace to
-                // the previous run so every space stays a navigable character
-                // (rather than collapsing several spaces to one). Never at a
-                // line start, where leading whitespace is intentionally dropped.
-                if (fragments.length > 0 && pmStart > prevPmEnd)
-                {
-                    const prev = fragments[fragments.length - 1]
-                    const gap = blockText.substring(prevPmEnd, pmStart)
-                    const gapWidth = this.measureWidth(gap, prev.font)
-                    prev.text += gap
-                    prev.width += gapWidth
-                    x += gapWidth
-                    lineText += gap
-                }
-
-                const width = this.measureWidth(text, m.font)
-                fragments.push({ text, font: m.font, color: m.color, x, width, pmStart })
-                x += width
-                lineText += text
-                prevPmEnd = pmStart + text.length
-            }
-            // Line 0 owns the block start (offset 0); each later line begins at
-            // its first fragment, so the whitespace collapsed at a wrap belongs
-            // to the line before it. This tiles [0, blockLen) with no gaps.
-            const linePmStart = lines.length === 0
-                ? 0
-                : (fragments.length > 0 ? fragments[0].pmStart : prevLineEnd)
-            prevLineEnd = fragments.length > 0
-                ? fragments[fragments.length - 1].pmStart + fragments[fragments.length - 1].text.length
-                : prevLineEnd
-            lines.push({ text: lineText, width: x, pmStart: linePmStart, fragments })
+            lines.push(this.buildMarkedLine(prepared, range, ctx, lines.length === 0))
         })
 
         return {
@@ -644,6 +657,176 @@ export class CanvasEditor
         }
     }
 
+    /** Float-aware counterpart of layoutBlock: lays each line at its own width. */
+    private layoutBlockAt(node: PMNode, topY: number): CachedBlock
+    {
+        const text = node.textContent
+        if (text.length === 0)
+        {
+            return {
+                prepared: null, width: this.containerWidth,
+                lineHeight: this.lineHeight, lines: [], height: 0,
+            }
+        }
+        if (this.blockHasMarks(node))
+        {
+            const { prepared, ctx } = this.prepareMarkedBlock(node)
+            return this.layoutMarkedBlockFloated(prepared, ctx, topY)
+        }
+        const prepared = prepareWithSegments(text, this.font, { whiteSpace: 'pre-wrap' })
+        return this.layoutBlockFloated(prepared, topY)
+    }
+
+    /**
+     * Build one CachedLine from a rich-inline range: re-expand whitespace
+     * Pretext collapsed, append boundary whitespace to the preceding run, and
+     * measure each run in its own font. Shared by the fixed-width and
+     * float-aware marked layout paths. Mutates ctx (consumed, prevLineEnd).
+     */
+    private buildMarkedLine(
+        prepared: PreparedRichInline,
+        range: RichInlineLineRange,
+        ctx: MarkedLineCtx,
+        isFirstLine: boolean,
+    ): CachedLine
+    {
+        const mat = materializeRichInlineLineRange(prepared, range)
+        const fragments: CachedFragment[] = []
+        let x = 0
+        let lineText = ''
+        let prevPmEnd = -1
+        for (const f of mat.fragments)
+        {
+            const m = ctx.meta[f.itemIndex]
+            const start = ctx.consumed[f.itemIndex]
+            // Pretext collapses runs of whitespace inside a fragment; re-expand
+            // against the source so every space stays a real editable character.
+            const [text, end] = this.expandCollapsedWhitespace(m.trimmed, start, f.text)
+            ctx.consumed[f.itemIndex] = end
+            const pmStart = m.pmStart + m.leadTrim + start
+
+            // A jump in PM offset means Pretext trimmed whitespace between the
+            // runs into a gap. Append the real boundary whitespace to the
+            // previous run so every space stays navigable (rather than
+            // collapsing several to one). Never at a line start.
+            if (fragments.length > 0 && pmStart > prevPmEnd)
+            {
+                const prev = fragments[fragments.length - 1]
+                const gap = ctx.blockText.substring(prevPmEnd, pmStart)
+                const gapWidth = this.measureWidth(gap, prev.font)
+                prev.text += gap
+                prev.width += gapWidth
+                x += gapWidth
+                lineText += gap
+            }
+
+            const width = this.measureWidth(text, m.font)
+            fragments.push({ text, font: m.font, color: m.color, x, width, pmStart })
+            x += width
+            lineText += text
+            prevPmEnd = pmStart + text.length
+        }
+        // Line 0 owns the block start (offset 0); each later line begins at its
+        // first fragment, so whitespace collapsed at a wrap belongs to the line
+        // before it. This tiles [0, blockLen) with no gaps.
+        const linePmStart = isFirstLine
+            ? 0
+            : (fragments.length > 0 ? fragments[0].pmStart : ctx.prevLineEnd)
+        ctx.prevLineEnd = fragments.length > 0
+            ? fragments[fragments.length - 1].pmStart + fragments[fragments.length - 1].text.length
+            : ctx.prevLineEnd
+        return { text: lineText, width: x, pmStart: linePmStart, fragments }
+    }
+
+    // ─── Float-aware layout ────────────────────────────────────────────
+
+    /**
+     * The widest free horizontal slot for a line whose top is at document
+     * `bandTop`, after subtracting any floats it vertically intersects.
+     * Returns null when nothing usable fits (the caller flows past the band).
+     */
+    private slotForBand(bandTop: number): { x: number, width: number } | null
+    {
+        const bandBottom = bandTop + this.lineHeight
+        let slots: { left: number, right: number }[] = [{ left: 0, right: this.containerWidth }]
+        for (const f of this.floats)
+        {
+            if (bandBottom <= f.y || bandTop >= f.y + f.height) continue
+            const blockLeft = f.x
+            const blockRight = f.x + f.width
+            const next: { left: number, right: number }[] = []
+            for (const s of slots)
+            {
+                if (blockRight <= s.left || blockLeft >= s.right) { next.push(s); continue }
+                if (blockLeft > s.left) next.push({ left: s.left, right: blockLeft })
+                if (blockRight < s.right) next.push({ left: blockRight, right: s.right })
+            }
+            slots = next
+        }
+        let best: { left: number, right: number } | null = null
+        for (const s of slots)
+        {
+            if (s.right - s.left < this.minSlotWidth) continue
+            if (!best || s.right - s.left > best.right - best.left) best = s
+        }
+        return best ? { x: best.left, width: best.right - best.left } : null
+    }
+
+    /** Single-font block laid out line-by-line, flowing around floats. */
+    private layoutBlockFloated(prepared: PreparedTextWithSegments, topY: number): CachedBlock
+    {
+        const lines: CachedLine[] = []
+        let cursor: LayoutCursor = { segmentIndex: 0, graphemeIndex: 0 }
+        let bandTop = 0
+        let acc = 0
+        // Guard against a malformed float producing an unbounded skip loop.
+        for (let guard = 0; guard < 20000; guard++)
+        {
+            const slot = this.slotForBand(topY + bandTop)
+            if (!slot) { bandTop += this.lineHeight; continue }
+            const line = layoutNextLine(prepared, cursor, slot.width)
+            if (!line) break
+            lines.push({
+                text: line.text, width: line.width, pmStart: acc,
+                x: slot.x, yOffset: bandTop,
+            })
+            acc += line.text.length
+            cursor = line.end
+            bandTop += this.lineHeight
+        }
+        const height = lines.length > 0
+            ? lines[lines.length - 1].yOffset! + this.lineHeight
+            : this.lineHeight
+        return { prepared, width: this.containerWidth, lineHeight: this.lineHeight, lines, height }
+    }
+
+    /** Marked block laid out line-by-line, flowing around floats. */
+    private layoutMarkedBlockFloated(
+        prepared: PreparedRichInline, ctx: MarkedLineCtx, topY: number,
+    ): CachedBlock
+    {
+        const lines: CachedLine[] = []
+        let cursor: RichInlineCursor | undefined
+        let bandTop = 0
+        for (let guard = 0; guard < 20000; guard++)
+        {
+            const slot = this.slotForBand(topY + bandTop)
+            if (!slot) { bandTop += this.lineHeight; continue }
+            const range = layoutNextRichInlineLineRange(prepared, slot.width, cursor)
+            if (!range) break
+            const line = this.buildMarkedLine(prepared, range, ctx, lines.length === 0)
+            line.x = slot.x
+            line.yOffset = bandTop
+            lines.push(line)
+            cursor = range.end
+            bandTop += this.lineHeight
+        }
+        const height = lines.length > 0
+            ? lines[lines.length - 1].yOffset! + this.lineHeight
+            : this.lineHeight
+        return { prepared: null, width: this.containerWidth, lineHeight: this.lineHeight, lines, height }
+    }
+
     private computeLayout(): { layouts: BlockLayout[], totalHeight: number }
     {
         this.cacheHits = 0
@@ -652,30 +835,43 @@ export class CanvasEditor
         const result: BlockLayout[] = []
         let cursorY = 0
 
+        const floating = this.floats.length > 0
+
         this.state.doc.forEach((node, offset) =>
         {
-            let cached = this.layoutCache.get(node)
-
-            if (
-                !cached
-                || cached.width !== this.containerWidth
-                || cached.lineHeight !== this.lineHeight
-            )
+            let cached: CachedBlock
+            if (floating)
             {
-                cached = this.layoutBlock(node)
-                this.layoutCache.set(node, cached)
+                // Float-aware layout depends on the block's Y (relative to the
+                // floats), so it can't use the Y-independent cache.
+                cached = this.layoutBlockAt(node, cursorY)
                 this.cacheMisses++
             }
             else
             {
-                this.cacheHits++
+                const hit = this.layoutCache.get(node)
+                if (
+                    hit
+                    && hit.width === this.containerWidth
+                    && hit.lineHeight === this.lineHeight
+                )
+                {
+                    cached = hit
+                    this.cacheHits++
+                }
+                else
+                {
+                    cached = this.layoutBlock(node)
+                    this.layoutCache.set(node, cached)
+                    this.cacheMisses++
+                }
             }
 
             const positioned: LineLayout[] = cached.lines.map((line, i) => ({
                 text: line.text,
                 width: line.width,
-                x: 0,
-                y: cursorY + i * this.lineHeight,
+                x: line.x ?? 0,
+                y: cursorY + (line.yOffset ?? i * this.lineHeight),
                 pmStart: line.pmStart,
                 fragments: line.fragments,
             }))
@@ -685,7 +881,7 @@ export class CanvasEditor
                 positioned.push({ text: '', width: 0, x: 0, y: cursorY, pmStart: 0 })
             }
 
-            const blockHeight = positioned.length * this.lineHeight
+            const blockHeight = cached.height || this.lineHeight
 
             result.push({
                 type: node.type.name,

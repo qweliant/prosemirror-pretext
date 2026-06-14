@@ -58,7 +58,27 @@ mock.module('@chenglou/pretext', () =>
             height: lineHeight,
         }
     }
-    return { prepareWithSegments, layoutWithLines }
+    // Variable-width per-line layout (float path). Mock cursor: graphemeIndex
+    // is a char offset; break into fixed-char chunks sized to the given width.
+    function layoutNextLine(
+        prepared: { text: string },
+        start: { segmentIndex: number, graphemeIndex: number },
+        maxWidth: number,
+    )
+    {
+        const text = prepared.text
+        const from = start.graphemeIndex
+        if (from >= text.length) return null
+        const fit = Math.max(1, Math.floor(maxWidth / 8))
+        const slice = text.substring(from, from + fit)
+        return {
+            text: slice,
+            width: slice.length * 8,
+            start: { segmentIndex: 0, graphemeIndex: from },
+            end: { segmentIndex: 0, graphemeIndex: from + slice.length },
+        }
+    }
+    return { prepareWithSegments, layoutWithLines, layoutNextLine }
 })
 
 // Deterministic stub for the rich-inline (marked text) path. Mirrors Pretext's
@@ -113,5 +133,19 @@ mock.module('@chenglou/pretext/rich-inline', () =>
         const width = fragments.reduce((w, f) => w + f.gapBefore + f.occupiedWidth, 0)
         return { fragments, width, end: {} }
     }
-    return { prepareRichInline, walkRichInlineLineRanges, materializeRichInlineLineRange }
+    // Float path: lay out the whole marked block on a single line (the mock
+    // doesn't model real wrapping); enough to exercise slot x-positioning.
+    function layoutNextRichInlineLineRange(
+        prepared: { items: { text: string }[] },
+        _maxWidth: number,
+        start?: { done?: boolean },
+    )
+    {
+        if (start && start.done) return null
+        return { items: prepared.items, width: 0, fragments: [], end: { done: true } }
+    }
+    return {
+        prepareRichInline, walkRichInlineLineRanges,
+        materializeRichInlineLineRange, layoutNextRichInlineLineRange,
+    }
 })

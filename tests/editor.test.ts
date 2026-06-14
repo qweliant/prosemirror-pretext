@@ -37,7 +37,7 @@ function makeDoc(...paragraphs: string[])
 
 function makeEditor(
     paragraphs: string[] = ['hello'],
-    extraOpts: { onRender?: (s: RenderStats) => void, maxHeight?: number } = {},
+    extraOpts: { onRender?: (s: RenderStats) => void, maxHeight?: number, floats?: any[] } = {},
 ): { ed: CanvasEditor, container: HTMLElement, stats: RenderStats[] }
 {
     const container = document.createElement('div')
@@ -850,6 +850,78 @@ describe('marks: input & extensions', () =>
         const keys = buildMarkKeymap(partial)
         expect(Object.keys(keys)).toEqual(['Mod-b'])
         expect(typeof keys['Mod-b']).toBe('function')
+    })
+})
+
+
+describe('variable-width layout (floats)', () =>
+{
+    // Mock: 8px/char, containerWidth 460. A float spanning a band narrows the
+    // slot; layoutNextLine breaks into floor(width/8)-char chunks.
+    test('slotForBand returns the widest free slot beside a float', () =>
+    {
+        const { ed } = makeEditor(['x'], { floats: [{ x: 0, y: 0, width: 160, height: 40 }] })
+        // Band [0,26] intersects the float → slot starts past it.
+        expect((ed as any).slotForBand(0)).toEqual({ x: 160, width: 300 })
+        // Band [60,86] is below the float → full width.
+        expect((ed as any).slotForBand(60)).toEqual({ x: 0, width: 460 })
+        ed.destroy()
+    })
+
+    test('text flows beside a float, then full width below it', () =>
+    {
+        const text = 'a'.repeat(200)
+        const { ed } = makeEditor([text], { floats: [{ x: 0, y: 0, width: 160, height: 40 }] })
+        const lines = (ed as any).lastLayouts[0].lines
+        // Lines whose band hits the float (y 0 and 26) are indented + narrow.
+        expect(lines[0].x).toBe(160)
+        expect(lines[0].text.length).toBe(37) // floor(300/8)
+        expect(lines[1].x).toBe(160)
+        // First line clear of the float is full width at x 0.
+        expect(lines[2].x).toBe(0)
+        expect(lines[2].text.length).toBe(57) // floor(460/8)
+        ed.destroy()
+    })
+
+    test('a full-width float band pushes text below it (gap in yOffsets)', () =>
+    {
+        const text = 'a'.repeat(120)
+        // Float covers the whole width for the first ~2 bands.
+        const { ed } = makeEditor([text], { floats: [{ x: 0, y: 0, width: 460, height: 40 }] })
+        const block = (ed as any).lastLayouts[0]
+        // First text line starts below the float (y offset ≥ 40, not 0).
+        expect(block.lines[0].y).toBeGreaterThanOrEqual(40)
+        expect(block.lines[0].x).toBe(0)
+        ed.destroy()
+    })
+
+    test('setFloats re-lays-out; clearing floats restores full width', async () =>
+    {
+        const text = 'a'.repeat(200)
+        const { ed } = makeEditor([text])
+        // No floats → single-line mock path, full width at x 0.
+        expect((ed as any).lastLayouts[0].lines[0].x).toBe(0)
+
+        ed.setFloats([{ x: 0, y: 0, width: 160, height: 40 }])
+        await nextFrame()
+        expect((ed as any).lastLayouts[0].lines[0].x).toBe(160)
+
+        ed.setFloats([])
+        await nextFrame()
+        expect((ed as any).lastLayouts[0].lines[0].x).toBe(0)
+        ed.destroy()
+    })
+
+    test('clicking beside a float maps to the indented line', () =>
+    {
+        const text = 'a'.repeat(200)
+        const { ed } = makeEditor([text], { floats: [{ x: 0, y: 0, width: 160, height: 40 }] })
+        // Click on line 0 (y≈13), x just inside the text (170 → 10px into the run).
+        const hit = (ed as any).clickToPos((ed as any).lastLayouts, 170, 13)
+        // line 0 starts at pmStart 0 (block pmStart 1); 170-160=10 → ~1 char in.
+        expect(hit.pos).toBeGreaterThanOrEqual(1)
+        expect(hit.pos).toBeLessThan(40)
+        ed.destroy()
     })
 })
 
