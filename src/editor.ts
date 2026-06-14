@@ -71,6 +71,8 @@ export interface CanvasEditorOptions
      * via `setFloats`. Text wraps on the wider free side of each rect.
      */
     floats?: FloatRect[]
+    /** Gap (px) kept between text and each float rect. Default: 12. */
+    floatGutter?: number
     /** Called after every render with timing/cache stats. */
     onRender?: (stats: RenderStats) => void
 }
@@ -233,6 +235,8 @@ export class CanvasEditor
     // Exclusion rects the text flows around. Empty by default — the cached,
     // fixed-width layout path is used whenever there are no floats.
     private floats: FloatRect[]
+    // Breathing room kept around each float so text never kisses its edge.
+    private readonly floatGutter: number
     // Below this, a slot is too narrow to set text; the line flows past it.
     private readonly minSlotWidth = 24
 
@@ -339,6 +343,7 @@ export class CanvasEditor
             compiled(this.commandView() as never, event)
 
         this.floats = options.floats ?? []
+        this.floatGutter = options.floatGutter ?? 12
 
         // Build DOM
         const stack = document.createElement('div')
@@ -748,12 +753,14 @@ export class CanvasEditor
     private slotForBand(bandTop: number): { x: number, width: number } | null
     {
         const bandBottom = bandTop + this.lineHeight
+        const g = this.floatGutter
         let slots: { left: number, right: number }[] = [{ left: 0, right: this.containerWidth }]
         for (const f of this.floats)
         {
-            if (bandBottom <= f.y || bandTop >= f.y + f.height) continue
-            const blockLeft = f.x
-            const blockRight = f.x + f.width
+            // Inflate the rect by the gutter so text clears it on every side.
+            if (bandBottom <= f.y - g || bandTop >= f.y + f.height + g) continue
+            const blockLeft = f.x - g
+            const blockRight = f.x + f.width + g
             const next: { left: number, right: number }[] = []
             for (const s of slots)
             {

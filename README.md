@@ -65,6 +65,7 @@ The container element should be an empty block-level element. The editor creates
 | `markStyles` | bold/italic/code defaults | Maps mark names → `{ fontWeight, fontStyle, fontFamily, color }` |
 | `keymap` | `{}` | ProseMirror key bindings, checked before built-in keys |
 | `floats` | `[]` | Rects (`{ x, y, width, height }`) the text flows around |
+| `floatGutter` | `12` | Gap in px kept between text and each float |
 | `onRender` | — | Called after every render with cache + timing stats |
 
 ## Marks (bold / italic / code)
