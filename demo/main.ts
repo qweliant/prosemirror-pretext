@@ -7,6 +7,7 @@
 import { Schema, type NodeSpec, type MarkType } from 'prosemirror-model'
 import { EditorState } from 'prosemirror-state'
 import { toggleMark } from 'prosemirror-commands'
+import { history, undo, redo } from 'prosemirror-history'
 import { CanvasEditor, markSpecs, buildMarkKeymap } from '../src'
 
 
@@ -105,10 +106,15 @@ async function boot(): Promise<void>
     let syncToolbar: () => void = () => {}
 
     const editor = new CanvasEditor({
-        state: EditorState.create({ doc, schema }),
+        state: EditorState.create({ doc, schema, plugins: [history()] }),
         container,
         maxHeight: 480,
-        keymap: buildMarkKeymap(schema),
+        keymap: {
+            ...buildMarkKeymap(schema),
+            'Mod-z': undo,
+            'Mod-y': redo,
+            'Shift-Mod-z': redo,
+        },
         onRender(stats)
         {
             statusEl.textContent =

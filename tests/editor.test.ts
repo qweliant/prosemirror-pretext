@@ -2,6 +2,7 @@ import { describe, test, expect } from 'bun:test'
 import { Schema, type NodeSpec, type MarkSpec } from 'prosemirror-model'
 import { EditorState, TextSelection } from 'prosemirror-state'
 import { toggleMark } from 'prosemirror-commands'
+import { history, undo, redo } from 'prosemirror-history'
 import { CanvasEditor, type RenderStats } from '../src/editor'
 import { markSpecs, buildMarkKeymap } from '../src/marks'
 
@@ -817,6 +818,47 @@ describe('marks: input & extensions', () =>
         const keys = buildMarkKeymap(partial)
         expect(Object.keys(keys)).toEqual(['Mod-b'])
         expect(typeof keys['Mod-b']).toBe('function')
+    })
+})
+
+
+describe('undo / redo (prosemirror-history)', () =>
+{
+    function historyEditor()
+    {
+        const doc = makeDoc('hello')
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        return new CanvasEditor({
+            state: EditorState.create({ doc, schema, plugins: [history()] }),
+            container,
+            keymap: { 'Ctrl-z': undo, 'Ctrl-y': redo },
+        })
+    }
+
+    test('Ctrl-z undoes a typed change and Ctrl-y redoes it', () =>
+    {
+        const ed = historyEditor()
+        ed.dispatch(ed.state.tr.setSelection(TextSelection.near(ed.state.doc.resolve(1))))
+        const ta = (ed as any).textarea as HTMLTextAreaElement
+        ta.dispatchEvent(new InputEvent('input', { inputType: 'insertText', data: 'X' } as InputEventInit))
+        expect(ed.state.doc.firstChild!.textContent).toBe('Xhello')
+
+        const press = (key: string) => ta.dispatchEvent(new KeyboardEvent('keydown', {
+            key, ctrlKey: true, bubbles: true, cancelable: true,
+        }))
+        press('z')
+        expect(ed.state.doc.firstChild!.textContent).toBe('hello')
+        press('y')
+        expect(ed.state.doc.firstChild!.textContent).toBe('Xhello')
+        ed.destroy()
+    })
+
+    test('command(undo) is a no-op with nothing to undo', () =>
+    {
+        const ed = historyEditor()
+        expect(ed.command(undo)).toBe(false)
+        ed.destroy()
     })
 })
 

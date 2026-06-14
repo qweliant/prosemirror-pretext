@@ -95,6 +95,26 @@ button.onmousedown = (e) => { e.preventDefault(); editor.command(toggleMark(sche
 Typing at a collapsed cursor inherits stored marks, so `Cmd-B` then typing
 produces bold text.
 
+## Undo / redo
+
+History is a standard ProseMirror plugin — add it to your state and bind the
+keys (the editor applies transactions through plugins, so it just works):
+
+```ts
+import { history, undo, redo } from 'prosemirror-history'
+
+const editor = new CanvasEditor({
+  state: EditorState.create({ doc, schema, plugins: [history()] }),
+  container,
+  keymap: {
+    ...buildMarkKeymap(schema),
+    'Mod-z': undo,
+    'Mod-y': redo,
+    'Shift-Mod-z': redo,
+  },
+})
+```
+
 ## Demo
 
 ```bash
@@ -121,6 +141,8 @@ Actively being built. Not yet published to npm.
 - [x] Scroll container with `ensureCaretVisible`
 - [x] Scroll virtualization (viewport-sized canvas + spatial index)
 - [x] Marks (bold, italic, code) — per-run fonts via Pretext rich-inline, with toggling keymap
+- [x] Double-click word selection + clipboard copy/cut
+- [x] Undo / redo via `prosemirror-history`
 - [ ] Variable-width layout (text around floated elements)
 
 ## Architecture
