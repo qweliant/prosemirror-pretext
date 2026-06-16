@@ -73,6 +73,13 @@ export interface CanvasEditorOptions
     floats?: FloatRect[]
     /** Gap (px) kept between text and each float rect. Default: 12. */
     floatGutter?: number
+    /** Schema mark name treated as a followable link. Default: 'link'. */
+    linkMark?: string
+    /**
+     * Invoked on Cmd/Ctrl-click of a link's text. Default opens `href` in a new
+     * tab. The mark's `href` attribute supplies the value.
+     */
+    onFollowLink?: (href: string, event: MouseEvent) => void
     /** Called after every render with timing/cache stats. */
     onRender?: (stats: RenderStats) => void
 }
@@ -97,12 +104,19 @@ export interface MarkStyle
     fontFamily?: string
     /** Fill color override. When omitted the run uses the editor's line color. */
     color?: string
+    /** Draw an underline beneath the run (e.g. links). */
+    underline?: boolean
+    /** Draw a line through the run. */
+    strikethrough?: boolean
 }
 
 const DEFAULT_MARK_STYLES: Record<string, MarkStyle> = {
     strong: { fontWeight: 700 },
     em: { fontStyle: 'italic' },
     code: { fontFamily: 'monospace', color: '#9ece6a' },
+    link: { color: '#7aa2f7', underline: true },
+    underline: { underline: true },
+    strikethrough: { strikethrough: true },
 }
 
 export interface RenderStats
@@ -130,6 +144,9 @@ export interface LineFragment
     width: number
     /** Char offset within the block where this run's first character sits. */
     pmStart: number
+    /** Drawn text decorations (links, underline, strikethrough marks). */
+    underline?: boolean
+    strikethrough?: boolean
 }
 
 export interface LineLayout
@@ -167,6 +184,8 @@ interface CachedFragment
     x: number
     width: number
     pmStart: number
+    underline?: boolean
+    strikethrough?: boolean
 }
 
 interface CachedLine
@@ -196,6 +215,7 @@ interface MarkedLineCtx
     meta: {
         pmStart: number, leadTrim: number, font: string,
         color: string | null, trimmed: string,
+        underline: boolean, strikethrough: boolean,
     }[]
     blockText: string
     consumed: number[]
@@ -237,6 +257,10 @@ export class CanvasEditor
     private floats: FloatRect[]
     // Breathing room kept around each float so text never kisses its edge.
     private readonly floatGutter: number
+
+    // ─── Links ─────────────────────────────────────────────────────────
+    private readonly linkMark: string
+    private readonly onFollowLink: (href: string, event: MouseEvent) => void
     // Below this, a slot is too narrow to set text; the line flows past it.
     private readonly minSlotWidth = 24
 
@@ -344,6 +368,9 @@ export class CanvasEditor
 
         this.floats = options.floats ?? []
         this.floatGutter = options.floatGutter ?? 12
+        this.linkMark = options.linkMark ?? 'link'
+        this.onFollowLink = options.onFollowLink
+            ?? ((href) => { window.open(href, '_blank', 'noopener') })
 
         // Build DOM
         const stack = document.createElement('div')
@@ -445,6 +472,47 @@ export class CanvasEditor
     {
         this.floats = floats
         this.scheduleRender()
+    }
+
+    /**
+     * Viewport coordinates of a document position — the top-left of the caret
+     * there, plus the line height. The anchor for selection-positioned UI
+     * (bubble menus, inline link editors, hovercards). Mirrors
+     * `EditorView.coordsAtPos`. Returns null if the doc has no layout yet.
+     */
+    coordsAtPos(pos: number): { x: number, y: number, height: number } | null
+    {
+        const coords = this.posToCoords(
+            this.lastLayouts, clamp(pos, 0, this.state.doc.content.size),
+        )
+        if (!coords) return null
+        const rect = this.canvas.getBoundingClientRect()
+        const scrollTop = this.scroller?.scrollTop ?? 0
+        return {
+            x: rect.left + coords.x,
+            y: rect.top + coords.y - scrollTop,
+            height: this.lineHeight,
+        }
+    }
+
+    /**
+     * Viewport bounding box of the current selection, or null when it's empty.
+     * Built from the selection's endpoints — enough to anchor a floating
+     * toolbar above (`top`) and centered (`(left + right) / 2`).
+     */
+    selectionRect(): { left: number, right: number, top: number, bottom: number } | null
+    {
+        const sel = this.state.selection
+        if (sel.empty) return null
+        const a = this.coordsAtPos(sel.from)
+        const b = this.coordsAtPos(sel.to)
+        if (!a || !b) return null
+        return {
+            left: Math.min(a.x, b.x),
+            right: Math.max(a.x, b.x),
+            top: Math.min(a.y, b.y),
+            bottom: Math.max(a.y + a.height, b.y + b.height),
+        }
     }
 
     destroy(): void
@@ -566,12 +634,16 @@ export class CanvasEditor
      * weight/style/family over the base font size. Color is null when no mark
      * overrides it (so the caller can fall back to the line color / accent).
      */
-    private resolveRunStyle(marks: readonly Mark[]): { font: string, color: string | null }
+    private resolveRunStyle(marks: readonly Mark[]): {
+        font: string, color: string | null, underline: boolean, strikethrough: boolean,
+    }
     {
         let fontStyle = ''
         let fontWeight = ''
         let family = this.baseFontFamily
         let color: string | null = null
+        let underline = false
+        let strikethrough = false
 
         for (const mark of marks)
         {
@@ -581,12 +653,14 @@ export class CanvasEditor
             if (ms.fontWeight !== undefined) fontWeight = String(ms.fontWeight)
             if (ms.fontFamily) family = ms.fontFamily
             if (ms.color) color = ms.color
+            if (ms.underline) underline = true
+            if (ms.strikethrough) strikethrough = true
         }
 
         const font = `${fontStyle} ${fontWeight} ${this.baseFontSize}px ${family}`
             .replace(/\s+/g, ' ')
             .trim()
-        return { font, color }
+        return { font, color, underline, strikethrough }
     }
 
     /**
@@ -606,29 +680,39 @@ export class CanvasEditor
         const meta: MarkedLineCtx['meta'] = []
 
         let offset = 0
-        let cur: { font: string, color: string | null, text: string, pmStart: number } | null = null
+        type Run = {
+            font: string, color: string | null, text: string, pmStart: number,
+            underline: boolean, strikethrough: boolean,
+        }
+        let cur: Run | null = null
         const flush = () =>
         {
             if (!cur) return
             const leadTrim = cur.text.length - cur.text.trimStart().length
             const trimmed = cur.text.replace(/^\s+/, '').replace(/\s+$/, '')
             items.push({ text: cur.text, font: cur.font })
-            meta.push({ pmStart: cur.pmStart, leadTrim, font: cur.font, color: cur.color, trimmed })
+            meta.push({
+                pmStart: cur.pmStart, leadTrim, font: cur.font, color: cur.color,
+                trimmed, underline: cur.underline, strikethrough: cur.strikethrough,
+            })
             cur = null
         }
 
         node.forEach((child) =>
         {
             const childText = child.isText ? (child.text ?? '') : ''
-            const { font, color } = this.resolveRunStyle(child.marks)
-            if (cur && cur.font === font && cur.color === color)
+            const { font, color, underline, strikethrough } = this.resolveRunStyle(child.marks)
+            if (
+                cur && cur.font === font && cur.color === color
+                && cur.underline === underline && cur.strikethrough === strikethrough
+            )
             {
                 cur.text += childText
             }
             else
             {
                 flush()
-                cur = { font, color, text: childText, pmStart: offset }
+                cur = { font, color, text: childText, pmStart: offset, underline, strikethrough }
             }
             offset += child.nodeSize
         })
@@ -726,7 +810,10 @@ export class CanvasEditor
             }
 
             const width = this.measureWidth(text, m.font)
-            fragments.push({ text, font: m.font, color: m.color, x, width, pmStart })
+            fragments.push({
+                text, font: m.font, color: m.color, x, width, pmStart,
+                underline: m.underline, strikethrough: m.strikethrough,
+            })
             x += width
             lineText += text
             prevPmEnd = pmStart + text.length
@@ -1011,6 +1098,10 @@ export class CanvasEditor
                         ctx.font = frag.font
                         ctx.fillStyle = frag.color ?? lineColor
                         ctx.fillText(frag.text, line.x + frag.x, line.y)
+                        if (frag.underline || frag.strikethrough)
+                        {
+                            this.paintDecoration(ctx, frag, line)
+                        }
                     }
                     ctx.font = this.font
                 }
@@ -1020,6 +1111,25 @@ export class CanvasEditor
                     ctx.fillText(line.text, line.x, line.y)
                 }
             }
+        }
+    }
+
+    /** Underline / strikethrough lines for a run, in the current fill color. */
+    private paintDecoration(
+        ctx: CanvasRenderingContext2D,
+        frag: LineFragment,
+        line: LineLayout,
+    ): void
+    {
+        const x = line.x + frag.x
+        const thickness = Math.max(1, Math.round(this.baseFontSize / 14))
+        if (frag.underline)
+        {
+            ctx.fillRect(x, line.y + Math.round(this.baseFontSize * 0.92), frag.width, thickness)
+        }
+        if (frag.strikethrough)
+        {
+            ctx.fillRect(x, line.y + Math.round(this.baseFontSize * 0.52), frag.width, thickness)
         }
     }
 
@@ -1342,6 +1452,22 @@ export class CanvasEditor
         return offset
     }
 
+    /**
+     * The href of a link mark covering the document position, or null. Checks
+     * the characters on both sides so a click anywhere on the link resolves.
+     */
+    private linkHrefAt(pos: number): string | null
+    {
+        const linkType = this.state.schema.marks[this.linkMark]
+        if (!linkType) return null
+        const $pos = this.state.doc.resolve(clamp(pos, 0, this.state.doc.content.size))
+        const mark = (
+            ($pos.nodeAfter ? linkType.isInSet($pos.nodeAfter.marks) : undefined)
+            ?? ($pos.nodeBefore ? linkType.isInSet($pos.nodeBefore.marks) : undefined)
+        )
+        return mark ? (mark.attrs['href'] as string) : null
+    }
+
     // ─── Render Loop ───────────────────────────────────────────────────
 
     private scheduleRender(): void
@@ -1533,13 +1659,37 @@ export class CanvasEditor
             e.preventDefault()
             const { x, y } = this.eventToDocCoords(e)
             const hit = this.clickToPos(this.lastLayouts, x, y)
-            if (hit !== null)
+            if (hit === null) return
+
+            // Cmd/Ctrl-click follows a link instead of moving the caret.
+            if (e.metaKey || e.ctrlKey)
             {
-                this.setHead(hit.pos, e.shiftKey)
-                this.caretBias = hit.bias
+                const href = this.linkHrefAt(hit.pos)
+                if (href !== null)
+                {
+                    this.onFollowLink(href, e)
+                    return
+                }
             }
+
+            this.setHead(hit.pos, e.shiftKey)
+            this.caretBias = hit.bias
             this.dragging = true
             this.textarea.focus()
+        }, { signal })
+
+        // Pointer cursor when a modifier-click would follow a link.
+        this.canvas.addEventListener('mousemove', (e) =>
+        {
+            if (this.dragging) return
+            let overLink = false
+            if (e.metaKey || e.ctrlKey)
+            {
+                const { x, y } = this.eventToDocCoords(e)
+                const hit = this.clickToPos(this.lastLayouts, x, y)
+                overLink = hit !== null && this.linkHrefAt(hit.pos) !== null
+            }
+            this.canvas.style.cursor = overLink ? 'pointer' : ''
         }, { signal })
 
         window.addEventListener('mousemove', (e) =>

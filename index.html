@@ -88,6 +88,23 @@
             position: relative;
         }
 
+        .bubble {
+            position: fixed;
+            display: none;
+            gap: 4px;
+            padding: 4px;
+            border-radius: 8px;
+            background: #1c1c20;
+            border: 1px solid #3a3a42;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+            z-index: 10;
+        }
+
+        .bubble .tb {
+            min-width: 28px;
+            height: 26px;
+        }
+
         .float-box {
             position: absolute;
             display: flex;

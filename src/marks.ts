@@ -1,14 +1,14 @@
 /**
  * Optional starter marks + key bindings for a WYSIWYG editor. This layer is
  * convenience, not core: bring your own schema if you prefer. The mark names
- * here (`strong`, `em`, `code`) line up with the default `markStyles` in
- * CanvasEditor, so bold/italic/code render out of the box.
+ * here (`strong`, `em`, `code`, `link`, `underline`, `strikethrough`) line up
+ * with the default `markStyles` in CanvasEditor, so they render out of the box.
  */
 import { type MarkSpec, type Schema } from 'prosemirror-model'
 import { type Command } from 'prosemirror-state'
 import { toggleMark } from 'prosemirror-commands'
 
-/** Mark specs for bold, italic, and inline code. Spread into your schema. */
+/** Mark specs for bold, italic, code, links, underline, and strikethrough. */
 export const markSpecs: Record<string, MarkSpec> = {
     strong: {
         toDOM: () => ['strong', 0],
@@ -25,6 +25,28 @@ export const markSpecs: Record<string, MarkSpec> = {
     code: {
         toDOM: () => ['code', 0],
         parseDOM: [{ tag: 'code' }],
+    },
+    link: {
+        attrs: { href: {}, title: { default: null } },
+        inclusive: false,
+        toDOM: (mark) => ['a', { href: mark.attrs['href'], title: mark.attrs['title'] }, 0],
+        parseDOM: [
+            {
+                tag: 'a[href]',
+                getAttrs: (dom) => ({
+                    href: (dom as HTMLElement).getAttribute('href'),
+                    title: (dom as HTMLElement).getAttribute('title'),
+                }),
+            },
+        ],
+    },
+    underline: {
+        toDOM: () => ['u', 0],
+        parseDOM: [{ tag: 'u' }, { style: 'text-decoration=underline' }],
+    },
+    strikethrough: {
+        toDOM: () => ['s', 0],
+        parseDOM: [{ tag: 's' }, { tag: 'del' }, { style: 'text-decoration=line-through' }],
     },
 }
 

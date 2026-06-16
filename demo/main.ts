@@ -28,6 +28,9 @@ const schema = new Schema({ nodes, marks: markSpecs })
 const m = (s: string, ...names: string[]) =>
     schema.text(s, names.map((n) => schema.marks[n].create()))
 
+const link = (s: string, href: string) =>
+    schema.text(s, [schema.marks['link'].create({ href })])
+
 
 // ─── Sample Document ───────────────────────────────────────────────────────
 
@@ -45,7 +48,9 @@ const doc = schema.node('doc', null, [
         m(' — or use the toolbar. Marks flow through real ProseMirror '),
         m('transactions', 'em'),
         m(', re-segment only the edited block, and repaint to canvas with '),
-        m('per-run fonts', 'strong'), m(' computed by hand.'),
+        m('per-run fonts', 'strong'), m(' computed by hand. Built on '),
+        link('Pretext', 'https://github.com/chenglou/pretext'),
+        m(' — ⌘/Ctrl-click the link to open it.'),
     ]),
 ])
 
@@ -81,6 +86,31 @@ function buildToolbar(editor: CanvasEditor): () => void
         buttons.push({ el, type })
     }
 
+    // Link button: prompt for a URL to add, or strip an existing link.
+    const linkType = schema.marks['link']
+    const linkEl = document.createElement('button')
+    linkEl.textContent = '🔗'
+    linkEl.className = 'tb'
+    linkEl.addEventListener('mousedown', (e) =>
+    {
+        e.preventDefault()
+        const { from, to, empty } = editor.state.selection
+        if (markActive(editor.state, linkType))
+        {
+            editor.command((state, dispatch) =>
+            {
+                dispatch?.(state.tr.removeMark(from, to, linkType))
+                return true
+            })
+            return
+        }
+        if (empty) return // need a selection to wrap
+        const href = window.prompt('Link URL:')
+        if (href) editor.command(toggleMark(linkType, { href }))
+    })
+    wrap.appendChild(linkEl)
+    buttons.push({ el: linkEl, type: linkType })
+
     // Reflect the active marks at the caret/selection on every render.
     return () =>
     {
@@ -88,6 +118,49 @@ function buildToolbar(editor: CanvasEditor): () => void
         {
             el.classList.toggle('active', markActive(editor.state, type))
         }
+    }
+}
+
+// ─── Bubble menu (floating toolbar over a selection) ─────────────────────────
+
+function setupBubble(editor: CanvasEditor): () => void
+{
+    const bubble = document.createElement('div')
+    bubble.className = 'bubble'
+    const buttons: { el: HTMLButtonElement, type: MarkType }[] = []
+    for (const [label, markName] of [['B', 'strong'], ['I', 'em'], ['</>', 'code']] as const)
+    {
+        const type = schema.marks[markName]
+        const el = document.createElement('button')
+        el.textContent = label
+        el.className = 'tb'
+        el.addEventListener('mousedown', (e) =>
+        {
+            e.preventDefault() // keep the selection
+            editor.command(toggleMark(type))
+        })
+        bubble.appendChild(el)
+        buttons.push({ el, type })
+    }
+    document.body.appendChild(bubble)
+
+    // Reposition over the selection (or hide) on every render.
+    return () =>
+    {
+        const rect = editor.selectionRect()
+        if (!rect)
+        {
+            bubble.style.display = 'none'
+            return
+        }
+        bubble.style.display = 'flex'
+        for (const { el, type } of buttons)
+        {
+            el.classList.toggle('active', markActive(editor.state, type))
+        }
+        const cx = (rect.left + rect.right) / 2
+        bubble.style.left = `${Math.round(cx - bubble.offsetWidth / 2)}px`
+        bubble.style.top = `${Math.round(Math.max(8, rect.top - bubble.offsetHeight - 8))}px`
     }
 }
 
@@ -104,6 +177,7 @@ async function boot(): Promise<void>
     await new Promise((r) => setTimeout(r, 50))
 
     let syncToolbar: () => void = () => {}
+    let syncBubble: () => void = () => {}
 
     const editor = new CanvasEditor({
         state: EditorState.create({ doc, schema, plugins: [history()] }),
@@ -121,11 +195,14 @@ async function boot(): Promise<void>
                 `cache ${stats.cacheHits}H/${stats.cacheMisses}M · ` +
                 `${stats.renderTimeMs.toFixed(1)}ms`
             syncToolbar()
+            syncBubble()
         },
     })
 
     syncToolbar = buildToolbar(editor)
+    syncBubble = setupBubble(editor)
     syncToolbar()
+    syncBubble()
     setupFloat(editor)
     editor.focus()
 

@@ -62,11 +62,16 @@ The container element should be an empty block-level element. The editor creates
 | `firstLineColor` | `'#818cf8'` | First-line accent color |
 | `caretColor` | `'#a5b4fc'` | Caret color |
 | `selectionColor` | `'rgba(129, 140, 248, 0.25)'` | Selection highlight color |
-| `markStyles` | bold/italic/code defaults | Maps mark names → `{ fontWeight, fontStyle, fontFamily, color }` |
+| `markStyles` | defaults below | Maps mark names → `{ fontWeight, fontStyle, fontFamily, color, underline, strikethrough }` |
 | `keymap` | `{}` | ProseMirror key bindings, checked before built-in keys |
 | `floats` | `[]` | Rects (`{ x, y, width, height }`) the text flows around |
 | `floatGutter` | `12` | Gap in px kept between text and each float |
+| `linkMark` | `'link'` | Schema mark name treated as a followable link |
+| `onFollowLink` | opens in new tab | `(href, event)` run on Cmd/Ctrl-click of a link |
 | `onRender` | — | Called after every render with cache + timing stats |
+
+Default `markStyles`: `strong` → bold, `em` → italic, `code` → monospace + green,
+`link` → blue + underline, `underline` → underline, `strikethrough` → line-through.
 
 ## Marks (bold / italic / code)
 
@@ -96,6 +101,15 @@ button.onmousedown = (e) => { e.preventDefault(); editor.command(toggleMark(sche
 
 Typing at a collapsed cursor inherits stored marks, so `Cmd-B` then typing
 produces bold text.
+
+### Links
+
+`markSpecs` includes a `link` mark (`href` attribute) that renders blue +
+underlined by default. **Cmd/Ctrl-click** a link follows it (`onFollowLink`,
+default opens in a new tab); plain click edits as normal, and the cursor turns
+into a pointer when a modifier-click would follow. Apply links like any mark —
+`editor.command(toggleMark(schema.marks.link, { href }))`. The `underline` and
+`strikethrough` marks render their decoration lines too.
 
 ## Floats (text wrapping around elements)
 
@@ -136,6 +150,33 @@ const editor = new CanvasEditor({
 })
 ```
 
+## Selection-anchored UI (bubble menus)
+
+Toolbars are yours to build — the editor exposes `editor.command(cmd)` to run
+ProseMirror commands and `editor.state` to read active marks (see the demo's
+fixed toolbar). For *floating* UI positioned over the selection, two methods map
+document positions to the screen, mirroring `EditorView.coordsAtPos`:
+
+```ts
+editor.coordsAtPos(pos)   // → { x, y, height } in viewport coords (or null)
+editor.selectionRect()    // → { left, right, top, bottom } in viewport coords (null if empty)
+```
+
+A bubble menu is then just a positioned DOM element updated on each render
+(`onRender` fires on every selection change):
+
+```ts
+function update() {
+  const r = editor.selectionRect()
+  if (!r) { bubble.style.display = 'none'; return }
+  bubble.style.display = 'flex'
+  bubble.style.left = `${(r.left + r.right) / 2 - bubble.offsetWidth / 2}px`
+  bubble.style.top  = `${r.top - bubble.offsetHeight - 8}px`
+}
+```
+
+Same primitives power inline link editors, hovercards, and autocomplete popups.
+
 ## Demo
 
 ```bash
@@ -156,8 +197,8 @@ editor needs to implement.
 
 ### Inline — marks & styling
 
-- [ ] **Links** — styled `link` mark plus click-to-follow and a hover cursor (per-run hit-testing)
-- [ ] **Underline / strikethrough** — drawn lines, not font properties, so they need their own paint pass
+- [x] **Links** — `link` mark, blue + underlined, Cmd/Ctrl-click to follow (see above)
+- [x] **Underline / strikethrough** — drawn decoration lines via `markStyles`
 - [ ] **Text & highlight color** — fill color per run, plus a rect painted behind the glyphs
 - [ ] **Superscript / subscript** — baseline shift + reduced size threaded through the layout pipeline
 

@@ -15,17 +15,19 @@ const nodes: Record<string, NodeSpec> = {
     },
     text: { inline: true },
 }
-const marks: Record<string, MarkSpec> = {
-    strong: { toDOM: () => ['strong', 0], parseDOM: [{ tag: 'strong' }] },
-    em: { toDOM: () => ['em', 0], parseDOM: [{ tag: 'em' }] },
-    code: { toDOM: () => ['code', 0], parseDOM: [{ tag: 'code' }] },
-}
+const marks: Record<string, MarkSpec> = { ...markSpecs }
 const schema = new Schema({ nodes, marks })
 
 /** Build a text node carrying the named marks. */
 function mtext(s: string, ...markNames: string[])
 {
     return schema.text(s, markNames.map((n) => schema.marks[n].create()))
+}
+
+/** Build a text node carrying a link mark with the given href. */
+function ltext(s: string, href: string)
+{
+    return schema.text(s, [schema.marks['link'].create({ href })])
 }
 
 function makeDoc(...paragraphs: string[])
@@ -777,6 +779,113 @@ describe('marked text coordinates', () =>
         ;(ed as any).render()
         // 'CD' occupies x 24..40 → one selection rect there.
         expect(rects).toContainEqual({ x: 24, w: 16 })
+        ed.destroy()
+    })
+})
+
+
+describe('coordsAtPos / selectionRect (toolbar anchoring)', () =>
+{
+    // happy-dom getBoundingClientRect is all zeros, so viewport coords equal
+    // document coords here. Mock: 8px/char, lineHeight 26.
+    test('coordsAtPos maps a doc position to viewport coords', () =>
+    {
+        const { ed } = makeEditor(['hello'])
+        const c = (ed as any).coordsAtPos(4) // after "hel"
+        expect(c).toEqual({ x: 24, y: 0, height: 26 })
+        ed.destroy()
+    })
+
+    test('selectionRect spans the selection, null when empty', () =>
+    {
+        const { ed } = makeEditor(['hello'])
+        expect(ed.selectionRect()).toBeNull()
+        ed.dispatch(ed.state.tr.setSelection(TextSelection.create(ed.state.doc, 1, 4)))
+        expect(ed.selectionRect()).toEqual({ left: 0, right: 24, top: 0, bottom: 26 })
+        ed.destroy()
+    })
+})
+
+
+describe('links & decorations', () =>
+{
+    // "see here now" with "here" linked. Block offsets: "see " 0-3, "here" 4-7,
+    // " now" 8-11. (Mock: 8px/char.)
+    function linkEditor(opts: { onFollowLink?: (href: string, e: MouseEvent) => void } = {})
+    {
+        const doc = schema.node('doc', null, [
+            schema.node('paragraph', null, [
+                mtext('see '), ltext('here', 'https://x.com'), mtext(' now'),
+            ]),
+        ])
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        return new CanvasEditor({ state: EditorState.create({ doc, schema }), container, ...opts })
+    }
+
+    test('a link renders as an underlined, colored run', () =>
+    {
+        const ed = linkEditor()
+        const frags = (ed as any).lastLayouts[0].lines[0].fragments
+        const linkFrag = frags.find((f: any) => f.underline)
+        expect(linkFrag).toBeTruthy()
+        expect(linkFrag.text.startsWith('here')).toBe(true)
+        expect(linkFrag.color).toBe('#7aa2f7') // default link color
+        // A run differing only in decoration is its own fragment.
+        expect(frags.length).toBe(3)
+        ed.destroy()
+    })
+
+    test('underline and strikethrough marks set fragment flags', () =>
+    {
+        const doc = schema.node('doc', null, [
+            schema.node('paragraph', null, [
+                mtext('a', 'underline'), mtext('b', 'strikethrough'), mtext('c'),
+            ]),
+        ])
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        const ed = new CanvasEditor({ state: EditorState.create({ doc, schema }), container })
+        const frags = (ed as any).lastLayouts[0].lines[0].fragments
+        expect(frags[0].underline).toBe(true)
+        expect(frags[1].strikethrough).toBe(true)
+        expect(!!frags[2].underline).toBe(false)
+        ed.destroy()
+    })
+
+    test('linkHrefAt resolves inside the link, null elsewhere', () =>
+    {
+        const ed = linkEditor()
+        expect((ed as any).linkHrefAt(6)).toBe('https://x.com') // inside "here"
+        expect((ed as any).linkHrefAt(2)).toBeNull() // inside "see"
+        ed.destroy()
+    })
+
+    test('Cmd/Ctrl-click on a link follows it instead of moving the caret', () =>
+    {
+        const box: { v: string | null } = { v: null }
+        const ed = linkEditor({ onFollowLink: (href) => { box.v = href } })
+        const canvas = (ed as any).canvas as HTMLCanvasElement
+        // x=40 lands in the "here" run (mock geometry); metaKey → follow.
+        canvas.dispatchEvent(new MouseEvent('mousedown', {
+            button: 0, clientX: 40, clientY: 13, metaKey: true, bubbles: true, cancelable: true,
+        }))
+        expect(box.v).toBe('https://x.com')
+        // Selection stayed put (caret not moved into the link).
+        expect(ed.state.selection.empty).toBe(true)
+        ed.destroy()
+    })
+
+    test('plain click on a link moves the caret (does not follow)', () =>
+    {
+        const box: { v: string | null } = { v: null }
+        const ed = linkEditor({ onFollowLink: (href) => { box.v = href } })
+        const canvas = (ed as any).canvas as HTMLCanvasElement
+        canvas.dispatchEvent(new MouseEvent('mousedown', {
+            button: 0, clientX: 40, clientY: 13, bubbles: true, cancelable: true,
+        }))
+        expect(box.v).toBeNull()
+        expect(ed.state.selection.head).toBeGreaterThan(1) // caret landed in the link
         ed.destroy()
     })
 })
