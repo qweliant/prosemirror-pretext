@@ -31,6 +31,12 @@ const m = (s: string, ...names: string[]) =>
 const link = (s: string, href: string) =>
     schema.text(s, [schema.marks['link'].create({ href })])
 
+const colored = (s: string, color: string) =>
+    schema.text(s, [schema.marks['textColor'].create({ color })])
+
+const highlighted = (s: string, color?: string) =>
+    schema.text(s, [schema.marks['highlight'].create(color ? { color } : null)])
+
 
 // ─── Sample Document ───────────────────────────────────────────────────────
 
@@ -50,7 +56,10 @@ const doc = schema.node('doc', null, [
         m(', re-segment only the edited block, and repaint to canvas with '),
         m('per-run fonts', 'strong'), m(' computed by hand. Built on '),
         link('Pretext', 'https://github.com/chenglou/pretext'),
-        m(' — ⌘/Ctrl-click the link to open it.'),
+        m(' — ⌘/Ctrl-click the link to open it. Runs can be '),
+        colored('colored', '#f7768e'), m(' or '), highlighted('highlighted'),
+        m(' too — even '), m('E=mc'), m('2', 'superscript'),
+        m(' and H'), m('2', 'subscript'), m('O.'),
     ]),
 ])
 
@@ -110,6 +119,19 @@ function buildToolbar(editor: CanvasEditor): () => void
     })
     wrap.appendChild(linkEl)
     buttons.push({ el: linkEl, type: linkType })
+
+    // Highlight button: toggle a yellow highlight over the selection.
+    const hlType = schema.marks['highlight']
+    const hlEl = document.createElement('button')
+    hlEl.textContent = '🖍'
+    hlEl.className = 'tb'
+    hlEl.addEventListener('mousedown', (e) =>
+    {
+        e.preventDefault()
+        editor.command(toggleMark(hlType))
+    })
+    wrap.appendChild(hlEl)
+    buttons.push({ el: hlEl, type: hlType })
 
     // Reflect the active marks at the caret/selection on every render.
     return () =>

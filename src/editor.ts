@@ -56,7 +56,7 @@ export interface CanvasEditorOptions
      * `strong` (bold), `em` (italic), and `code` (monospace + green). Pass
      * `{ strong: null }` to disable a default.
      */
-    markStyles?: Record<string, MarkStyle | null>
+    markStyles?: Record<string, MarkStyleResolver | null>
     /**
      * ProseMirror key bindings, e.g. `{ 'Mod-b': toggleMark(schema.marks.strong) }`.
      * Checked on keydown before the editor's built-in navigation/editing keys.
@@ -104,19 +104,34 @@ export interface MarkStyle
     fontFamily?: string
     /** Fill color override. When omitted the run uses the editor's line color. */
     color?: string
+    /** Background color painted behind the run (e.g. highlight). */
+    background?: string
     /** Draw an underline beneath the run (e.g. links). */
     underline?: boolean
     /** Draw a line through the run. */
     strikethrough?: boolean
+    /** Shrink + raise/lower the run (superscript / subscript). */
+    verticalAlign?: 'super' | 'sub'
 }
 
-const DEFAULT_MARK_STYLES: Record<string, MarkStyle> = {
+/**
+ * A mark's styling — either a fixed style, or a function of the mark so the
+ * style can read its attributes (e.g. a `textColor` mark whose colour lives in
+ * `mark.attrs.color`). Returning null contributes nothing.
+ */
+export type MarkStyleResolver = MarkStyle | ((mark: Mark) => MarkStyle | null)
+
+const DEFAULT_MARK_STYLES: Record<string, MarkStyleResolver> = {
     strong: { fontWeight: 700 },
     em: { fontStyle: 'italic' },
     code: { fontFamily: 'monospace', color: '#9ece6a' },
     link: { color: '#7aa2f7', underline: true },
     underline: { underline: true },
     strikethrough: { strikethrough: true },
+    textColor: (mark) => ({ color: mark.attrs['color'] as string }),
+    highlight: (mark) => ({ background: (mark.attrs['color'] as string) || '#fde047' }),
+    superscript: { verticalAlign: 'super' },
+    subscript: { verticalAlign: 'sub' },
 }
 
 export interface RenderStats
@@ -144,9 +159,13 @@ export interface LineFragment
     width: number
     /** Char offset within the block where this run's first character sits. */
     pmStart: number
+    /** Background color painted behind the run (highlight). */
+    background?: string | null
     /** Drawn text decorations (links, underline, strikethrough marks). */
     underline?: boolean
     strikethrough?: boolean
+    /** Vertical paint offset for super/subscript runs. */
+    baselineShift?: number
 }
 
 export interface LineLayout
@@ -181,11 +200,13 @@ interface CachedFragment
     text: string
     font: string
     color: string | null
+    background: string | null
     x: number
     width: number
     pmStart: number
     underline?: boolean
     strikethrough?: boolean
+    baselineShift?: number
 }
 
 interface CachedLine
@@ -214,8 +235,8 @@ interface MarkedLineCtx
 {
     meta: {
         pmStart: number, leadTrim: number, font: string,
-        color: string | null, trimmed: string,
-        underline: boolean, strikethrough: boolean,
+        color: string | null, background: string | null, trimmed: string,
+        underline: boolean, strikethrough: boolean, baselineShift: number,
     }[]
     blockText: string
     consumed: number[]
@@ -243,7 +264,7 @@ export class CanvasEditor
     private readonly onRender?: (stats: RenderStats) => void
 
     // ─── Marks ─────────────────────────────────────────────────────────
-    private readonly markStyles: Record<string, MarkStyle>
+    private readonly markStyles: Record<string, MarkStyleResolver>
     // Compiled key bindings (prosemirror-keymap); consulted before built-ins.
     private readonly keymapHandler: (event: KeyboardEvent) => boolean
     // Base font split into size + family so marked runs can compose new font
@@ -635,32 +656,48 @@ export class CanvasEditor
      * overrides it (so the caller can fall back to the line color / accent).
      */
     private resolveRunStyle(marks: readonly Mark[]): {
-        font: string, color: string | null, underline: boolean, strikethrough: boolean,
+        font: string, color: string | null, background: string | null,
+        underline: boolean, strikethrough: boolean, baselineShift: number,
     }
     {
         let fontStyle = ''
         let fontWeight = ''
         let family = this.baseFontFamily
         let color: string | null = null
+        let background: string | null = null
         let underline = false
         let strikethrough = false
+        let verticalAlign: 'super' | 'sub' | null = null
 
         for (const mark of marks)
         {
-            const ms = this.markStyles[mark.type.name]
+            const entry = this.markStyles[mark.type.name]
+            const ms = typeof entry === 'function' ? entry(mark) : entry
             if (!ms) continue
             if (ms.fontStyle) fontStyle = ms.fontStyle
             if (ms.fontWeight !== undefined) fontWeight = String(ms.fontWeight)
             if (ms.fontFamily) family = ms.fontFamily
             if (ms.color) color = ms.color
+            if (ms.background) background = ms.background
             if (ms.underline) underline = true
             if (ms.strikethrough) strikethrough = true
+            if (ms.verticalAlign) verticalAlign = ms.verticalAlign
         }
 
-        const font = `${fontStyle} ${fontWeight} ${this.baseFontSize}px ${family}`
+        // Super/subscript shrink the run and shift it off the baseline.
+        const size = verticalAlign
+            ? Math.round(this.baseFontSize * 0.72)
+            : this.baseFontSize
+        const baselineShift = verticalAlign === 'super'
+            ? -Math.round(this.baseFontSize * 0.30)
+            : verticalAlign === 'sub'
+                ? Math.round(this.baseFontSize * 0.18)
+                : 0
+
+        const font = `${fontStyle} ${fontWeight} ${size}px ${family}`
             .replace(/\s+/g, ' ')
             .trim()
-        return { font, color, underline, strikethrough }
+        return { font, color, background, underline, strikethrough, baselineShift }
     }
 
     /**
@@ -681,8 +718,9 @@ export class CanvasEditor
 
         let offset = 0
         type Run = {
-            font: string, color: string | null, text: string, pmStart: number,
-            underline: boolean, strikethrough: boolean,
+            font: string, color: string | null, background: string | null,
+            text: string, pmStart: number, underline: boolean, strikethrough: boolean,
+            baselineShift: number,
         }
         let cur: Run | null = null
         const flush = () =>
@@ -693,7 +731,9 @@ export class CanvasEditor
             items.push({ text: cur.text, font: cur.font })
             meta.push({
                 pmStart: cur.pmStart, leadTrim, font: cur.font, color: cur.color,
-                trimmed, underline: cur.underline, strikethrough: cur.strikethrough,
+                background: cur.background, trimmed,
+                underline: cur.underline, strikethrough: cur.strikethrough,
+                baselineShift: cur.baselineShift,
             })
             cur = null
         }
@@ -701,10 +741,11 @@ export class CanvasEditor
         node.forEach((child) =>
         {
             const childText = child.isText ? (child.text ?? '') : ''
-            const { font, color, underline, strikethrough } = this.resolveRunStyle(child.marks)
+            const { font, color, background, underline, strikethrough, baselineShift } = this.resolveRunStyle(child.marks)
             if (
-                cur && cur.font === font && cur.color === color
+                cur && cur.font === font && cur.color === color && cur.background === background
                 && cur.underline === underline && cur.strikethrough === strikethrough
+                && cur.baselineShift === baselineShift
             )
             {
                 cur.text += childText
@@ -712,7 +753,10 @@ export class CanvasEditor
             else
             {
                 flush()
-                cur = { font, color, text: childText, pmStart: offset, underline, strikethrough }
+                cur = {
+                    font, color, background, text: childText, pmStart: offset,
+                    underline, strikethrough, baselineShift,
+                }
             }
             offset += child.nodeSize
         })
@@ -811,8 +855,10 @@ export class CanvasEditor
 
             const width = this.measureWidth(text, m.font)
             fragments.push({
-                text, font: m.font, color: m.color, x, width, pmStart,
+                text, font: m.font, color: m.color, background: m.background,
+                x, width, pmStart,
                 underline: m.underline, strikethrough: m.strikethrough,
+                baselineShift: m.baselineShift,
             })
             x += width
             lineText += text
@@ -1060,6 +1106,26 @@ export class CanvasEditor
         const viewTop = scrollTop
         const viewBottom = scrollTop + cssHeight
 
+        const isVisible = (block: BlockLayout) => !virtualized
+            || (block.yOffset + block.height >= viewTop && block.yOffset <= viewBottom)
+
+        // Highlight backgrounds paint under everything (before the selection
+        // overlay, so selecting highlighted text still shows the selection).
+        for (const block of layouts)
+        {
+            if (!isVisible(block)) continue
+            for (const line of block.lines)
+            {
+                if (!line.fragments) continue
+                for (const frag of line.fragments)
+                {
+                    if (!frag.background) continue
+                    ctx.fillStyle = frag.background
+                    ctx.fillRect(line.x + frag.x, line.y, frag.width, this.lineHeight)
+                }
+            }
+        }
+
         const sel = this.state.selection
         if (!sel.empty)
         {
@@ -1097,10 +1163,11 @@ export class CanvasEditor
                     {
                         ctx.font = frag.font
                         ctx.fillStyle = frag.color ?? lineColor
-                        ctx.fillText(frag.text, line.x + frag.x, line.y)
+                        const fy = line.y + (frag.baselineShift ?? 0)
+                        ctx.fillText(frag.text, line.x + frag.x, fy)
                         if (frag.underline || frag.strikethrough)
                         {
-                            this.paintDecoration(ctx, frag, line)
+                            this.paintDecoration(ctx, frag, line, frag.baselineShift ?? 0)
                         }
                     }
                     ctx.font = this.font
@@ -1119,17 +1186,18 @@ export class CanvasEditor
         ctx: CanvasRenderingContext2D,
         frag: LineFragment,
         line: LineLayout,
+        shift: number,
     ): void
     {
         const x = line.x + frag.x
         const thickness = Math.max(1, Math.round(this.baseFontSize / 14))
         if (frag.underline)
         {
-            ctx.fillRect(x, line.y + Math.round(this.baseFontSize * 0.92), frag.width, thickness)
+            ctx.fillRect(x, line.y + shift + Math.round(this.baseFontSize * 0.92), frag.width, thickness)
         }
         if (frag.strikethrough)
         {
-            ctx.fillRect(x, line.y + Math.round(this.baseFontSize * 0.52), frag.width, thickness)
+            ctx.fillRect(x, line.y + shift + Math.round(this.baseFontSize * 0.52), frag.width, thickness)
         }
     }
 

@@ -891,6 +891,87 @@ describe('links & decorations', () =>
 })
 
 
+describe('super / subscript', () =>
+{
+    test('super/subscript runs shrink and shift off the baseline', () =>
+    {
+        const doc = schema.node('doc', null, [
+            schema.node('paragraph', null, [
+                mtext('E=mc'), mtext('2', 'superscript'),
+                mtext(' H'), mtext('2', 'subscript'), mtext('O'),
+            ]),
+        ])
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        const ed = new CanvasEditor({ state: EditorState.create({ doc, schema }), container })
+        const frags = (ed as any).lastLayouts[0].lines[0].fragments
+        const sup = frags.find((f: any) => (f.baselineShift ?? 0) < 0)
+        const sub = frags.find((f: any) => (f.baselineShift ?? 0) > 0)
+        expect(sup.text.startsWith('2')).toBe(true)
+        expect(sub.text.startsWith('2')).toBe(true)
+        expect(sup.font).toContain('12px') // round(16 * 0.72)
+        ed.destroy()
+    })
+})
+
+
+describe('text & highlight color', () =>
+{
+    function colorEditor()
+    {
+        const doc = schema.node('doc', null, [
+            schema.node('paragraph', null, [
+                schema.text('red', [schema.marks['textColor'].create({ color: '#ff0000' })]),
+                schema.text(' '),
+                schema.text('hi', [schema.marks['highlight'].create({ color: '#ffff00' })]),
+                schema.text(' '),
+                schema.text('def', [schema.marks['highlight'].create()]),
+            ]),
+        ])
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        return new CanvasEditor({ state: EditorState.create({ doc, schema }), container })
+    }
+
+    test('textColor mark colors the run from its attribute (function resolver)', () =>
+    {
+        const ed = colorEditor()
+        const frags = (ed as any).lastLayouts[0].lines[0].fragments
+        const red = frags.find((f: any) => f.color === '#ff0000')
+        expect(red).toBeTruthy()
+        expect(red.text.startsWith('red')).toBe(true)
+        ed.destroy()
+    })
+
+    test('highlight mark sets a background (attribute, or default)', () =>
+    {
+        const ed = colorEditor()
+        const frags = (ed as any).lastLayouts[0].lines[0].fragments
+        expect(frags.find((f: any) => f.background === '#ffff00')?.text.startsWith('hi')).toBe(true)
+        expect(frags.find((f: any) => f.background === '#fde047')?.text.startsWith('def')).toBe(true)
+        ed.destroy()
+    })
+
+    test('highlight paints a rect behind the run', () =>
+    {
+        const ed = colorEditor()
+        let fill = ''
+        const rects: { fill: string }[] = []
+        const recCtx = {
+            setTransform() {}, clearRect() {}, fillText() {},
+            fillRect() { rects.push({ fill }) },
+            measureText(s: string) { return { width: s.length * 8 } },
+            set fillStyle(v: string) { fill = v },
+            set font(_v: unknown) {}, set textBaseline(_v: unknown) {},
+        }
+        ;(ed as any).canvas.getContext = () => recCtx
+        ;(ed as any).render()
+        expect(rects.some((r) => r.fill === '#ffff00')).toBe(true)
+        ed.destroy()
+    })
+})
+
+
 describe('marks: input & extensions', () =>
 {
     function editorWith(text: string, opts: { keymap?: any } = {})

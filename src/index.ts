@@ -6,6 +6,7 @@ export type {
     LineLayout,
     LineFragment,
     MarkStyle,
+    MarkStyleResolver,
     FloatRect,
 } from './editor'
 export { markSpecs, buildMarkKeymap } from './marks'

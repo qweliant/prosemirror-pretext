@@ -62,7 +62,7 @@ The container element should be an empty block-level element. The editor creates
 | `firstLineColor` | `'#818cf8'` | First-line accent color |
 | `caretColor` | `'#a5b4fc'` | Caret color |
 | `selectionColor` | `'rgba(129, 140, 248, 0.25)'` | Selection highlight color |
-| `markStyles` | defaults below | Maps mark names → `{ fontWeight, fontStyle, fontFamily, color, underline, strikethrough }` |
+| `markStyles` | defaults below | Maps mark names → a style `{ fontWeight, fontStyle, fontFamily, color, background, underline, strikethrough }`, or a `(mark) => style` function to read attributes |
 | `keymap` | `{}` | ProseMirror key bindings, checked before built-in keys |
 | `floats` | `[]` | Rects (`{ x, y, width, height }`) the text flows around |
 | `floatGutter` | `12` | Gap in px kept between text and each float |
@@ -71,7 +71,11 @@ The container element should be an empty block-level element. The editor creates
 | `onRender` | — | Called after every render with cache + timing stats |
 
 Default `markStyles`: `strong` → bold, `em` → italic, `code` → monospace + green,
-`link` → blue + underline, `underline` → underline, `strikethrough` → line-through.
+`link` → blue + underline, `underline` → underline, `strikethrough` → line-through,
+`textColor` → `mark.attrs.color`, `highlight` → background from `mark.attrs.color`
+(default yellow), `superscript`/`subscript` → shrunk + baseline-shifted. The
+colour marks read their value from the mark, so `markStyles` entries may be a
+function of the mark, not just a fixed style.
 
 ## Marks (bold / italic / code)
 
@@ -199,8 +203,8 @@ editor needs to implement.
 
 - [x] **Links** — `link` mark, blue + underlined, Cmd/Ctrl-click to follow (see above)
 - [x] **Underline / strikethrough** — drawn decoration lines via `markStyles`
-- [ ] **Text & highlight color** — fill color per run, plus a rect painted behind the glyphs
-- [ ] **Superscript / subscript** — baseline shift + reduced size threaded through the layout pipeline
+- [x] **Text & highlight color** — `textColor` / `highlight` marks; per-run fill + a rect behind the glyphs
+- [x] **Superscript / subscript** — `superscript` / `subscript` marks; shrunk + baseline-shifted runs
 
 ### Block types
 

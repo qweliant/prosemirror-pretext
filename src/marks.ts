@@ -48,6 +48,31 @@ export const markSpecs: Record<string, MarkSpec> = {
         toDOM: () => ['s', 0],
         parseDOM: [{ tag: 's' }, { tag: 'del' }, { style: 'text-decoration=line-through' }],
     },
+    textColor: {
+        attrs: { color: {} },
+        toDOM: (mark) => ['span', { style: `color: ${mark.attrs['color']}` }, 0],
+        parseDOM: [{ style: 'color', getAttrs: (v) => ({ color: v }) }],
+    },
+    highlight: {
+        attrs: { color: { default: null } },
+        toDOM: (mark) => ['mark', mark.attrs['color']
+            ? { style: `background-color: ${mark.attrs['color']}` }
+            : {}, 0],
+        parseDOM: [
+            { tag: 'mark' },
+            { style: 'background-color', getAttrs: (v) => ({ color: v }) },
+        ],
+    },
+    superscript: {
+        excludes: 'subscript',
+        toDOM: () => ['sup', 0],
+        parseDOM: [{ tag: 'sup' }, { style: 'vertical-align=super' }],
+    },
+    subscript: {
+        excludes: 'superscript',
+        toDOM: () => ['sub', 0],
+        parseDOM: [{ tag: 'sub' }, { style: 'vertical-align=sub' }],
+    },
 }
 
 /**
