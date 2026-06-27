@@ -1,27 +1,34 @@
 {
   "name": "prosemirror-pretext",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Canvas-based text editor powered by ProseMirror and Pretext",
   "type": "module",
   "packageManager": "bun@1.1.28",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "sideEffects": false,
   "exports": {
     ".": {
+      "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "default": "./dist/index.js"
     }
   },
   "files": [
     "dist",
     "src"
   ],
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && tsc -p tsconfig.build.json",
+    "build:types": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test",
+    "prepublishOnly": "bun run typecheck && bun test && bun run build"
   },
   "keywords": [
     "prosemirror",
@@ -31,27 +38,43 @@
     "text-layout"
   ],
   "license": "MIT",
+  "author": "qweliant",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/qweliant/prosemirror-pretext.git"
+  },
+  "homepage": "https://github.com/qweliant/prosemirror-pretext#readme",
+  "bugs": {
+    "url": "https://github.com/qweliant/prosemirror-pretext/issues"
+  },
   "peerDependencies": {
     "prosemirror-commands": "^1.0.0",
+    "prosemirror-gapcursor": "^1.0.0",
     "prosemirror-history": "^1.0.0",
     "prosemirror-keymap": "^1.0.0",
     "prosemirror-model": "^1.0.0",
+    "prosemirror-schema-list": "^1.0.0",
     "prosemirror-state": "^1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "prosemirror-history": {
+      "optional": true
+    }
   },
   "dependencies": {
     "@chenglou/pretext": "^0.0.8"
   },
   "devDependencies": {
-    "@happy-dom/global-registrator": "^20.10.3",
+    "@happy-dom/global-registrator": "^20.10.6",
     "@types/bun": "^1.3.14",
     "prosemirror-commands": "^1.7.1",
     "prosemirror-gapcursor": "^1.4.1",
     "prosemirror-history": "^1.5.0",
     "prosemirror-keymap": "^1.2.3",
-    "prosemirror-model": "^1.25.8",
+    "prosemirror-model": "^1.25.9",
     "prosemirror-schema-list": "^1.5.1",
     "prosemirror-state": "^1.4.4",
     "typescript": "^6.0.3",
-    "vite": "^8.0.16"
+    "vite": "^8.1.0"
   }
 }
