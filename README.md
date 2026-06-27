@@ -65,6 +65,8 @@ The container element should be an empty block-level element. The editor creates
 | `placeholder` | `''` | Prompt drawn when the document is empty |
 | `placeholderColor` | `'#5a5a64'` | Placeholder text color |
 | `ruleColor` | `'#3a3a42'` | Color of a `horizontal_rule` leaf |
+| `ariaLabel` | `'Rich text editor'` | Accessible name (the input's `aria-label`) |
+| `a11yMirror` | `true` | Maintain a screen-reader-visible DOM mirror of the document |
 | `markStyles` | defaults below | Maps mark names → a style `{ fontWeight, fontStyle, fontFamily, color, background, underline, strikethrough }`, or a `(mark) => style` function to read attributes |
 | `blockStyles` | `heading` / `blockquote` / `code_block` defaults | Maps block-type names → text style `{ fontSize, fontWeight, fontStyle, fontFamily, lineHeight, color }` + box decorations `{ paddingLeft/Right/Top/Bottom, background, borderLeft }` (or a `(node) => style` fn) |
 | `keymap` | `{}` | ProseMirror key bindings, checked before built-in keys |
@@ -286,6 +288,26 @@ ProseMirror EditorState (headless)
 ```
 
 The layout cache uses a `WeakMap` keyed on ProseMirror node identity (`===`). Unchanged blocks across transactions are reference-equal, so only the edited block pays the `prepareWithSegments` cost. This keeps typing latency flat regardless of document size.
+
+## Accessibility
+
+Canvas is a pixel buffer, so a naive canvas editor is **invisible to assistive technology** — the accessibility tree is empty. This is the defining a11y challenge of canvas/non-DOM editors (the same one Google Docs, Monaco, and CodeMirror all grapple with). Because our source of truth is a ProseMirror document, we follow the established patterns:
+
+### What the editor does for you
+
+- **Semantic DOM mirror** — a visually-hidden, screen-reader-visible copy of the document is serialized from your schema's `toDOM` (`<h1>`, `<p>`, `<ul><li>`, `<img alt>`, `<pre>`, …) and kept in sync on every change. Screen readers browse *that* for full document structure. Toggle with `a11yMirror`.
+- **Hidden labelled input** — the canvas is `aria-hidden`; a hidden `<textarea>` (the same pattern Monaco/CodeMirror use) carries `role="textbox"`, `aria-multiline`, and your `ariaLabel`, and is moved to the caret so IME and magnifiers can track it.
+- **Polite live region** — structural context (`Heading 2`, `Bullet list item`, `Code block`, `Between blocks`) is announced as the caret moves between block types. Call `editor.announce(message)` to voice your own events (e.g. a node view's result).
+- **Full keyboard operability** — every action (navigation, lists `Tab`/`Shift-Tab`, the gap cursor, marks, code-block exit) works without a mouse, with no keyboard trap.
+- **Reduced motion** — the caret stops blinking under `prefers-reduced-motion: reduce`.
+- **Visible focus** — a focus ring is drawn while the editor holds focus.
+
+### Inherent canvas limits (be aware when adopting)
+
+- **Forced colors / Windows High Contrast** — the *visible* canvas text doesn't adapt to `forced-colors` (the mirror does, but the pixels you see won't).
+- **User font scaling / reflow** (WCAG 1.4.4 / 1.4.10) — canvas text doesn't grow with browser/OS "200% text" settings; only pixel-zoom scales it. Expose a configurable base font size to your users.
+- **Caret-following line-by-line reading** is partial — screen-reader *browse mode* reads the mirror; focus-mode line tracking on canvas is a hard, unsolved problem across all canvas editors.
+- **Contrast** is partly yours: the editor draws on *your* background, so verify the default `textColor` / `firstLineColor` / `caretColor` hit WCAG AA (4.5:1) against it.
 
 ## Constraints
 

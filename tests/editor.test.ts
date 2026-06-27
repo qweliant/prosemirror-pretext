@@ -1043,6 +1043,96 @@ describe('block box decorations (blockquote / code-block / hr)', () =>
 })
 
 
+describe('accessibility', () =>
+{
+    function mk(doc: any, opts: any = {})
+    {
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        return new CanvasEditor({
+            state: EditorState.create({ doc, schema }),
+            container,
+            nodeViews: { widget: () => document.createElement('div') },
+            ...opts,
+        })
+    }
+    const simple = () => schema.node('doc', null, [schema.node('paragraph', null, [schema.text('hi')])])
+
+    test('canvas is hidden from AT; textarea is a labelled multiline textbox', () =>
+    {
+        const e = mk(simple())
+        expect((e as any).canvas.getAttribute('aria-hidden')).toBe('true')
+        const ta = (e as any).textarea as HTMLTextAreaElement
+        expect(ta.getAttribute('aria-multiline')).toBe('true')
+        expect(ta.getAttribute('role')).toBe('textbox')
+        expect(ta.getAttribute('aria-label')).toBe('Rich text editor')
+        e.destroy()
+    })
+
+    test('ariaLabel option overrides the accessible name', () =>
+    {
+        const e = mk(simple(), { ariaLabel: 'My notes' })
+        expect((e as any).textarea.getAttribute('aria-label')).toBe('My notes')
+        e.destroy()
+    })
+
+    test('the DOM mirror serializes document structure for screen readers', () =>
+    {
+        const doc = schema.node('doc', null, [
+            schema.node('heading', { level: 1 }, [schema.text('Title')]),
+            schema.node('paragraph', null, [schema.text('body')]),
+            schema.node('bullet_list', null, [
+                schema.node('list_item', null, [schema.node('paragraph', null, [schema.text('item')])]),
+            ]),
+        ])
+        const e = mk(doc)
+        const mirror = (e as any).a11yMirror as HTMLElement
+        expect(mirror).not.toBeNull()
+        expect(mirror.querySelector('h1')?.textContent).toBe('Title')
+        expect(mirror.querySelector('p')?.textContent).toBe('body')
+        expect(mirror.querySelector('ul li')?.textContent).toBe('item')
+        e.destroy()
+    })
+
+    test('the mirror updates when the document changes', () =>
+    {
+        const e = mk(simple())
+        ;(e as any).a11yMirror // ensure present
+        e.dispatch(e.state.tr.insertText('!', 1))
+        expect(((e as any).a11yMirror as HTMLElement).textContent).toContain('!hi')
+        e.destroy()
+    })
+
+    test('the mirror can be disabled', () =>
+    {
+        const e = mk(simple(), { a11yMirror: false })
+        expect((e as any).a11yMirror).toBeNull()
+        e.destroy()
+    })
+
+    test('navigating into a structural block announces its role (live region)', () =>
+    {
+        const doc = schema.node('doc', null, [
+            schema.node('paragraph', null, [schema.text('x')]),
+            schema.node('heading', { level: 2 }, [schema.text('Section')]),
+        ])
+        const e = mk(doc)
+        const heading = (e as any).lastLayouts[1]
+        e.dispatch(e.state.tr.setSelection(TextSelection.create(e.state.doc, heading.pmStartPos)))
+        expect((e as any).liveRegion.textContent).toBe('Heading 2')
+        e.destroy()
+    })
+
+    test('announce() voices a custom message via the live region', () =>
+    {
+        const e = mk(simple())
+        e.announce('Ran: 42')
+        expect((e as any).liveRegion.textContent).toBe('Ran: 42')
+        e.destroy()
+    })
+})
+
+
 describe('gap cursor (seams between atom blocks)', () =>
 {
     function ed(doc: any)

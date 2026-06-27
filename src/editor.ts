@@ -1,6 +1,6 @@
 import {
     type Mark, type Node as PMNode, type ResolvedPos,
-    DOMParser as PMDOMParser, Slice, Fragment,
+    DOMParser as PMDOMParser, DOMSerializer, Slice, Fragment,
 } from 'prosemirror-model'
 import {
     EditorState, TextSelection, NodeSelection, Selection,
@@ -115,6 +115,17 @@ export interface CanvasEditorOptions
     nodeViews?: Record<string, NodeViewFn>
     /** Called after every render with timing/cache stats. */
     onRender?: (stats: RenderStats) => void
+    /**
+     * Accessible name announced for the editor (the input's `aria-label`).
+     * Default: 'Rich text editor'.
+     */
+    ariaLabel?: string
+    /**
+     * Maintain a visually-hidden, screen-reader-visible DOM mirror of the
+     * document (built from the schema's `toDOM`) so assistive tech can read the
+     * structure the canvas can't expose. Default: true.
+     */
+    a11yMirror?: boolean
 }
 
 /** Builds the DOM for a leaf/atom block node. See `nodeViews`. */
@@ -199,6 +210,15 @@ interface ResolvedBlockStyle
 }
 
 const HEADING_SCALE: Record<number, number> = { 1: 2, 2: 1.5, 3: 1.25, 4: 1.1, 5: 1, 6: 0.9 }
+
+/** Visually hidden, but kept in the accessibility tree (the "sr-only" recipe). */
+const SR_ONLY: Partial<CSSStyleDeclaration> = {
+    position: 'absolute',
+    width: '1px', height: '1px',
+    margin: '-1px', padding: '0', border: '0',
+    overflow: 'hidden', clip: 'rect(0 0 0 0)', clipPath: 'inset(50%)',
+    whiteSpace: 'nowrap',
+}
 
 /** Horizontal indent added per list nesting level. */
 const LIST_INDENT = 26
@@ -447,6 +467,14 @@ export class CanvasEditor
     private readonly canvas: HTMLCanvasElement
     private readonly textarea: HTMLTextAreaElement
     private readonly measureCtx: CanvasRenderingContext2D
+    // Accessibility: a screen-reader-visible structural mirror, a polite live
+    // region for announcements, and whether motion is reduced (caret blink).
+    private readonly a11yMirror: HTMLElement | null
+    private readonly liveRegion: HTMLElement
+    private readonly reducedMotion: boolean
+    private readonly serializer: DOMSerializer
+    private lastAnnouncedContext = ''
+    private lastMirrorDoc: PMNode | null = null
 
     // ─── Layout ────────────────────────────────────────────────────────
     // Not readonly: replaced wholesale to invalidate when web fonts load
@@ -581,6 +609,9 @@ export class CanvasEditor
 
         this.canvas = document.createElement('canvas')
         this.canvas.style.display = 'block'
+        // The canvas is decorative pixels; assistive tech reads the mirror below.
+        this.canvas.setAttribute('aria-hidden', 'true')
+        this.canvas.setAttribute('role', 'presentation')
 
         this.textarea = document.createElement('textarea')
         Object.assign(this.textarea.style, {
@@ -599,9 +630,42 @@ export class CanvasEditor
         this.textarea.autocomplete = 'off'
         this.textarea.spellcheck = false
         this.textarea.tabIndex = 0
+        this.textarea.setAttribute('aria-label', options.ariaLabel ?? 'Rich text editor')
+        this.textarea.setAttribute('aria-multiline', 'true')
+        this.textarea.setAttribute('role', 'textbox')
+
+        // Polite live region: format/structure changes and custom announcements.
+        this.liveRegion = document.createElement('div')
+        this.liveRegion.setAttribute('aria-live', 'polite')
+        this.liveRegion.setAttribute('aria-atomic', 'true')
+        Object.assign(this.liveRegion.style, SR_ONLY)
+
+        // Structural mirror: the document serialized via the schema's toDOM,
+        // kept in the a11y tree (visually hidden) for screen-reader browse mode.
+        this.serializer = DOMSerializer.fromSchema(this.state.schema)
+        if (options.a11yMirror !== false)
+        {
+            this.a11yMirror = document.createElement('div')
+            this.a11yMirror.setAttribute('aria-label', options.ariaLabel ?? 'Rich text editor')
+            this.a11yMirror.setAttribute('role', 'document')
+            Object.assign(this.a11yMirror.style, SR_ONLY)
+        }
+        else
+        {
+            this.a11yMirror = null
+        }
+
+        this.reducedMotion = typeof matchMedia !== 'undefined'
+            && matchMedia('(prefers-reduced-motion: reduce)').matches
+
+        // Visible focus indicator while the (offscreen) textarea holds focus.
+        this.textarea.addEventListener('focus', () => { stack.style.outline = `2px solid ${this.caretColor}` ; stack.style.outlineOffset = '2px' })
+        this.textarea.addEventListener('blur', () => { stack.style.outline = 'none' })
 
         stack.appendChild(this.canvas)
         stack.appendChild(this.textarea)
+        stack.appendChild(this.liveRegion)
+        if (this.a11yMirror) stack.appendChild(this.a11yMirror)
 
         if (this.maxHeight !== null)
         {
@@ -625,6 +689,7 @@ export class CanvasEditor
         this.setupInput()
         this.startCaretBlink()
         this.render()
+        this.syncA11y()
     }
 
     // ─── Public API ────────────────────────────────────────────────────
@@ -640,6 +705,7 @@ export class CanvasEditor
         this.phantomX = null
         this.caretBias = -1
         this.scheduleRender()
+        this.syncA11y()
     }
 
     /**
@@ -658,6 +724,66 @@ export class CanvasEditor
     private commandView(): { state: EditorState, dispatch: (tr: Transaction) => void }
     {
         return { state: this.state, dispatch: (tr) => this.dispatch(tr) }
+    }
+
+    // ─── Accessibility ─────────────────────────────────────────────────
+
+    /**
+     * Announce a message to screen readers via the polite live region. Public so
+     * consumers can voice their own events (e.g. a node view's result).
+     */
+    announce(message: string): void
+    {
+        // Re-set even if identical: clear first so repeats are re-read.
+        this.liveRegion.textContent = ''
+        this.liveRegion.textContent = message
+    }
+
+    /** Refresh the structural mirror (on doc change) and announce a new block
+     *  context (on selection change). Called from dispatch/construction. */
+    private syncA11y(): void
+    {
+        if (this.a11yMirror && this.state.doc !== this.lastMirrorDoc)
+        {
+            this.lastMirrorDoc = this.state.doc
+            this.a11yMirror.replaceChildren(
+                this.serializer.serializeFragment(this.state.doc.content),
+            )
+        }
+        const ctx = this.describeContext()
+        if (ctx !== this.lastAnnouncedContext)
+        {
+            this.lastAnnouncedContext = ctx
+            if (ctx) this.announce(ctx)
+        }
+    }
+
+    /** A short label for the block at the caret, announced as the user navigates
+     *  between structural contexts (plain paragraphs announce nothing). */
+    private describeContext(): string
+    {
+        const sel = this.state.selection
+        if (sel instanceof GapCursor) return 'Between blocks'
+        if (sel instanceof NodeSelection)
+        {
+            const n = sel.node
+            const alt = n.attrs['alt'] as string | undefined
+            return `${n.type.name}${alt ? `, ${alt}` : ''}, selected`
+        }
+        const $from = sel.$from
+        for (let d = $from.depth; d > 0; d--)
+        {
+            if (this.isListNode($from.node(d)))
+            {
+                const ordered = this.isOrderedList($from.node(d))
+                return ordered ? 'Ordered list item' : 'Bullet list item'
+            }
+        }
+        const name = $from.parent.type.name
+        if (name === 'heading') return `Heading ${($from.parent.attrs['level'] as number) ?? 1}`
+        if (name === 'code_block') return 'Code block'
+        if (name === 'blockquote') return 'Quote'
+        return ''
     }
 
     focus(): void
@@ -3022,6 +3148,8 @@ export class CanvasEditor
 
     private startCaretBlink(): void
     {
+        // Honor prefers-reduced-motion: keep the caret solid (no blink).
+        if (this.reducedMotion) { this.caretVisible = true; return }
         this.blinkInterval = setInterval(() =>
         {
             const sinceInput = performance.now() - this.lastInputTime

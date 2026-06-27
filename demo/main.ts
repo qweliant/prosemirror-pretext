@@ -440,10 +440,12 @@ function runButtonView(node: ProsemirrorNode): HTMLElement
 
     const out = document.createElement('span')
     out.className = 'run-out'
+    out.setAttribute('aria-live', 'polite') // announce the result to screen readers
 
     const btn = document.createElement('button')
     btn.className = 'run-btn'
     btn.textContent = '▶ Run'
+    btn.setAttribute('aria-label', `Run ${node.attrs['code']}`)
     btn.addEventListener('mousedown', (e) => e.stopPropagation()) // don't select the node
     btn.addEventListener('click', () =>
     {
@@ -481,6 +483,7 @@ async function boot(): Promise<void>
         },
         nodeViews: { runButton: runButtonView, image: imageView },
         placeholder: 'Start typing…',
+        ariaLabel: 'Demo document — ProseMirror + Pretext canvas editor',
         onRender(stats)
         {
             statusEl.textContent =
