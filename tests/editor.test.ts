@@ -1,17 +1,69 @@
 import { describe, test, expect } from 'bun:test'
 import { Schema, type NodeSpec, type MarkSpec } from 'prosemirror-model'
-import { EditorState, TextSelection } from 'prosemirror-state'
+import { EditorState, TextSelection, NodeSelection } from 'prosemirror-state'
 import { toggleMark } from 'prosemirror-commands'
 import { history, undo, redo } from 'prosemirror-history'
 import { CanvasEditor, type RenderStats } from '../src/editor'
 import { markSpecs, buildMarkKeymap } from '../src/marks'
 
 const nodes: Record<string, NodeSpec> = {
-    doc: { content: 'paragraph+' },
+    doc: { content: '(paragraph | widget | heading | blockquote | code_block | horizontal_rule | bullet_list | ordered_list)+' },
     paragraph: {
         content: 'text*',
         toDOM: () => ['p', 0],
         parseDOM: [{ tag: 'p' }],
+    },
+    heading: {
+        content: 'text*',
+        group: 'block',
+        attrs: { level: { default: 1 } },
+        toDOM: (n) => [`h${n.attrs['level']}`, 0],
+        parseDOM: [1, 2, 3].map((l) => ({ tag: `h${l}`, attrs: { level: l } })),
+    },
+    blockquote: {
+        content: 'text*',
+        group: 'block',
+        toDOM: () => ['blockquote', 0],
+        parseDOM: [{ tag: 'blockquote' }],
+    },
+    code_block: {
+        content: 'text*',
+        group: 'block',
+        marks: '',
+        code: true,
+        toDOM: () => ['pre', ['code', 0]],
+        parseDOM: [{ tag: 'pre', preserveWhitespace: 'full' }],
+    },
+    horizontal_rule: {
+        group: 'block',
+        toDOM: () => ['hr'],
+        parseDOM: [{ tag: 'hr' }],
+    },
+    ordered_list: {
+        content: 'list_item+',
+        group: 'block',
+        attrs: { order: { default: 1 } },
+        toDOM: () => ['ol', 0],
+        parseDOM: [{ tag: 'ol' }],
+    },
+    bullet_list: {
+        content: 'list_item+',
+        group: 'block',
+        toDOM: () => ['ul', 0],
+        parseDOM: [{ tag: 'ul' }],
+    },
+    list_item: {
+        content: 'paragraph block*',
+        defining: true,
+        toDOM: () => ['li', 0],
+        parseDOM: [{ tag: 'li' }],
+    },
+    // A leaf/atom block for node-view tests.
+    widget: {
+        atom: true,
+        group: 'block',
+        toDOM: () => ['div', { class: 'w' }],
+        parseDOM: [{ tag: 'div.w' }],
     },
     text: { inline: true },
 }
@@ -39,7 +91,7 @@ function makeDoc(...paragraphs: string[])
 
 function makeEditor(
     paragraphs: string[] = ['hello'],
-    extraOpts: { onRender?: (s: RenderStats) => void, maxHeight?: number, floats?: any[], floatGutter?: number } = {},
+    extraOpts: { onRender?: (s: RenderStats) => void, maxHeight?: number, floats?: any[], floatGutter?: number, placeholder?: string } = {},
 ): { ed: CanvasEditor, container: HTMLElement, stats: RenderStats[] }
 {
     const container = document.createElement('div')
@@ -886,6 +938,463 @@ describe('links & decorations', () =>
         }))
         expect(box.v).toBeNull()
         expect(ed.state.selection.head).toBeGreaterThan(1) // caret landed in the link
+        ed.destroy()
+    })
+})
+
+
+describe('placeholder & hard breaks', () =>
+{
+    function recordFillText(ed: CanvasEditor): string[]
+    {
+        const drawn: string[] = []
+        const ctx = {
+            setTransform() {}, clearRect() {}, fillRect() {},
+            fillText(t: string) { drawn.push(t) },
+            measureText(s: string) { return { width: s.length * 8 } },
+            set fillStyle(_v: unknown) {}, set font(_v: unknown) {}, set textBaseline(_v: unknown) {},
+        }
+        ;(ed as any).canvas.getContext = () => ctx
+        ;(ed as any).render()
+        return drawn
+    }
+
+    test('placeholder paints when the document is empty', () =>
+    {
+        const { ed } = makeEditor([''], { placeholder: 'Type here…' })
+        expect(recordFillText(ed)).toContain('Type here…')
+        ed.destroy()
+    })
+
+    test('placeholder is hidden once the document has content', () =>
+    {
+        const { ed } = makeEditor(['hi'], { placeholder: 'Type here…' })
+        expect(recordFillText(ed)).not.toContain('Type here…')
+        ed.destroy()
+    })
+
+    test('Shift+Enter inserts a newline (hard break) instead of splitting', () =>
+    {
+        const { ed } = makeEditor(['helloworld'])
+        ed.dispatch(ed.state.tr.setSelection(TextSelection.near(ed.state.doc.resolve(6))))
+        const ta = (ed as any).textarea as HTMLTextAreaElement
+        ta.dispatchEvent(new KeyboardEvent('keydown', {
+            key: 'Enter', shiftKey: true, bubbles: true, cancelable: true,
+        }))
+        expect(ed.state.doc.childCount).toBe(1) // not split
+        expect(ed.state.doc.firstChild!.textContent).toBe('hello\nworld')
+        ed.destroy()
+    })
+})
+
+
+describe('block box decorations (blockquote / code-block / hr)', () =>
+{
+    function blockEditor(node: any)
+    {
+        const doc = schema.node('doc', null, [
+            node,
+            schema.node('paragraph', null, [schema.text('after')]),
+        ])
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        const ed = new CanvasEditor({ state: EditorState.create({ doc, schema }), container })
+        return ed
+    }
+
+    test('blockquote: indented lines + left border + italic, paragraph unaffected', () =>
+    {
+        const ed = blockEditor(schema.node('blockquote', null, [schema.text('quoted')]))
+        const [bq, p] = (ed as any).lastLayouts
+        expect(bq.lines[0].x).toBe(18) // paddingLeft
+        expect(bq.borderLeft).toEqual({ width: 3, color: '#3a3a42' })
+        expect(bq.font).toContain('italic')
+        // The plain paragraph after it keeps the editor defaults.
+        expect(p.lines[0].x).toBe(0)
+        expect(p.borderLeft).toBeNull()
+        ed.destroy()
+    })
+
+    test('code-block: background panel, monospace, vertical padding adds height', () =>
+    {
+        const ed = blockEditor(schema.node('code_block', null, [schema.text('x = 1')]))
+        const cb = (ed as any).lastLayouts[0]
+        expect(cb.background).toBe('#1c1c20')
+        expect(cb.font).toContain('monospace')
+        expect(cb.lines[0].x).toBe(14) // paddingLeft
+        // one content line (26) + paddingTop 10 + paddingBottom 10
+        expect(cb.height).toBe(46)
+        ed.destroy()
+    })
+
+    test('horizontal rule: a selectable atom block with reserved height', () =>
+    {
+        const ed = blockEditor(schema.node('horizontal_rule'))
+        const hr = (ed as any).lastLayouts[0]
+        expect(hr.isAtom).toBe(true)
+        expect(hr.height).toBe(26)
+        expect(hr.lines.length).toBe(0)
+        // Selecting it is a NodeSelection (handled by the atom machinery).
+        ed.dispatch(ed.state.tr.setSelection(NodeSelection.create(ed.state.doc, hr.pmStartPos)))
+        expect((ed.state.selection as any).node?.type.name).toBe('horizontal_rule')
+        ed.destroy()
+    })
+})
+
+
+describe('lists (nested structure + markers + indent)', () =>
+{
+    function ed(doc: any)
+    {
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        return new CanvasEditor({ state: EditorState.create({ doc, schema }), container })
+    }
+    const li = (text?: string) =>
+        schema.node('list_item', null, [schema.node('paragraph', null, text ? [schema.text(text)] : [])])
+    const keydown = (e: CanvasEditor, init: KeyboardEventInit) =>
+        (e as any).textarea.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }))
+
+    test('bullet list: each item is an indented block with a bullet marker', () =>
+    {
+        const e = ed(schema.node('doc', null, [schema.node('bullet_list', null, [li('one'), li('two')])]))
+        const ls = (e as any).lastLayouts as any[]
+        expect(ls.length).toBe(2)
+        expect(ls[0].marker).toEqual({ text: '•', x: 4 })
+        expect(ls[0].lines[0].x).toBe(26) // one indent level
+        expect(ls[0].pmStartPos).toBe(3)
+        expect(ls[1].pmStartPos).toBe(10)
+        e.destroy()
+    })
+
+    test('ordered list: markers are sequential numbers', () =>
+    {
+        const e = ed(schema.node('doc', null, [schema.node('ordered_list', null, [li('a'), li('b'), li('c')])]))
+        const ls = (e as any).lastLayouts as any[]
+        expect(ls.map((b) => b.marker.text)).toEqual(['1.', '2.', '3.'])
+        e.destroy()
+    })
+
+    test('nested list: deeper level indents further with its own gutter', () =>
+    {
+        const inner = schema.node('bullet_list', null, [li('b')])
+        const outer = schema.node('bullet_list', null, [
+            schema.node('list_item', null, [schema.node('paragraph', null, [schema.text('a')]), inner]),
+        ])
+        const e = ed(schema.node('doc', null, [outer]))
+        const ls = (e as any).lastLayouts as any[]
+        expect(ls[0].lines[0].x).toBe(26)
+        expect(ls[1].lines[0].x).toBe(52)
+        expect(ls[1].marker.x).toBe(30) // gutter of level 2
+        e.destroy()
+    })
+
+    test('Enter in a list item creates a new sibling item', () =>
+    {
+        const e = ed(schema.node('doc', null, [schema.node('bullet_list', null, [li('one')])]))
+        e.dispatch(e.state.tr.setSelection(TextSelection.atEnd(e.state.doc)))
+        keydown(e, { key: 'Enter' })
+        ;(e as any).render()
+        expect(e.state.doc.firstChild!.childCount).toBe(2) // two list items
+        expect((e as any).lastLayouts.length).toBe(2)
+        e.destroy()
+    })
+
+    test('Tab sinks an item one level deeper (more indent)', () =>
+    {
+        const e = ed(schema.node('doc', null, [schema.node('bullet_list', null, [li('one'), li('two')])]))
+        // cursor into the second item
+        e.dispatch(e.state.tr.setSelection(TextSelection.atEnd(e.state.doc)))
+        keydown(e, { key: 'Tab' })
+        ;(e as any).render()
+        const ls = (e as any).lastLayouts as any[]
+        expect(ls[1].lines[0].x).toBe(52) // 'two' now nested under 'one'
+        e.destroy()
+    })
+
+    test('Shift-Tab lifts an item back out', () =>
+    {
+        const inner = schema.node('bullet_list', null, [li('b')])
+        const outer = schema.node('bullet_list', null, [
+            schema.node('list_item', null, [schema.node('paragraph', null, [schema.text('a')]), inner]),
+        ])
+        const e = ed(schema.node('doc', null, [outer]))
+        e.dispatch(e.state.tr.setSelection(TextSelection.atEnd(e.state.doc))) // in 'b'
+        keydown(e, { key: 'Tab', shiftKey: true })
+        ;(e as any).render()
+        const ls = (e as any).lastLayouts as any[]
+        expect(ls[1].lines[0].x).toBe(26) // 'b' lifted to level 1
+        e.destroy()
+    })
+})
+
+
+describe('hard breaks in marked text + code-block exit', () =>
+{
+    function editorFromDoc(doc: any)
+    {
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        return new CanvasEditor({ state: EditorState.create({ doc, schema }), container })
+    }
+    function keydown(ed: CanvasEditor, init: KeyboardEventInit)
+    {
+        const ta = (ed as any).textarea as HTMLTextAreaElement
+        ta.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }))
+    }
+
+    test('a marked paragraph honors \\n (splits into hard lines)', () =>
+    {
+        const ed = editorFromDoc(schema.node('doc', null, [
+            schema.node('paragraph', null, [mtext('ab', 'strong'), schema.text('\ncd')]),
+        ]))
+        const p = (ed as any).lastLayouts[0]
+        expect(p.lines.length).toBe(2)
+        expect(p.lines[0].fragments.map((f: any) => f.text).join('')).toBe('ab')
+        expect(p.lines[1].fragments.map((f: any) => f.text).join('')).toBe('cd')
+        // The new line owns the '\n' offset (2), matching the single-font path,
+        // so an offset just after the break lands on this line.
+        expect(p.lines[1].pmStart).toBe(2)
+        ed.destroy()
+    })
+
+    test('a blank line between two \\n renders as an empty marked line', () =>
+    {
+        const ed = editorFromDoc(schema.node('doc', null, [
+            schema.node('paragraph', null, [mtext('a', 'strong'), schema.text('\n\nb')]),
+        ]))
+        const p = (ed as any).lastLayouts[0]
+        expect(p.lines.length).toBe(3)
+        expect(p.lines[1].text).toBe('')
+        ed.destroy()
+    })
+
+    test('Enter in a code block inserts a newline (no split)', () =>
+    {
+        const ed = editorFromDoc(schema.node('doc', null, [
+            schema.node('code_block', null, [schema.text('x')]),
+        ]))
+        ed.dispatch(ed.state.tr.setSelection(TextSelection.atEnd(ed.state.doc)))
+        keydown(ed, { key: 'Enter' })
+        expect(ed.state.doc.childCount).toBe(1)
+        expect(ed.state.doc.firstChild!.textContent).toBe('x\n')
+        ed.destroy()
+    })
+
+    test('Mod-Enter exits a code block to a paragraph below', () =>
+    {
+        const ed = editorFromDoc(schema.node('doc', null, [
+            schema.node('code_block', null, [schema.text('x')]),
+        ]))
+        ed.dispatch(ed.state.tr.setSelection(TextSelection.atEnd(ed.state.doc)))
+        keydown(ed, { key: 'Enter', metaKey: true })
+        expect(ed.state.doc.childCount).toBe(2)
+        expect(ed.state.doc.child(1).type.name).toBe('paragraph')
+        expect(ed.state.selection.$from.parent.type.name).toBe('paragraph')
+        ed.destroy()
+    })
+
+    test('a second Enter on a code block\'s blank last line exits to a paragraph', () =>
+    {
+        const ed = editorFromDoc(schema.node('doc', null, [
+            schema.node('code_block', null, [schema.text('x\n')]),
+        ]))
+        ed.dispatch(ed.state.tr.setSelection(TextSelection.atEnd(ed.state.doc)))
+        keydown(ed, { key: 'Enter' })
+        expect(ed.state.doc.childCount).toBe(2)
+        expect(ed.state.doc.child(0).textContent).toBe('x') // trailing \n dropped
+        expect(ed.state.doc.child(1).type.name).toBe('paragraph')
+        ed.destroy()
+    })
+
+    test('Enter at the end of a heading continues as a paragraph', () =>
+    {
+        const ed = editorFromDoc(schema.node('doc', null, [
+            schema.node('heading', { level: 1 }, [schema.text('Title')]),
+        ]))
+        ed.dispatch(ed.state.tr.setSelection(TextSelection.atEnd(ed.state.doc)))
+        keydown(ed, { key: 'Enter' })
+        expect(ed.state.doc.childCount).toBe(2)
+        expect(ed.state.doc.child(1).type.name).toBe('paragraph')
+        ed.destroy()
+    })
+})
+
+
+describe('rich paste', () =>
+{
+    function paste(ed: CanvasEditor, data: Record<string, string>): void
+    {
+        const ta = (ed as any).textarea as HTMLTextAreaElement
+        const ev = new Event('paste', { bubbles: true, cancelable: true })
+        ;(ev as any).clipboardData = { getData: (t: string) => data[t] ?? '' }
+        ta.dispatchEvent(ev)
+    }
+
+    function hasMark(ed: CanvasEditor, name: string): boolean
+    {
+        let found = false
+        ed.state.doc.descendants((n) =>
+        {
+            if (n.isText && n.marks.some((m) => m.type.name === name)) found = true
+        })
+        return found
+    }
+
+    test('HTML paste preserves marks (bold survives)', () =>
+    {
+        const { ed } = makeEditor([''])
+        paste(ed, {
+            'text/html': '<p>hello <strong>bold</strong> world</p>',
+            'text/plain': 'hello bold world',
+        })
+        expect(ed.state.doc.textContent).toContain('hello bold world')
+        expect(hasMark(ed, 'strong')).toBe(true)
+        ed.destroy()
+    })
+
+    test('HTML paste with multiple paragraphs creates multiple blocks', () =>
+    {
+        const { ed } = makeEditor([''])
+        paste(ed, { 'text/html': '<p>one</p><p>two</p>', 'text/plain': 'one\n\ntwo' })
+        expect(ed.state.doc.childCount).toBeGreaterThanOrEqual(2)
+        ed.destroy()
+    })
+
+    test('plain-text paste splits blank lines into paragraphs', () =>
+    {
+        const { ed } = makeEditor([''])
+        paste(ed, { 'text/plain': 'first para\n\nsecond para' })
+        expect(ed.state.doc.childCount).toBe(2)
+        expect(ed.state.doc.child(0).textContent).toBe('first para')
+        expect(ed.state.doc.child(1).textContent).toBe('second para')
+        ed.destroy()
+    })
+
+    test('plain-text paste of one block stays inline', () =>
+    {
+        const { ed } = makeEditor(['start '])
+        ed.dispatch(ed.state.tr.setSelection(TextSelection.atEnd(ed.state.doc)))
+        paste(ed, { 'text/plain': 'tail' })
+        expect(ed.state.doc.childCount).toBe(1)
+        expect(ed.state.doc.firstChild!.textContent).toBe('start tail')
+        ed.destroy()
+    })
+})
+
+
+describe('headings (per-block style)', () =>
+{
+    function headingEditor()
+    {
+        const doc = schema.node('doc', null, [
+            schema.node('heading', { level: 1 }, [schema.text('Title')]),
+            schema.node('paragraph', null, [schema.text('body')]),
+        ])
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        const ed = new CanvasEditor({ state: EditorState.create({ doc, schema }), container })
+        return { ed }
+    }
+
+    test('a heading block gets a bigger font + line height; paragraphs unchanged', () =>
+    {
+        const { ed } = headingEditor()
+        const [h, p] = (ed as any).lastLayouts
+        // base 16 * 2 (h1) = 32; lineHeight round(32*1.3) = 42.
+        expect(h.fontSize).toBe(32)
+        expect(h.lineHeight).toBe(42)
+        expect(h.font).toContain('32px')
+        expect(h.font).toContain('700')
+        // Paragraph keeps the editor defaults.
+        expect(p.fontSize).toBe(16)
+        expect(p.lineHeight).toBe(26)
+        ed.destroy()
+    })
+
+    test('the next block sits below the taller heading; caret height matches', () =>
+    {
+        const { ed } = headingEditor()
+        const [h, p] = (ed as any).lastLayouts
+        expect(h.height).toBe(42) // one line at the heading line-height
+        expect(p.yOffset).toBe(42 + 20) // heading height + blockGap
+        // Caret in the heading is heading-tall.
+        expect((ed as any).posToCoords((ed as any).lastLayouts, 1).height).toBe(42)
+        // Caret in the paragraph is normal.
+        expect((ed as any).posToCoords((ed as any).lastLayouts, p.pmStartPos).height).toBe(26)
+        ed.destroy()
+    })
+
+    test('arrow-down from a heading lands in the paragraph below', () =>
+    {
+        const { ed } = headingEditor()
+        ed.dispatch(ed.state.tr.setSelection(TextSelection.near(ed.state.doc.resolve(1))))
+        ;(ed as any).moveVertical(1, false)
+        const p = (ed as any).lastLayouts[1]
+        expect(ed.state.selection.head).toBeGreaterThanOrEqual(p.pmStartPos)
+        ed.destroy()
+    })
+})
+
+
+describe('node views (atom blocks)', () =>
+{
+    function widgetEditor()
+    {
+        const doc = schema.node('doc', null, [
+            schema.node('paragraph', null, [schema.text('above')]),
+            schema.node('widget'),
+            schema.node('paragraph', null, [schema.text('below')]),
+        ])
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        const ed = new CanvasEditor({
+            state: EditorState.create({ doc, schema }),
+            container,
+            nodeViews: {
+                widget: () =>
+                {
+                    const el = document.createElement('div')
+                    el.className = 'nv'
+                    return el
+                },
+            },
+        })
+        return { ed, container }
+    }
+
+    test('an atom block reserves space and mounts a node view', () =>
+    {
+        const { ed, container } = widgetEditor()
+        const atom = (ed as any).lastLayouts.find((b: any) => b.isAtom)
+        expect(atom).toBeTruthy()
+        expect(atom.height).toBe(40) // default (offsetHeight is 0 in happy-dom)
+        expect(container.querySelector('.nv')).not.toBeNull()
+        ed.destroy()
+    })
+
+    test('arrow-down into an atom selects the node; Backspace deletes it', async () =>
+    {
+        const { ed, container } = widgetEditor()
+        ed.dispatch(ed.state.tr.setSelection(TextSelection.near(ed.state.doc.resolve(1))))
+        ;(ed as any).moveVertical(1, false)
+        expect((ed.state.selection as any).node?.type.name).toBe('widget')
+
+        const before = ed.state.doc.childCount
+        ;(ed as any).deleteBackward()
+        expect(ed.state.doc.childCount).toBe(before - 1)
+        await nextFrame()
+        expect(container.querySelector('.nv')).toBeNull() // view destroyed
+        ed.destroy()
+    })
+
+    test('clicking an atom region returns a position without crashing', () =>
+    {
+        const { ed } = widgetEditor()
+        const atom = (ed as any).lastLayouts.find((b: any) => b.isAtom)
+        const hit = (ed as any).clickToPos((ed as any).lastLayouts, 0, atom.yOffset + 5)
+        expect(hit).not.toBeNull()
+        expect(typeof hit.pos).toBe('number')
         ed.destroy()
     })
 })

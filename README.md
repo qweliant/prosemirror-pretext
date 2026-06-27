@@ -62,12 +62,17 @@ The container element should be an empty block-level element. The editor creates
 | `firstLineColor` | `'#818cf8'` | First-line accent color |
 | `caretColor` | `'#a5b4fc'` | Caret color |
 | `selectionColor` | `'rgba(129, 140, 248, 0.25)'` | Selection highlight color |
+| `placeholder` | `''` | Prompt drawn when the document is empty |
+| `placeholderColor` | `'#5a5a64'` | Placeholder text color |
+| `ruleColor` | `'#3a3a42'` | Color of a `horizontal_rule` leaf |
 | `markStyles` | defaults below | Maps mark names → a style `{ fontWeight, fontStyle, fontFamily, color, background, underline, strikethrough }`, or a `(mark) => style` function to read attributes |
+| `blockStyles` | `heading` / `blockquote` / `code_block` defaults | Maps block-type names → text style `{ fontSize, fontWeight, fontStyle, fontFamily, lineHeight, color }` + box decorations `{ paddingLeft/Right/Top/Bottom, background, borderLeft }` (or a `(node) => style` fn) |
 | `keymap` | `{}` | ProseMirror key bindings, checked before built-in keys |
 | `floats` | `[]` | Rects (`{ x, y, width, height }`) the text flows around |
 | `floatGutter` | `12` | Gap in px kept between text and each float |
 | `linkMark` | `'link'` | Schema mark name treated as a followable link |
 | `onFollowLink` | opens in new tab | `(href, event)` run on Cmd/Ctrl-click of a link |
+| `nodeViews` | `{}` | `{ typeName: (node, getPos) => HTMLElement }` — custom DOM for atom blocks |
 | `onRender` | — | Called after every render with cache + timing stats |
 
 Default `markStyles`: `strong` → bold, `em` → italic, `code` → monospace + green,
@@ -154,6 +159,37 @@ const editor = new CanvasEditor({
 })
 ```
 
+## Node views (interactive blocks)
+
+Canvas can't host a button or an `<iframe>`, so interactive/leaf block nodes are
+rendered as **real DOM elements the editor positions over the space it reserves
+for them** — ProseMirror's "node view" idea. Give `nodeViews` a factory per node
+type:
+
+```ts
+const editor = new CanvasEditor({
+  state, container,
+  nodeViews: {
+    runButton: (node, getPos) => {
+      const el = document.createElement('div')
+      el.textContent = node.attrs.code
+      el.onclick = () => { /* run it, mutate el, or dispatch via getPos() */ }
+      return el
+    },
+  },
+})
+```
+
+The editor measures the element's height to reserve space (and re-flows when it
+changes via `ResizeObserver`), mounts/positions/destroys it as the doc changes,
+and handles selection: **arrow into** an atom block selects it (`NodeSelection`),
+**click** its chrome selects it, **Backspace** deletes it, and arrows step past
+it. `getPos()` returns the node's live position for commands. Interactive
+children should `stopPropagation()` on mousedown so clicking them doesn't select
+the node. This is the foundation for images, embeds, and runnable blocks. Scope:
+flat atom blocks (no nesting), and a changed node's view is recreated, not
+diffed.
+
 ## Selection-anchored UI (bubble menus)
 
 Toolbars are yours to build — the editor exposes `editor.command(cmd)` to run
@@ -208,25 +244,26 @@ editor needs to implement.
 
 ### Block types
 
+- [x] **Headings** — per-block font size/weight + line height via `blockStyles` (built-in `heading` sized by level)
+- [x] **Blockquote** — indent + left accent bar via `blockStyles` box decorations (built-in `blockquote`; text-only, not yet nesting paragraphs)
+- [x] **Code block** — monospace + background panel + padding via `blockStyles` (built-in `code_block`); `pre-wrap` preserves whitespace
+- [x] **Horizontal rule** — canvas-drawn leaf block (`horizontal_rule` / `hr`), selectable like an atom (`ruleColor`)
+- [x] **Lists** (bullet / ordered) — recursive tree walk → per-level indent + bullet/number markers in the gutter; Enter splits an item, Tab/Shift-Tab nest/lift (via `prosemirror-schema-list`)
 - [ ] **Text alignment** — `left | right | center | justify` block attribute (distribute space; last line ragged)
-- [ ] **Headings** (h1–h6) — per-level font size/weight; mixed line heights within a block
-- [ ] **Blockquote** — indent + left rule
-- [ ] **Code block** — monospace, background fill, preserved whitespace
-- [ ] **Lists** (bullet / ordered) — markers, indentation, nesting
-- [ ] **Horizontal rule** — drawn leaf block
 - [ ] **Tables** — grid layout with per-cell text flow
 
-### Media & embeds — needs leaf/atom-node rendering (not built yet)
+### Media & embeds
 
-- [ ] **Images** — draw to canvas, node selection, resize handles; reuse the float engine for wrap
-- [ ] **Video / iframe / interactive embeds** — overlay a real DOM element positioned by us (canvas can't host them); the float engine reserves the space
-- [ ] **Inline atoms** — mentions/chips, emoji images, hard breaks, inline math
+- [x] **Atom block node views** — interactive DOM (buttons, embeds) positioned over reserved space (`nodeViews`)
+- [ ] **Images** — a built-in node view that draws to canvas + resize handles; reuse the float engine for wrap
+- [ ] **Inline atoms** — mentions/chips, emoji images, hard breaks, inline math (these are *inline*, not block)
 
 ### Selection & affordances
 
-- [ ] **Node selection** — select an image / atom / block as a unit
-- [ ] **Gap cursor** — caret between non-text blocks
-- [ ] **Placeholder text** — prompt rendered in empty blocks / empty doc
+- [x] **Node selection** — select an atom block as a unit (arrow-into / click / Backspace)
+- [x] **Placeholder text** — prompt rendered when the document is empty (`placeholder` option)
+- [x] **Hard breaks** — Shift+Enter inserts a newline; honored by both the single-font (`pre-wrap`) path and the marked path (split into hard-line segments). In a code block, Enter inserts a newline and Mod-Enter (or a second Enter on a blank last line) exits to a paragraph
+- [ ] **Gap cursor** — caret between two adjacent non-text blocks (node selection covers the common case)
 
 ### Decorations
 
@@ -236,7 +273,7 @@ editor needs to implement.
 
 ### Input
 
-- [ ] **Rich paste** — HTML → marks/nodes (currently plain text only)
+- [x] **Rich paste** — `text/html` parsed through the schema's `parseDOM` rules (marks/headings/blocks survive); plain text splits blank lines into paragraphs
 - [ ] **Drag & drop** — move nodes, drop images
 
 ## Architecture

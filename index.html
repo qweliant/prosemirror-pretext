@@ -105,6 +105,32 @@
             height: 26px;
         }
 
+        .run-block {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 12px;
+            border-radius: 8px;
+            background: #1c1c20;
+            border: 1px solid #2a2a2f;
+            font-family: 'SF Mono', ui-monospace, monospace;
+            font-size: 13px;
+            color: #d4d4d8;
+        }
+
+        .run-block .run-btn {
+            padding: 4px 10px;
+            border-radius: 6px;
+            border: 1px solid #2f8f4f;
+            background: rgba(64, 200, 100, 0.15);
+            color: #6ee7a0;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .run-block .run-out { color: #6ee7a0; }
+
         .float-box {
             position: absolute;
             display: flex;
@@ -148,6 +174,17 @@
             font-size: 13px;
             font-weight: 600;
             cursor: pointer;
+        }
+
+        .toolbar {
+            flex-wrap: wrap;
+        }
+
+        .toolbar .tb-sep {
+            width: 1px;
+            align-self: stretch;
+            background: #2a2a2f;
+            margin: 0 4px;
         }
 
         .toolbar .tb:nth-child(2) { font-style: italic; }

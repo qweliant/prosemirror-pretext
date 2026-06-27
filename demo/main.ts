@@ -4,9 +4,11 @@
  * defined in index.html.
  */
 
-import { Schema, type NodeSpec, type MarkType } from 'prosemirror-model'
+import { Schema, type NodeSpec, type MarkType, type Node as ProsemirrorNode } from 'prosemirror-model'
 import { EditorState } from 'prosemirror-state'
-import { toggleMark } from 'prosemirror-commands'
+import { toggleMark, setBlockType } from 'prosemirror-commands'
+import { wrapInList, liftListItem } from 'prosemirror-schema-list'
+import type { Command } from 'prosemirror-state'
 import { history, undo, redo } from 'prosemirror-history'
 import { CanvasEditor, markSpecs, buildMarkKeymap } from '../src'
 
@@ -14,11 +16,66 @@ import { CanvasEditor, markSpecs, buildMarkKeymap } from '../src'
 // ─── Schema ────────────────────────────────────────────────────────────────
 
 const nodes: Record<string, NodeSpec> = {
-    doc: { content: 'paragraph+' },
+    doc: { content: '(heading | paragraph | blockquote | code_block | horizontal_rule | bullet_list | ordered_list | runButton)+' },
     paragraph: {
         content: 'text*',
         toDOM: () => ['p', 0],
         parseDOM: [{ tag: 'p' }],
+    },
+    heading: {
+        content: 'text*',
+        group: 'block',
+        attrs: { level: { default: 1 } },
+        toDOM: (n) => [`h${n.attrs['level']}`, 0],
+        parseDOM: [1, 2, 3].map((l) => ({ tag: `h${l}`, attrs: { level: l } })),
+    },
+    // Simple (non-nesting) blockquote + code block: text-only blocks the flat
+    // layout can style as boxes. Real nesting (quote → paragraphs) needs lists.
+    blockquote: {
+        content: 'text*',
+        group: 'block',
+        toDOM: () => ['blockquote', 0],
+        parseDOM: [{ tag: 'blockquote' }],
+    },
+    code_block: {
+        content: 'text*',
+        group: 'block',
+        marks: '',
+        code: true,
+        toDOM: () => ['pre', ['code', 0]],
+        parseDOM: [{ tag: 'pre', preserveWhitespace: 'full' }],
+    },
+    horizontal_rule: {
+        group: 'block',
+        toDOM: () => ['hr'],
+        parseDOM: [{ tag: 'hr' }],
+    },
+    ordered_list: {
+        content: 'list_item+',
+        group: 'block',
+        attrs: { order: { default: 1 } },
+        toDOM: () => ['ol', 0],
+        parseDOM: [{ tag: 'ol' }],
+    },
+    bullet_list: {
+        content: 'list_item+',
+        group: 'block',
+        toDOM: () => ['ul', 0],
+        parseDOM: [{ tag: 'ul' }],
+    },
+    list_item: {
+        content: 'paragraph block*',
+        defining: true,
+        toDOM: () => ['li', 0],
+        parseDOM: [{ tag: 'li' }],
+    },
+    // A leaf/atom block: a snippet of code with a Run button (a node view).
+    runButton: {
+        atom: true,
+        group: 'block',
+        attrs: { code: { default: '6 * 7' } },
+        toDOM: (n) => ['div', { 'data-run': n.attrs['code'] }],
+        parseDOM: [{ tag: 'div[data-run]', getAttrs: (d) => ({ code: (d as HTMLElement).getAttribute('data-run') }) }],
     },
     text: { inline: true },
 }
@@ -37,10 +94,15 @@ const colored = (s: string, color: string) =>
 const highlighted = (s: string, color?: string) =>
     schema.text(s, [schema.marks['highlight'].create(color ? { color } : null)])
 
+/** A list item: a paragraph of inline content, plus optional nested blocks. */
+const item = (inline: ProsemirrorNode[], ...rest: ProsemirrorNode[]) =>
+    schema.node('list_item', null, [schema.node('paragraph', null, inline), ...rest])
+
 
 // ─── Sample Document ───────────────────────────────────────────────────────
 
 const doc = schema.node('doc', null, [
+    schema.node('heading', { level: 1 }, [schema.text('Canvas, all the way down')]),
     schema.node('paragraph', null, [
         m('Every glyph here is placed by '), m('ctx.fillText()', 'code'),
         m(' on a canvas — no contenteditable, no DOM text nodes. '),
@@ -61,6 +123,33 @@ const doc = schema.node('doc', null, [
         m(' too — even '), m('E=mc'), m('2', 'superscript'),
         m(' and H'), m('2', 'subscript'), m('O.'),
     ]),
+    schema.node('runButton', { code: 'new Date().toLocaleTimeString()' }),
+    schema.node('paragraph', null, [
+        m('That block above is a leaf '), m('node view', 'em'),
+        m(' — real interactive DOM the editor positions over reserved space. '),
+        m('Arrow into it to select; Backspace deletes it.'),
+    ]),
+    schema.node('horizontal_rule'),
+    schema.node('blockquote', null, [
+        schema.text('Block styles are pure arithmetic: padding, a left bar, a background panel — all measured and painted by hand.'),
+    ]),
+    schema.node('code_block', null, [
+        schema.text('ctx.fillText(line.text, line.x, line.y)\n// every glyph, placed by hand'),
+    ]),
+    schema.node('bullet_list', null, [
+        item([m('Markers, indent, and nesting are pure arithmetic too.')]),
+        item([m('Press '), m('Tab', 'code'), m(' to nest, '), m('Shift-Tab', 'code'), m(' to lift.')],
+            schema.node('bullet_list', null, [
+                item([m('A nested bullet, one level deeper.')]),
+                item([m('Each level adds a fixed indent and its own gutter.')]),
+            ]),
+        ),
+    ]),
+    schema.node('ordered_list', null, [
+        item([m('Ordered items count up,')]),
+        item([m('one,')]),
+        item([m('two, three.')]),
+    ]),
 ])
 
 
@@ -72,6 +161,51 @@ function markActive(state: EditorState, type: MarkType): boolean
     return empty
         ? !!type.isInSet(state.storedMarks || $from.marks())
         : state.doc.rangeHasMark(from, to, type)
+}
+
+/** Is the cursor's block this node type (+ attrs)? */
+function blockActive(state: EditorState, typeName: string, attrs?: Record<string, unknown>): boolean
+{
+    const { $from } = state.selection
+    return $from.parent.hasMarkup(schema.nodes[typeName], attrs as any)
+}
+
+/** Toggle the cursor's textblock between `typeName` and a plain paragraph. */
+function toggleBlock(typeName: string, attrs?: Record<string, unknown>): Command
+{
+    return (state, dispatch) =>
+    {
+        const active = blockActive(state, typeName, attrs)
+        const target = active ? schema.nodes['paragraph'] : schema.nodes[typeName]
+        return setBlockType(target, active ? undefined : attrs)(state, dispatch)
+    }
+}
+
+/** Insert a horizontal rule at the selection. */
+const insertRule: Command = (state, dispatch) =>
+{
+    dispatch?.(state.tr.replaceSelectionWith(schema.nodes['horizontal_rule'].create()).scrollIntoView())
+    return true
+}
+
+/** Is the cursor inside a list of the given type? */
+function inList(state: EditorState, typeName: string): boolean
+{
+    const { $from } = state.selection
+    for (let d = $from.depth; d > 0; d--)
+    {
+        if ($from.node(d).type === schema.nodes[typeName]) return true
+    }
+    return false
+}
+
+/** Wrap the selection in a list, or lift it back out if already in that list. */
+function toggleList(typeName: string): Command
+{
+    return (state, dispatch) =>
+        inList(state, typeName)
+            ? liftListItem(schema.nodes['list_item'])(state, dispatch)
+            : wrapInList(schema.nodes[typeName])(state, dispatch)
 }
 
 function buildToolbar(editor: CanvasEditor): () => void
@@ -133,12 +267,52 @@ function buildToolbar(editor: CanvasEditor): () => void
     wrap.appendChild(hlEl)
     buttons.push({ el: hlEl, type: hlType })
 
-    // Reflect the active marks at the caret/selection on every render.
+    // ── Block-type buttons (headings, quote, code, rule) ──
+    const sep = document.createElement('span')
+    sep.className = 'tb-sep'
+    wrap.appendChild(sep)
+
+    const blockButtons: { el: HTMLButtonElement, isActive: () => boolean }[] = []
+    const addBlockButton = (
+        label: string, command: Command, isActive: () => boolean,
+    ) =>
+    {
+        const el = document.createElement('button')
+        el.textContent = label
+        el.className = 'tb'
+        el.addEventListener('mousedown', (e) =>
+        {
+            e.preventDefault()
+            editor.command(command)
+        })
+        wrap.appendChild(el)
+        blockButtons.push({ el, isActive })
+    }
+
+    for (const level of [1, 2, 3])
+    {
+        addBlockButton(
+            `H${level}`,
+            toggleBlock('heading', { level }),
+            () => blockActive(editor.state, 'heading', { level }),
+        )
+    }
+    addBlockButton('❝', toggleBlock('blockquote'), () => blockActive(editor.state, 'blockquote'))
+    addBlockButton('{ }', toggleBlock('code_block'), () => blockActive(editor.state, 'code_block'))
+    addBlockButton('• List', toggleList('bullet_list'), () => inList(editor.state, 'bullet_list'))
+    addBlockButton('1. List', toggleList('ordered_list'), () => inList(editor.state, 'ordered_list'))
+    addBlockButton('─', insertRule, () => false)
+
+    // Reflect the active marks/blocks at the caret/selection on every render.
     return () =>
     {
         for (const { el, type } of buttons)
         {
             el.classList.toggle('active', markActive(editor.state, type))
+        }
+        for (const { el, isActive } of blockButtons)
+        {
+            el.classList.toggle('active', isActive())
         }
     }
 }
@@ -187,6 +361,34 @@ function setupBubble(editor: CanvasEditor): () => void
 }
 
 
+// ─── Node view: the "run" button block ──────────────────────────────────────
+
+function runButtonView(node: ProsemirrorNode): HTMLElement
+{
+    const root = document.createElement('div')
+    root.className = 'run-block'
+
+    const code = document.createElement('code')
+    code.textContent = node.attrs['code'] as string
+
+    const out = document.createElement('span')
+    out.className = 'run-out'
+
+    const btn = document.createElement('button')
+    btn.className = 'run-btn'
+    btn.textContent = '▶ Run'
+    btn.addEventListener('mousedown', (e) => e.stopPropagation()) // don't select the node
+    btn.addEventListener('click', () =>
+    {
+        try { out.textContent = ` → ${String(new Function(`return (${node.attrs['code']})`)())}` }
+        catch (err) { out.textContent = ` → ${(err as Error).message}` }
+    })
+
+    root.append(btn, code, out)
+    return root
+}
+
+
 // ─── Boot ──────────────────────────────────────────────────────────────────
 
 async function boot(): Promise<void>
@@ -210,6 +412,8 @@ async function boot(): Promise<void>
             'Mod-y': redo,
             'Shift-Mod-z': redo,
         },
+        nodeViews: { runButton: runButtonView },
+        placeholder: 'Start typing…',
         onRender(stats)
         {
             statusEl.textContent =
@@ -234,22 +438,26 @@ async function boot(): Promise<void>
 // ─── Draggable float ─────────────────────────────────────────────────────────
 
 const CONTENT_WIDTH = 460
-const CANVAS_PAD = 40
 
 function setupFloat(editor: CanvasEditor): void
 {
     const wrap = document.querySelector('.canvas-wrap') as HTMLElement
+    const canvasEl = wrap.querySelector('canvas') as HTMLCanvasElement
     const box = document.createElement('div')
     box.className = 'float-box'
     box.textContent = 'float — drag me'
     wrap.appendChild(box)
 
-    // Content-space rect; text flows around it.
+    // Content-space rect; text flows around it. The visual box is offset to the
+    // canvas's real origin (it sits below the toolbar inside .canvas-wrap), so
+    // the box lines up with the exclusion rect instead of floating above it.
     const f = { x: 250, y: 34, width: 190, height: 132 }
     const place = () =>
     {
-        box.style.left = `${CANVAS_PAD + f.x}px`
-        box.style.top = `${CANVAS_PAD + f.y}px`
+        const wrapRect = wrap.getBoundingClientRect()
+        const canvasRect = canvasEl.getBoundingClientRect()
+        box.style.left = `${(canvasRect.left - wrapRect.left) + f.x}px`
+        box.style.top = `${(canvasRect.top - wrapRect.top) + f.y}px`
         box.style.width = `${f.width}px`
         box.style.height = `${f.height}px`
         editor.setFloats([{ ...f }])
