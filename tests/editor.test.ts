@@ -4,6 +4,7 @@ import { EditorState, TextSelection, NodeSelection } from 'prosemirror-state'
 import { toggleMark } from 'prosemirror-commands'
 import { history, undo, redo } from 'prosemirror-history'
 import { CanvasEditor, type RenderStats } from '../src/editor'
+import { GapCursor } from 'prosemirror-gapcursor'
 import { markSpecs, buildMarkKeymap } from '../src/marks'
 
 const nodes: Record<string, NodeSpec> = {
@@ -1042,6 +1043,82 @@ describe('block box decorations (blockquote / code-block / hr)', () =>
 })
 
 
+describe('gap cursor (seams between atom blocks)', () =>
+{
+    function ed(doc: any)
+    {
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        return new CanvasEditor({
+            state: EditorState.create({ doc, schema }),
+            container,
+            nodeViews: { widget: () => document.createElement('div') },
+        })
+    }
+    const keydown = (e: CanvasEditor, init: KeyboardEventInit) =>
+        (e as any).textarea.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }))
+    // doc: paragraph + two stacked atoms (a gap is valid in the seam between them)
+    const stacked = () => schema.node('doc', null, [
+        schema.node('paragraph', null, [schema.text('x')]),
+        schema.node('widget'), schema.node('widget'),
+    ])
+
+    test('arrowing down through stacked atoms lands a gap cursor in the seam', () =>
+    {
+        const e = ed(stacked())
+        e.dispatch(e.state.tr.setSelection(TextSelection.atStart(e.state.doc)))
+        keydown(e, { key: 'ArrowDown' }) // → selects first widget
+        keydown(e, { key: 'ArrowDown' }) // → gap between the widgets
+        expect(e.state.selection instanceof GapCursor).toBe(true)
+        e.destroy()
+    })
+
+    test('Enter at a gap cursor inserts a paragraph into the seam', () =>
+    {
+        const e = ed(stacked())
+        const gapPos = 4 // paragraph(0..3) + leaf widget(3..4) → seam at 4
+        e.dispatch(e.state.tr.setSelection(new GapCursor(e.state.doc.resolve(gapPos))))
+        keydown(e, { key: 'Enter' })
+        // doc is now paragraph, widget, paragraph, widget
+        expect(e.state.doc.childCount).toBe(4)
+        expect(e.state.doc.child(2).type.name).toBe('paragraph')
+        expect(e.state.selection instanceof TextSelection).toBe(true)
+        e.destroy()
+    })
+
+    test('clicking in the seam between two atoms sets a gap cursor', () =>
+    {
+        const e = ed(stacked())
+        const layouts = (e as any).lastLayouts as any[]
+        const w0 = layouts.find((b) => b.type === 'widget')
+        const seamY = w0.yOffset + w0.height + 1 // just inside the gap band
+        ;(e as any).canvas.getBoundingClientRect = () => ({ left: 0, top: 0 })
+        ;(e as any).canvas.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, clientX: 5, clientY: seamY }))
+        expect(e.state.selection instanceof GapCursor).toBe(true)
+        e.destroy()
+    })
+
+    test('Backspace at a gap cursor deletes the atom before it', () =>
+    {
+        const e = ed(stacked())
+        e.dispatch(e.state.tr.setSelection(new GapCursor(e.state.doc.resolve(4))))
+        keydown(e, { key: 'Backspace' })
+        expect(e.state.doc.childCount).toBe(2) // first widget removed
+        e.destroy()
+    })
+
+    test('a node view is shipped for the atom (image) example', () =>
+    {
+        // Stacked atoms with a node view are laid out as zero-line blocks.
+        const e = ed(stacked())
+        const atomBlocks = (e as any).lastLayouts.filter((b: any) => b.isAtom)
+        expect(atomBlocks.length).toBe(2)
+        expect(atomBlocks.every((b: any) => b.lines.length === 0)).toBe(true)
+        e.destroy()
+    })
+})
+
+
 describe('lists (nested structure + markers + indent)', () =>
 {
     function ed(doc: any)
@@ -1205,6 +1282,18 @@ describe('hard breaks in marked text + code-block exit', () =>
         expect(ed.state.doc.child(0).textContent).toBe('x') // trailing \n dropped
         expect(ed.state.doc.child(1).type.name).toBe('paragraph')
         ed.destroy()
+    })
+
+    test('a multi-line code block maps offsets across newlines (no drift)', () =>
+    {
+        const e = editorFromDoc(schema.node('doc', null, [
+            schema.node('code_block', null, [schema.text('a\nbb\nccc')]),
+        ]))
+        const lines = (e as any).lastLayouts[0].lines as any[]
+        expect(lines.map((l) => l.text)).toEqual(['a', 'bb', 'ccc'])
+        // 'a'(0) \n(1) 'bb'(2,3) \n(4) 'ccc'(5,6,7) — each line starts past its \n.
+        expect(lines.map((l) => l.pmStart)).toEqual([0, 2, 5])
+        e.destroy()
     })
 
     test('Enter at the end of a heading continues as a paragraph', () =>

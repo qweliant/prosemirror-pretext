@@ -48,15 +48,22 @@ mock.module('@chenglou/pretext', () =>
     )
     {
         if (prepared.text.length === 0) return { lines: [], height: 0 }
-        return {
-            lines: [{
-                text: prepared.text,
-                width: prepared.text.length * 8,
-                start: { segmentIndex: 0, graphemeIndex: 0 },
-                end: { segmentIndex: 0, graphemeIndex: prepared.text.length },
-            }],
-            height: lineHeight,
-        }
+        // Model 'pre-wrap' hard breaks: split on '\n' (the newline is dropped
+        // from the line text, as real Pretext does), one line per segment.
+        const segments = prepared.text.split('\n')
+        let g = 0
+        const lines = segments.map((seg) =>
+        {
+            const start = { segmentIndex: 0, graphemeIndex: g }
+            g += seg.length + 1 // +1 for the dropped '\n'
+            return {
+                text: seg,
+                width: seg.length * 8,
+                start,
+                end: { segmentIndex: 0, graphemeIndex: g - 1 },
+            }
+        })
+        return { lines, height: lines.length * lineHeight }
     }
     // Variable-width per-line layout (float path). Mock cursor: graphemeIndex
     // is a char offset; break into fixed-char chunks sized to the given width.

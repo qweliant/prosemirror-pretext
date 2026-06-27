@@ -16,7 +16,7 @@ import { CanvasEditor, markSpecs, buildMarkKeymap } from '../src'
 // ─── Schema ────────────────────────────────────────────────────────────────
 
 const nodes: Record<string, NodeSpec> = {
-    doc: { content: '(heading | paragraph | blockquote | code_block | horizontal_rule | bullet_list | ordered_list | runButton)+' },
+    doc: { content: '(heading | paragraph | blockquote | code_block | horizontal_rule | bullet_list | ordered_list | image | runButton)+' },
     paragraph: {
         content: 'text*',
         toDOM: () => ['p', 0],
@@ -69,6 +69,17 @@ const nodes: Record<string, NodeSpec> = {
         toDOM: () => ['li', 0],
         parseDOM: [{ tag: 'li' }],
     },
+    // An image: an atom block drawn by a node view (a real <img> element).
+    image: {
+        atom: true,
+        group: 'block',
+        attrs: { src: {}, alt: { default: '' } },
+        toDOM: (n) => ['img', { src: n.attrs['src'], alt: n.attrs['alt'] }],
+        parseDOM: [{
+            tag: 'img[src]',
+            getAttrs: (d) => ({ src: (d as HTMLElement).getAttribute('src'), alt: (d as HTMLElement).getAttribute('alt') ?? '' }),
+        }],
+    },
     // A leaf/atom block: a snippet of code with a Run button (a node view).
     runButton: {
         atom: true,
@@ -97,6 +108,10 @@ const highlighted = (s: string, color?: string) =>
 /** A list item: a paragraph of inline content, plus optional nested blocks. */
 const item = (inline: ProsemirrorNode[], ...rest: ProsemirrorNode[]) =>
     schema.node('list_item', null, [schema.node('paragraph', null, inline), ...rest])
+
+/** A solid-colour image, as an inline SVG data URI (offline demo asset). */
+const swatch = (color: string) =>
+    `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="460" height="90"><rect width="460" height="90" rx="6" fill="${color}"/></svg>`)}`
 
 
 // ─── Sample Document ───────────────────────────────────────────────────────
@@ -150,6 +165,12 @@ const doc = schema.node('doc', null, [
         item([m('one,')]),
         item([m('two, three.')]),
     ]),
+    schema.node('paragraph', null, [
+        m('Two images stacked below — click into the seam between them (or arrow '),
+        m('to it) to get a '), m('gap cursor', 'em'), m(', then press Enter to slot a paragraph in.'),
+    ]),
+    schema.node('image', { src: swatch('#818cf8'), alt: 'indigo swatch' }),
+    schema.node('image', { src: swatch('#e86482'), alt: 'rose swatch' }),
 ])
 
 
@@ -185,6 +206,15 @@ function toggleBlock(typeName: string, attrs?: Record<string, unknown>): Command
 const insertRule: Command = (state, dispatch) =>
 {
     dispatch?.(state.tr.replaceSelectionWith(schema.nodes['horizontal_rule'].create()).scrollIntoView())
+    return true
+}
+
+/** Prompt for an image URL and insert it at the selection. */
+const insertImage: Command = (state, dispatch) =>
+{
+    const src = window.prompt('Image URL:')
+    if (!src) return false
+    dispatch?.(state.tr.replaceSelectionWith(schema.nodes['image'].create({ src })).scrollIntoView())
     return true
 }
 
@@ -301,6 +331,7 @@ function buildToolbar(editor: CanvasEditor): () => void
     addBlockButton('{ }', toggleBlock('code_block'), () => blockActive(editor.state, 'code_block'))
     addBlockButton('• List', toggleList('bullet_list'), () => inList(editor.state, 'bullet_list'))
     addBlockButton('1. List', toggleList('ordered_list'), () => inList(editor.state, 'ordered_list'))
+    addBlockButton('🖼', insertImage, () => false)
     addBlockButton('─', insertRule, () => false)
 
     // Reflect the active marks/blocks at the caret/selection on every render.
@@ -323,7 +354,7 @@ function setupBubble(editor: CanvasEditor): () => void
 {
     const bubble = document.createElement('div')
     bubble.className = 'bubble'
-    const buttons: { el: HTMLButtonElement, type: MarkType }[] = []
+    const marks: { el: HTMLButtonElement, type: MarkType }[] = []
     for (const [label, markName] of [['B', 'strong'], ['I', 'em'], ['</>', 'code']] as const)
     {
         const type = schema.marks[markName]
@@ -336,7 +367,28 @@ function setupBubble(editor: CanvasEditor): () => void
             editor.command(toggleMark(type))
         })
         bubble.appendChild(el)
-        buttons.push({ el, type })
+        marks.push({ el, type })
+    }
+
+    // List toggles, mirroring the main toolbar so a selection can be turned
+    // into a list (or lifted back out) without leaving the floating menu.
+    const sep = document.createElement('span')
+    sep.className = 'tb-sep'
+    bubble.appendChild(sep)
+
+    const lists: { el: HTMLButtonElement, typeName: string }[] = []
+    for (const [label, typeName] of [['•', 'bullet_list'], ['1.', 'ordered_list']] as const)
+    {
+        const el = document.createElement('button')
+        el.textContent = label
+        el.className = 'tb'
+        el.addEventListener('mousedown', (e) =>
+        {
+            e.preventDefault()
+            editor.command(toggleList(typeName))
+        })
+        bubble.appendChild(el)
+        lists.push({ el, typeName })
     }
     document.body.appendChild(bubble)
 
@@ -350,9 +402,13 @@ function setupBubble(editor: CanvasEditor): () => void
             return
         }
         bubble.style.display = 'flex'
-        for (const { el, type } of buttons)
+        for (const { el, type } of marks)
         {
             el.classList.toggle('active', markActive(editor.state, type))
+        }
+        for (const { el, typeName } of lists)
+        {
+            el.classList.toggle('active', inList(editor.state, typeName))
         }
         const cx = (rect.left + rect.right) / 2
         bubble.style.left = `${Math.round(cx - bubble.offsetWidth / 2)}px`
@@ -362,6 +418,17 @@ function setupBubble(editor: CanvasEditor): () => void
 
 
 // ─── Node view: the "run" button block ──────────────────────────────────────
+
+function imageView(node: ProsemirrorNode): HTMLElement
+{
+    const img = document.createElement('img')
+    img.src = node.attrs['src'] as string
+    img.alt = (node.attrs['alt'] as string) ?? ''
+    img.style.display = 'block'
+    img.style.maxWidth = '100%'
+    img.style.borderRadius = '6px'
+    return img
+}
 
 function runButtonView(node: ProsemirrorNode): HTMLElement
 {
@@ -412,7 +479,7 @@ async function boot(): Promise<void>
             'Mod-y': redo,
             'Shift-Mod-z': redo,
         },
-        nodeViews: { runButton: runButtonView },
+        nodeViews: { runButton: runButtonView, image: imageView },
         placeholder: 'Start typing…',
         onRender(stats)
         {

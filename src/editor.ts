@@ -1,10 +1,19 @@
 import {
-    type Mark, type Node as PMNode,
+    type Mark, type Node as PMNode, type ResolvedPos,
     DOMParser as PMDOMParser, Slice, Fragment,
 } from 'prosemirror-model'
 import {
-    EditorState, TextSelection, NodeSelection, type Command, type Transaction,
+    EditorState, TextSelection, NodeSelection, Selection,
+    type Command, type Transaction,
 } from 'prosemirror-state'
+import { GapCursor } from 'prosemirror-gapcursor'
+
+// prosemirror-gapcursor exposes these statics at runtime but omits them from
+// its published types; alias them with the real signatures.
+const GapCursorStatic = GapCursor as unknown as {
+    findFrom($pos: ResolvedPos, dir: number, mustMove?: boolean): ResolvedPos | null
+    valid($pos: ResolvedPos): boolean
+}
 import { joinBackward, joinForward } from 'prosemirror-commands'
 import { splitListItem, liftListItem, sinkListItem } from 'prosemirror-schema-list'
 import { keydownHandler } from 'prosemirror-keymap'
@@ -804,6 +813,9 @@ export class CanvasEditor
         {
             const cl = { text: l.text, width: l.width, pmStart: acc, x: base.paddingLeft }
             acc += l.text.length
+            // 'pre-wrap' breaks on a hard newline but drops it from the line
+            // text; skip it so the next line's offset stays aligned with source.
+            if (text[acc] === '\n') acc += 1
             return cl
         })
         return {
@@ -1084,7 +1096,7 @@ export class CanvasEditor
             return this.layoutMarkedBlockFloated(segments, blockText, base, topY)
         }
         const prepared = prepareWithSegments(text, base.font, { whiteSpace: 'pre-wrap' })
-        return this.layoutBlockFloated(prepared, base, topY)
+        return this.layoutBlockFloated(prepared, text, base, topY)
     }
 
     /**
@@ -1190,7 +1202,7 @@ export class CanvasEditor
     }
 
     /** Single-font block laid out line-by-line, flowing around floats. */
-    private layoutBlockFloated(prepared: PreparedTextWithSegments, base: ResolvedBlockStyle, topY: number): CachedBlock
+    private layoutBlockFloated(prepared: PreparedTextWithSegments, text: string, base: ResolvedBlockStyle, topY: number): CachedBlock
     {
         const lh = base.lineHeight
         const lines: CachedLine[] = []
@@ -1211,6 +1223,8 @@ export class CanvasEditor
                 x, yOffset: bandTop,
             })
             acc += line.text.length
+            // Skip the hard newline 'pre-wrap' dropped at the break (see layoutBlock).
+            if (text[acc] === '\n') acc += 1
             cursor = line.end
             bandTop += lh
         }
@@ -1817,9 +1831,17 @@ export class CanvasEditor
 
     private paintCaret(coords: { x: number, y: number, height: number } | null): void
     {
-        if (!coords || !this.caretVisible) return
-        if (!this.state.selection.empty) return
+        if (!this.caretVisible) return
         const ctx = this.canvas.getContext('2d')!
+        const sel = this.state.selection
+        // Gap cursor: a horizontal bar across the seam between two blocks.
+        if (sel instanceof GapCursor)
+        {
+            ctx.fillStyle = this.caretColor
+            ctx.fillRect(0, this.gapCursorY(sel.$from.pos) - 1, this.containerWidth, 2)
+            return
+        }
+        if (!coords || !sel.empty) return
         ctx.fillStyle = this.caretColor
         ctx.fillRect(coords.x, coords.y, this.caretWidth, coords.height)
     }
@@ -2177,7 +2199,10 @@ export class CanvasEditor
                 case 'insertFromPaste':
                 case 'insertFromDrop':
                 case 'insertReplacementText':
-                    if (ie.data) this.dispatch(this.state.tr.insertText(ie.data))
+                    if (!ie.data) break
+                    // Typing at a gap cursor starts a new paragraph in the seam.
+                    if (this.state.selection instanceof GapCursor) this.insertAtGap(ie.data)
+                    else this.dispatch(this.state.tr.insertText(ie.data))
                     break
 
                 case 'insertCompositionText':
@@ -2219,19 +2244,19 @@ export class CanvasEditor
             {
                 case 'ArrowLeft':
                     e.preventDefault()
-                    this.moveSelection(-1, e.shiftKey)
+                    if (!this.gapNav('horiz', -1, e.shiftKey)) this.moveSelection(-1, e.shiftKey)
                     break
                 case 'ArrowRight':
                     e.preventDefault()
-                    this.moveSelection(1, e.shiftKey)
+                    if (!this.gapNav('horiz', 1, e.shiftKey)) this.moveSelection(1, e.shiftKey)
                     break
                 case 'ArrowUp':
                     e.preventDefault()
-                    this.moveVertical(-1, e.shiftKey)
+                    if (!this.gapNav('vert', -1, e.shiftKey)) this.moveVertical(-1, e.shiftKey)
                     break
                 case 'ArrowDown':
                     e.preventDefault()
-                    this.moveVertical(1, e.shiftKey)
+                    if (!this.gapNav('vert', 1, e.shiftKey)) this.moveVertical(1, e.shiftKey)
                     break
                 case 'Home':
                     e.preventDefault()
@@ -2271,6 +2296,19 @@ export class CanvasEditor
             if (e.button !== 0) return
             e.preventDefault()
             const { x, y } = this.eventToDocCoords(e)
+
+            // A click in a block seam (between stacked atoms) sets a gap cursor.
+            const gapPos = this.gapPosForClick(y)
+            if (gapPos !== null)
+            {
+                this.dispatch(this.state.tr.setSelection(
+                    new GapCursor(this.state.doc.resolve(gapPos)),
+                ))
+                this.dragging = false
+                this.textarea.focus()
+                return
+            }
+
             const hit = this.clickToPos(this.lastLayouts, x, y)
             if (hit === null) return
 
@@ -2407,6 +2445,7 @@ export class CanvasEditor
     private deleteBackward(): void
     {
         const sel = this.state.selection
+        if (sel instanceof GapCursor) { this.deleteAroundGap(-1); return }
         if (!sel.empty)
         {
             this.dispatch(this.state.tr.deleteSelection())
@@ -2442,6 +2481,7 @@ export class CanvasEditor
     private deleteForward(): void
     {
         const sel = this.state.selection
+        if (sel instanceof GapCursor) { this.deleteAroundGap(1); return }
         if (!sel.empty)
         {
             this.dispatch(this.state.tr.deleteSelection())
@@ -2473,6 +2513,8 @@ export class CanvasEditor
     private onEnter(shift: boolean, mod: boolean): void
     {
         const sel = this.state.selection
+        // At a gap cursor, Enter slots an empty paragraph into the seam.
+        if (sel instanceof GapCursor) { this.insertAtGap(''); return }
         const $from = sel.$from
         if ($from.parent.type.spec.code)
         {
@@ -2830,6 +2872,136 @@ export class CanvasEditor
         // Pin phantom X and bias after dispatch (which clears them).
         this.phantomX = targetX
         if (hit !== null) this.caretBias = hit.bias
+    }
+
+    // ─── Gap cursor ────────────────────────────────────────────────────
+
+    /** True when the caret is on the visual edge line/column of its block, so
+     *  an arrow there should step out into a gap rather than within the block. */
+    private atTextblockEdge(axis: 'horiz' | 'vert', dir: 1 | -1): boolean
+    {
+        const sel = this.state.selection
+        if (axis === 'horiz')
+        {
+            const $h = sel.$head
+            return dir > 0 ? $h.parentOffset === $h.parent.content.size : $h.parentOffset === 0
+        }
+        const head = sel.head
+        const coords = this.posToCoords(this.lastLayouts, head)
+        if (!coords) return false
+        const block = this.lastLayouts.find((b) => head >= b.pmStartPos && head <= b.pmEndPos)
+        if (!block || block.lines.length === 0) return false
+        const edge = dir > 0 ? block.lines[block.lines.length - 1] : block.lines[0]
+        return coords.y === edge.y
+    }
+
+    /**
+     * Try to move the selection into — or along — a gap cursor (the caret that
+     * sits in seams between block nodes where no text cursor fits, e.g. between
+     * two stacked images). Returns whether it handled the arrow; otherwise the
+     * caller performs its normal text/vertical motion.
+     */
+    private gapNav(axis: 'horiz' | 'vert', dir: 1 | -1, extend: boolean): boolean
+    {
+        if (extend) return false
+        const sel = this.state.selection
+
+        // Already in a gap: step to the next gap, the adjacent atom, or the
+        // nearest text position.
+        if (sel instanceof GapCursor)
+        {
+            const $from = dir > 0 ? sel.$to : sel.$from
+            const $g = GapCursorStatic.findFrom($from, dir, true)
+            if ($g) { this.dispatch(this.state.tr.setSelection(new GapCursor($g))); return true }
+            const node = dir > 0 ? $from.nodeAfter : $from.nodeBefore
+            if (node && NodeSelection.isSelectable(node))
+            {
+                const at = dir > 0 ? $from.pos : $from.pos - node.nodeSize
+                this.dispatch(this.state.tr.setSelection(NodeSelection.create(this.state.doc, at)))
+                return true
+            }
+            const next = Selection.findFrom($from, dir, true)
+            if (next) this.dispatch(this.state.tr.setSelection(next))
+            return true
+        }
+
+        let $start: ResolvedPos
+        let mustMove = sel.empty
+        if (sel instanceof TextSelection && sel.empty)
+        {
+            if (sel.$head.depth === 0 || !this.atTextblockEdge(axis, dir)) return false
+            $start = this.state.doc.resolve(dir > 0 ? sel.$head.after() : sel.$head.before())
+            mustMove = false
+        }
+        else if (sel instanceof NodeSelection)
+        {
+            $start = dir > 0 ? sel.$to : sel.$from
+        }
+        else
+        {
+            return false
+        }
+        const $found = GapCursorStatic.findFrom($start, dir, mustMove)
+        if (!$found) return false
+        this.dispatch(this.state.tr.setSelection(new GapCursor($found)))
+        return true
+    }
+
+    /** If a click at document-space `y` falls in a seam where a gap cursor is
+     *  valid (e.g. between two stacked images), the gap position; else null. */
+    private gapPosForClick(y: number): number | null
+    {
+        for (let i = 0; i < this.lastLayouts.length; i++)
+        {
+            const b = this.lastLayouts[i]
+            const next = this.lastLayouts[i + 1]
+            if (i === 0 && y < b.yOffset)
+            {
+                return GapCursorStatic.valid(this.state.doc.resolve(b.pmStartPos)) ? b.pmStartPos : null
+            }
+            if (y > b.yOffset + b.height && (!next || y < next.yOffset))
+            {
+                return GapCursorStatic.valid(this.state.doc.resolve(b.pmEndPos)) ? b.pmEndPos : null
+            }
+        }
+        return null
+    }
+
+    /** Document-space Y where a gap cursor at `pos` is painted (in a block seam). */
+    private gapCursorY(pos: number): number
+    {
+        let y = 1
+        for (const b of this.lastLayouts)
+        {
+            if (pos <= b.pmStartPos) return Math.max(1, b.yOffset - this.blockGap / 2)
+            if (pos >= b.pmEndPos) y = b.yOffset + b.height + this.blockGap / 2
+        }
+        return y
+    }
+
+    /** Insert a paragraph (optionally seeded with text) where the gap cursor is. */
+    private insertAtGap(text: string): void
+    {
+        const sel = this.state.selection
+        if (!(sel instanceof GapCursor)) return
+        const para = this.state.schema.nodes['paragraph']
+        if (!para) return
+        const pos = sel.$from.pos
+        const node = text ? para.create(null, this.state.schema.text(text)) : para.createAndFill()
+        if (!node) return
+        const tr = this.state.tr.insert(pos, node)
+        tr.setSelection(TextSelection.near(tr.doc.resolve(pos + 1 + text.length)))
+        this.dispatch(tr.scrollIntoView())
+    }
+
+    /** Delete the node on one side of the gap cursor (Backspace / Delete). */
+    private deleteAroundGap(dir: -1 | 1): void
+    {
+        const $pos = this.state.selection.$from
+        const node = dir < 0 ? $pos.nodeBefore : $pos.nodeAfter
+        if (!node) return
+        const from = dir < 0 ? $pos.pos - node.nodeSize : $pos.pos
+        this.dispatch(this.state.tr.delete(from, from + node.nodeSize).scrollIntoView())
     }
 
     private moveToBlockBoundary(end: 'start' | 'end', extend: boolean): void

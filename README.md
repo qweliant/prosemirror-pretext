@@ -255,7 +255,7 @@ editor needs to implement.
 ### Media & embeds
 
 - [x] **Atom block node views** — interactive DOM (buttons, embeds) positioned over reserved space (`nodeViews`)
-- [ ] **Images** — a built-in node view that draws to canvas + resize handles; reuse the float engine for wrap
+- [x] **Images** — a block atom rendered by a node view (a real `<img>`), selectable/deletable like any atom (resize handles + float-wrap still TODO)
 - [ ] **Inline atoms** — mentions/chips, emoji images, hard breaks, inline math (these are *inline*, not block)
 
 ### Selection & affordances
@@ -263,7 +263,7 @@ editor needs to implement.
 - [x] **Node selection** — select an atom block as a unit (arrow-into / click / Backspace)
 - [x] **Placeholder text** — prompt rendered when the document is empty (`placeholder` option)
 - [x] **Hard breaks** — Shift+Enter inserts a newline; honored by both the single-font (`pre-wrap`) path and the marked path (split into hard-line segments). In a code block, Enter inserts a newline and Mod-Enter (or a second Enter on a blank last line) exits to a paragraph
-- [ ] **Gap cursor** — caret between two adjacent non-text blocks (node selection covers the common case)
+- [x] **Gap cursor** — caret in the seam between adjacent non-text blocks (stacked images, leading/trailing atoms). Reach it by arrow or click; Enter/typing inserts a paragraph, Backspace/Delete removes the neighbour. Uses `prosemirror-gapcursor`'s `GapCursor` selection
 
 ### Decorations
 
