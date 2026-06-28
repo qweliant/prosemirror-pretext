@@ -1474,6 +1474,66 @@ describe('floating nodes (text wrap)', () =>
 })
 
 
+describe('overridable handlers', () =>
+{
+    function ed(handlers: any)
+    {
+        const doc = schema.node('doc', null, [schema.node('paragraph', null, [schema.text('hello world')])])
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        return new CanvasEditor({ state: EditorState.create({ doc, schema }), container, handlers })
+    }
+    const keydown = (e: CanvasEditor, init: KeyboardEventInit) =>
+        (e as any).textarea.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }))
+
+    test('handlers.keyDown can suppress a built-in key', () =>
+    {
+        let seen = 0
+        const e = ed({ keyDown: (_ed: any, ev: KeyboardEvent) => { if (ev.key === 'ArrowRight') { seen++; return true } return false } })
+        e.dispatch(e.state.tr.setSelection(TextSelection.atStart(e.state.doc)))
+        const before = e.state.selection.head
+        keydown(e, { key: 'ArrowRight' })
+        expect(seen).toBe(1)
+        expect(e.state.selection.head).toBe(before) // caret didn't move
+        e.destroy()
+    })
+
+    test('handlers.click receives the pos and can suppress caret placement', () =>
+    {
+        let gotPos = -1
+        const e = ed({ click: (_ed: any, pos: number) => { gotPos = pos; return true } })
+        e.dispatch(e.state.tr.setSelection(TextSelection.atEnd(e.state.doc)))
+        const before = e.state.selection.head
+        ;(e as any).canvas.getBoundingClientRect = () => ({ left: 0, top: 0 })
+        ;(e as any).canvas.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, clientX: 8, clientY: 5 }))
+        expect(gotPos).toBeGreaterThanOrEqual(1)
+        expect(e.state.selection.head).toBe(before) // suppressed → caret unchanged
+        e.destroy()
+    })
+
+    test('handlers.paste can override the built-in paste', () =>
+    {
+        let called = false
+        const e = ed({ paste: () => { called = true; return true } })
+        const ev = new Event('paste', { bubbles: true, cancelable: true })
+        ;(ev as any).clipboardData = { getData: () => 'nope' }
+        ;(e as any).textarea.dispatchEvent(ev)
+        expect(called).toBe(true)
+        expect(e.state.doc.textContent).toBe('hello world') // default paste skipped
+        e.destroy()
+    })
+
+    test('handlers.domEvents binds arbitrary events on the container', () =>
+    {
+        let hits = 0
+        const e = ed({ domEvents: { mouseover: () => { hits++; return true } } })
+        ;(e as any).stack.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }))
+        expect(hits).toBe(1)
+        e.destroy()
+    })
+})
+
+
 describe('decorations (inline / node / widget)', () =>
 {
     function ed(opts: any)

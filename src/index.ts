@@ -11,6 +11,7 @@ export type {
     BlockStyleResolver,
     FloatRect,
     NodeViewFn,
+    EditorHandlers,
 } from './editor'
 export { markSpecs, buildMarkKeymap } from './marks'
 export { Decoration } from './decoration'

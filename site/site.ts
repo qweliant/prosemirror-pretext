@@ -119,20 +119,39 @@ async function boot(): Promise<void> {
     const statsEl = document.getElementById('render-stats')!
     const peek = document.getElementById('mirror-peek') as HTMLElement
 
-    // Search highlight: inline decorations over every match (not in the doc).
-    const searchDecos = (state: EditorState): Deco[] => {
-        if (!query) return []
+    let collabOn = false
+    let collabPos = 6
+
+    // A simulated remote caret. In a real app the *position* would come from a
+    // collab transport (Yjs / y-prosemirror or prosemirror-collab + a socket);
+    // the *rendering* is just a widget decoration like this one.
+    function collabCursor(): HTMLElement {
+        const el = document.createElement('span')
+        el.style.cssText = 'display:inline-block;position:relative'
+        el.innerHTML = '<span style="position:absolute;width:2px;height:22px;background:#e0488a;border-radius:1px"></span>' +
+            '<span style="position:absolute;top:-18px;left:-2px;white-space:nowrap;background:#e0488a;color:#fff;font:600 11px/1.4 system-ui;padding:1px 6px;border-radius:6px">Keroppi 🐸</span>'
+        return el
+    }
+
+    // Decorations = search highlights + (optionally) the collaborator's caret.
+    const decorationsFn = (state: EditorState): Deco[] => {
         const decos: Deco[] = []
-        const q = query.toLowerCase()
-        state.doc.descendants((node, pos) => {
-            if (!node.isText || !node.text) return
-            const text = node.text.toLowerCase()
-            let i = text.indexOf(q)
-            while (i !== -1) {
-                decos.push(Decoration.inline(pos + i, pos + i + q.length, { background: '#fff06a' }))
-                i = text.indexOf(q, i + q.length)
-            }
-        })
+        if (query) {
+            const q = query.toLowerCase()
+            state.doc.descendants((node, pos) => {
+                if (!node.isText || !node.text) return
+                const text = node.text.toLowerCase()
+                let i = text.indexOf(q)
+                while (i !== -1) {
+                    decos.push(Decoration.inline(pos + i, pos + i + q.length, { background: '#fff06a' }))
+                    i = text.indexOf(q, i + q.length)
+                }
+            })
+        }
+        if (collabOn) {
+            const max = state.doc.content.size
+            decos.push(Decoration.widget(Math.min(collabPos, max), collabCursor(), { key: 'collab' }))
+        }
         return decos
     }
     const editor = new CanvasEditor({
@@ -143,7 +162,7 @@ async function boot(): Promise<void> {
         keymap: { ...buildMarkKeymap(schema), 'Mod-z': undo, 'Mod-y': redo, 'Shift-Mod-z': redo },
         nodeViews: { image: imageView },
         floatRect: (n) => n.type.name === 'image' && n.attrs['x'] != null ? { x: n.attrs['x'], y: n.attrs['y'], width: n.attrs['width'] ?? 220 } : null,
-        decorations: searchDecos,
+        decorations: decorationsFn,
         onRender(s: RenderStats) {
             statsEl.innerHTML = `${s.blockCount} blocks · ${s.lineCount} lines · ${s.renderTimeMs.toFixed(1)}ms · <span class="reflow">0 reflows ✨</span>`
             if (!peek.hidden) renderPeek()
@@ -204,6 +223,23 @@ async function boot(): Promise<void> {
         editor.dispatch(editor.state.tr) // empty tr → re-render → decorations() reruns
     })
 
+    // ── Simulated collaborator (a widget decoration that wanders the doc) ──
+    const collabBtn = document.getElementById('collab-toggle') as HTMLButtonElement
+    let collabTimer: ReturnType<typeof setInterval> | null = null
+    collabBtn.addEventListener('click', () => {
+        collabOn = !collabOn
+        collabBtn.classList.toggle('on', collabOn)
+        if (collabOn) {
+            collabTimer = setInterval(() => {
+                collabPos = 2 + Math.floor(Math.random() * Math.max(1, editor.state.doc.content.size - 4))
+                editor.dispatch(editor.state.tr) // refresh decorations
+            }, 1400)
+        } else if (collabTimer) {
+            clearInterval(collabTimer); collabTimer = null
+        }
+        editor.dispatch(editor.state.tr)
+    })
+
     // ── Screen-reader mirror peek (proof the canvas is still accessible) ──
     const mt = document.getElementById('mirror-toggle') as HTMLButtonElement
     function renderPeek() {
@@ -218,6 +254,21 @@ async function boot(): Promise<void> {
 
     editor.focus()
 }
+
+// A single fixed-position vertical guide line, shown while an image snaps.
+let guideEl: HTMLElement | null = null
+function showGuide(left: number, top: number, height: number): void {
+    if (!guideEl) {
+        guideEl = document.createElement('div')
+        guideEl.style.cssText = 'position:fixed;width:2px;background:#e0488a;z-index:50;pointer-events:none;box-shadow:0 0 6px #e0488a'
+        document.body.appendChild(guideEl)
+    }
+    guideEl.style.left = `${left}px`
+    guideEl.style.top = `${top}px`
+    guideEl.style.height = `${height}px`
+    guideEl.style.display = 'block'
+}
+function hideGuide(): void { if (guideEl) guideEl.style.display = 'none' }
 
 // A draggable image node view: corner handle resizes; dragging the body floats
 // it (text wraps). We preview with a transform and commit attrs on release so
@@ -256,11 +307,20 @@ function imageView(node: PMNode, getPos: () => number): HTMLElement {
         const cr = ((ed() as any).canvas as HTMLCanvasElement).getBoundingClientRect()
         const wr = wrap.getBoundingClientRect()
         const x0 = wr.left - cr.left, y0 = wr.top - cr.top, sx = e.clientX, sy = e.clientY
+        const imgW = (node.attrs['width'] as number) ?? img.offsetWidth ?? 220
+        const snaps = [0, (cr.width - imgW) / 2, cr.width - imgW] // left / center / right
         let dx = 0, dy = 0
-        const move = (ev: PointerEvent) => { dx = ev.clientX - sx; dy = ev.clientY - sy; wrap.style.transform = `translate(${dx}px,${dy}px)` }
+        const move = (ev: PointerEvent) => {
+            dx = ev.clientX - sx; dy = ev.clientY - sy
+            // Snap the left edge to the content's left/center/right guides.
+            const target = snaps.find((t) => Math.abs(x0 + dx - t) < 14)
+            if (target !== undefined) { dx = target - x0; showGuide(cr.left + target, cr.top, cr.height) }
+            else hideGuide()
+            wrap.style.transform = `translate(${dx}px,${dy}px)`
+        }
         const up = (ev: PointerEvent) => {
             img.releasePointerCapture(ev.pointerId); wrap.removeEventListener('pointermove', move); wrap.removeEventListener('pointerup', up)
-            wrap.style.transform = ''
+            wrap.style.transform = ''; hideGuide()
             if (dx === 0 && dy === 0) return
             ed().command((s, d) => { d?.(s.tr.setNodeMarkup(getPos(), undefined, { ...node.attrs, x: Math.max(0, Math.round(x0 + dx)), y: Math.max(0, Math.round(y0 + dy)), width: node.attrs['width'] ?? 220 })); return true })
         }

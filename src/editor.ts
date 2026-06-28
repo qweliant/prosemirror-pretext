@@ -160,6 +160,21 @@ export interface CanvasEditorOptions
 /** Builds the DOM for a leaf/atom block node. See `nodeViews`. */
 export type NodeViewFn = (node: PMNode, getPos: () => number) => HTMLElement
 
+/**
+ * Overridable event handlers. Each returns `true` to suppress the built-in
+ * behavior (mirrors prosemirror-view's `handle*` props, with the editor in place
+ * of the view). `handleDOMEvents` maps DOM event names to handlers bound on the
+ * editor's container.
+ */
+export interface EditorHandlers
+{
+    keyDown?: (editor: CanvasEditor, event: KeyboardEvent) => boolean
+    click?: (editor: CanvasEditor, pos: number, event: MouseEvent) => boolean
+    doubleClick?: (editor: CanvasEditor, pos: number, event: MouseEvent) => boolean
+    paste?: (editor: CanvasEditor, event: ClipboardEvent) => boolean
+    domEvents?: Record<string, (editor: CanvasEditor, event: Event) => boolean>
+}
+
 /** A rectangle that text flows around, in content-space coordinates. */
 export interface FloatRect
 {
@@ -506,6 +521,7 @@ export class CanvasEditor
     // Transient decorations: a resolver + the live widget DOM (keyed for reuse).
     private readonly decorationsFor: ((state: EditorState) => Decoration[]) | null
     private readonly mountedWidgets = new Map<string, HTMLElement>()
+    private readonly handlers: EditorHandlers
     // Below this, a slot is too narrow to set text; the line flows past it.
     private readonly minSlotWidth = 24
 
@@ -656,6 +672,7 @@ export class CanvasEditor
             ?? ((href) => { window.open(href, '_blank', 'noopener') })
         this.nodeViews = options.nodeViews ?? {}
         this.decorationsFor = options.decorations ?? null
+        this.handlers = options.handlers ?? {}
 
         // Build DOM
         const stack = document.createElement('div')
@@ -2616,6 +2633,9 @@ export class CanvasEditor
         {
             if (this.composing || e.isComposing) return
 
+            // Consumer override: handled keys skip both keymap and built-ins.
+            if (this.handlers.keyDown?.(this, e)) { e.preventDefault(); return }
+
             // Consumer key bindings (mark toggles, etc.) take precedence over
             // the built-in navigation/editing keys below.
             if (this.keymapHandler(e))
@@ -2696,6 +2716,9 @@ export class CanvasEditor
             const hit = this.clickToPos(this.lastLayouts, x, y)
             if (hit === null) return
 
+            // Consumer override (e.g. open a mention, toggle a checkbox).
+            if (this.handlers.click?.(this, hit.pos, e)) { this.textarea.focus(); return }
+
             // Cmd/Ctrl-click follows a link instead of moving the caret.
             if (e.metaKey || e.ctrlKey)
             {
@@ -2752,6 +2775,7 @@ export class CanvasEditor
             const { x, y } = this.eventToDocCoords(e)
             const hit = this.clickToPos(this.lastLayouts, x, y)
             if (hit === null) return
+            if (this.handlers.doubleClick?.(this, hit.pos, e)) { this.textarea.focus(); return }
             const word = this.wordRangeAt(hit.pos)
             if (word)
             {
@@ -2788,6 +2812,7 @@ export class CanvasEditor
         // insert + the follow-up 'insertFromPaste' input event.
         this.textarea.addEventListener('paste', (e) =>
         {
+            if (this.handlers.paste?.(this, e)) { e.preventDefault(); return }
             const cd = e.clipboardData
             if (!cd) return
             const html = cd.getData('text/html')
@@ -2797,6 +2822,12 @@ export class CanvasEditor
             if (html) this.pasteHTML(html)
             else this.pastePlainText(text)
         }, { signal })
+
+        // Consumer-supplied DOM event handlers, bound on the container.
+        for (const [name, fn] of Object.entries(this.handlers.domEvents ?? {}))
+        {
+            this.stack.addEventListener(name, (e) => { if (fn(this, e)) e.preventDefault() }, { signal })
+        }
 
         // Repaint the visible slice as the user scrolls (virtualized mode).
         this.scroller?.addEventListener('scroll', () =>

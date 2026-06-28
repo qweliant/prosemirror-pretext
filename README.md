@@ -69,6 +69,7 @@ The container element should be an empty block-level element. The editor creates
 | `a11yMirror` | `true` | Maintain a screen-reader-visible DOM mirror of the document |
 | `editable` | `true` | Start editable or read-only (read-only keeps navigation/selection/copy, drops edits); toggle with `setEditable()` |
 | `decorations` | `undefined` | `(state) => Decoration[]` — transient overlays (search highlight, squiggles, collab cursors, inline widgets, node backgrounds); recomputed each render. See `Decoration.{inline,node,widget}` |
+| `handlers` | `{}` | Overridable event handlers (`keyDown`, `click`, `doubleClick`, `paste`, `domEvents`) — return `true` to suppress the built-in behavior (à la prosemirror-view's `handle*`) |
 | `markStyles` | defaults below | Maps mark names → a style `{ fontWeight, fontStyle, fontFamily, color, background, underline, strikethrough }`, or a `(mark) => style` function to read attributes |
 | `blockStyles` | `heading` / `blockquote` / `code_block` defaults | Maps block-type names → text style `{ fontSize, fontWeight, fontStyle, fontFamily, lineHeight, color }` + box decorations `{ paddingLeft/Right/Top/Bottom, background, borderLeft }` (or a `(node) => style` fn) |
 | `keymap` | `{}` | ProseMirror key bindings, checked before built-in keys |
@@ -273,7 +274,7 @@ editor needs to implement.
 
 - [x] **Atom block node views** — interactive DOM (buttons, embeds) positioned over reserved space (`nodeViews`)
 - [x] **Images** — a block atom rendered by a node view (a real `<img>`); drag-to-resize (corner handle), and drag-to-float so text wraps around it (`floatRect`, reusing the float engine — the same obstacle-wrap Pretext's own demos use)
-- [ ] **Inline atoms** — mentions/chips, emoji images, hard breaks, inline math (these are *inline*, not block)
+- [~] **Inline atoms** — text-like chips/mentions/emoji are doable today as styled inline ranges (marks / inline decorations); true *interactive inline DOM* node views need Pretext fixed-width inline boxes (deferred)
 
 ### Selection & affordances
 
