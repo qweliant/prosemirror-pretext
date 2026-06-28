@@ -7,6 +7,7 @@ import { CanvasEditor, type RenderStats } from '../src/editor'
 import { GapCursor } from 'prosemirror-gapcursor'
 import { markSpecs, buildMarkKeymap } from '../src/marks'
 import { expandCollapsedWhitespace } from '../src/text'
+import { Decoration } from '../src/decoration'
 
 const nodes: Record<string, NodeSpec> = {
     doc: { content: '(paragraph | widget | heading | blockquote | code_block | horizontal_rule | bullet_list | ordered_list)+' },
@@ -1468,6 +1469,77 @@ describe('floating nodes (text wrap)', () =>
         const ls = (e as any).lastLayouts as any[]
         expect(ls.find((b) => b.type === 'paragraph').yOffset).toBeGreaterThan(0)
         expect((e as any).activeFloats.length).toBe(0)
+        e.destroy()
+    })
+})
+
+
+describe('decorations (inline / node / widget)', () =>
+{
+    function ed(opts: any)
+    {
+        const doc = schema.node('doc', null, [schema.node('paragraph', null, [schema.text('hello')])])
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        return new CanvasEditor({ state: EditorState.create({ doc, schema }), container, ...opts })
+    }
+    // A recording 2D context that captures fillRect calls + their fillStyle.
+    function record(e: CanvasEditor): { fill: string, x: number, y: number, w: number, h: number }[]
+    {
+        const rects: any[] = []
+        let cur = ''
+        const ctx: any = {
+            setTransform() {}, clearRect() {}, fillText() {}, save() {}, restore() {},
+            beginPath() {}, moveTo() {}, lineTo() {}, stroke() {},
+            measureText: (s: string) => ({ width: s.length * 8 }),
+            fillRect: (x: number, y: number, w: number, h: number) => rects.push({ fill: cur, x, y, w, h }),
+            set fillStyle(v: string) { cur = v }, get fillStyle() { return cur },
+            set font(_v: string) {}, set textBaseline(_v: string) {},
+            set strokeStyle(_v: string) {}, set lineWidth(_v: number) {},
+        }
+        ;(e as any).canvas.getContext = () => ctx
+        ;(e as any).render()
+        return rects
+    }
+
+    test('inline decoration paints a background over its range', () =>
+    {
+        const e = ed({ decorations: () => [Decoration.inline(1, 4, { background: '#ffee00' })] })
+        const rects = record(e)
+        // "hel" = offsets 0..3 → width 24 in the mock
+        expect(rects.some((r) => r.fill === '#ffee00' && r.w === 24 && r.x === 0)).toBe(true)
+        e.destroy()
+    })
+
+    test('node decoration paints a full-width background on its block', () =>
+    {
+        const e = ed({ decorations: () => [Decoration.node(0, { background: '#0000ff' })] })
+        const rects = record(e)
+        expect(rects.some((r) => r.fill === '#0000ff' && r.w === 460)).toBe(true)
+        e.destroy()
+    })
+
+    test('widget decoration mounts a DOM element at its position', () =>
+    {
+        const el = document.createElement('span')
+        el.textContent = '▍'
+        const e = ed({ decorations: () => [Decoration.widget(3, el, { key: 'cursor' })] })
+        expect((e as any).mountedWidgets.get('cursor')).toBe(el)
+        expect(el.isConnected).toBe(true)
+        expect(el.style.position).toBe('absolute')
+        e.destroy()
+    })
+
+    test('widgets are removed when no longer present', () =>
+    {
+        let show = true
+        const el = document.createElement('span')
+        const e = ed({ decorations: () => show ? [Decoration.widget(3, el, { key: 'k' })] : [] })
+        expect((e as any).mountedWidgets.has('k')).toBe(true)
+        show = false
+        ;(e as any).render()
+        expect((e as any).mountedWidgets.has('k')).toBe(false)
+        expect(el.isConnected).toBe(false)
         e.destroy()
     })
 })

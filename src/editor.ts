@@ -11,6 +11,9 @@ import {
     clamp, expandCollapsedWhitespace, hitTestInText,
     nextGraphemeBoundary, prevGraphemeBoundary,
 } from './text'
+import type {
+    Decoration, InlineDecoration, NodeDecoration, WidgetDecoration,
+} from './decoration'
 
 // prosemirror-gapcursor exposes these statics at runtime but omits them from
 // its published types; alias them with the real signatures.
@@ -127,6 +130,18 @@ export interface CanvasEditorOptions
     /** Start in editable (default) or read-only mode. Read-only still allows
      *  navigation, selection, and copy — it just drops document changes. */
     editable?: boolean
+    /**
+     * Transient, non-document styling layered over the text: search highlights,
+     * spellcheck squiggles, collab cursors, inline widgets, per-node backgrounds.
+     * Recomputed every render — derive it from your state/plugins. See `Decoration`.
+     */
+    decorations?: (state: EditorState) => Decoration[]
+    /**
+     * Overridable event handlers (à la prosemirror-view's `handle*` props). Each
+     * receives the editor and the event; return `true` to mark it handled and
+     * suppress the built-in behavior. The editor is passed in place of PM's view.
+     */
+    handlers?: EditorHandlers
     /**
      * Maintain a visually-hidden, screen-reader-visible DOM mirror of the
      * document (built from the schema's `toDOM`) so assistive tech can read the
@@ -488,6 +503,9 @@ export class CanvasEditor
     // Measured heights so layout can reserve space for each atom block.
     private readonly nodeViewHeights = new Map<PMNode, number>()
     private readonly defaultAtomHeight = 40
+    // Transient decorations: a resolver + the live widget DOM (keyed for reuse).
+    private readonly decorationsFor: ((state: EditorState) => Decoration[]) | null
+    private readonly mountedWidgets = new Map<string, HTMLElement>()
     // Below this, a slot is too narrow to set text; the line flows past it.
     private readonly minSlotWidth = 24
 
@@ -637,6 +655,7 @@ export class CanvasEditor
         this.onFollowLink = options.onFollowLink
             ?? ((href) => { window.open(href, '_blank', 'noopener') })
         this.nodeViews = options.nodeViews ?? {}
+        this.decorationsFor = options.decorations ?? null
 
         // Build DOM
         const stack = document.createElement('div')
@@ -1652,8 +1671,11 @@ export class CanvasEditor
         layouts: BlockLayout[],
         totalHeight: number,
         virtualized: boolean,
+        decorations: Decoration[] = [],
     ): void
     {
+        const inlineDecos = decorations.filter((d): d is InlineDecoration => d.kind === 'inline')
+        const nodeDecos = decorations.filter((d): d is NodeDecoration => d.kind === 'node')
         const dpr = window.devicePixelRatio || 1
         const cssWidth = this.containerWidth
 
@@ -1713,6 +1735,23 @@ export class CanvasEditor
             }
         }
 
+        // Node decorations: a transient background / left bar over a whole block.
+        for (const nd of nodeDecos)
+        {
+            const block = layouts.find((b) => b.pmStartPos - 1 === nd.from || b.pmStartPos === nd.from)
+            if (!block || !isVisible(block)) continue
+            if (nd.style.background)
+            {
+                ctx.fillStyle = nd.style.background
+                ctx.fillRect(0, block.yOffset, this.containerWidth, block.height)
+            }
+            if (nd.style.borderLeft)
+            {
+                ctx.fillStyle = nd.style.borderLeft.color
+                ctx.fillRect(0, block.yOffset, nd.style.borderLeft.width, block.height)
+            }
+        }
+
         // Highlight backgrounds paint under everything (before the selection
         // overlay, so selecting highlighted text still shows the selection).
         for (const block of layouts)
@@ -1728,6 +1767,17 @@ export class CanvasEditor
                     ctx.fillRect(line.x + frag.x, line.y, frag.width, block.lineHeight)
                 }
             }
+        }
+
+        // Inline decoration backgrounds (e.g. search highlight) — under selection.
+        for (const d of inlineDecos)
+        {
+            if (!d.style.background) continue
+            ctx.fillStyle = d.style.background
+            this.forEachRangeRect(layouts, d.from, d.to, (r) =>
+            {
+                if (r.y + r.h >= viewTop && r.y <= viewBottom) ctx.fillRect(r.x, r.y, r.w, r.h)
+            })
         }
 
         const sel = this.state.selection
@@ -1792,6 +1842,29 @@ export class CanvasEditor
             }
         }
 
+        // Inline decoration lines (underline / spellcheck squiggle / strike) —
+        // painted over the text.
+        for (const d of inlineDecos)
+        {
+            const { underline, strikethrough, wavy } = d.style
+            if (!underline && !strikethrough) continue
+            this.forEachRangeRect(layouts, d.from, d.to, (r) =>
+            {
+                if (r.y + r.h < viewTop || r.y > viewBottom) return
+                if (underline)
+                {
+                    const y = r.y + Math.round(r.h * 0.82)
+                    if (wavy) this.paintWavy(ctx, r.x, r.x + r.w, y, underline)
+                    else { ctx.fillStyle = underline; ctx.fillRect(r.x, y, r.w, 2) }
+                }
+                if (strikethrough)
+                {
+                    ctx.fillStyle = strikethrough
+                    ctx.fillRect(r.x, r.y + Math.round(r.h * 0.5), r.w, 2)
+                }
+            })
+        }
+
         // Placeholder prompt when the whole document is empty.
         if (this.placeholder && this.isDocEmpty() && layouts.length > 0)
         {
@@ -1800,6 +1873,63 @@ export class CanvasEditor
             ctx.font = block.font
             ctx.fillStyle = this.placeholderColor
             ctx.fillText(this.placeholder, line.x, line.y)
+        }
+    }
+
+    /** A wavy line from x1→x2 at baseline y (spellcheck-squiggle underline). */
+    private paintWavy(ctx: CanvasRenderingContext2D, x1: number, x2: number, y: number, color: string): void
+    {
+        ctx.save()
+        ctx.strokeStyle = color
+        ctx.lineWidth = 1.4
+        ctx.beginPath()
+        const amp = 1.6
+        const period = 5
+        for (let x = x1; x <= x2; x++)
+        {
+            const yy = y + Math.sin(((x - x1) / period) * Math.PI) * amp
+            if (x === x1) ctx.moveTo(x, yy)
+            else ctx.lineTo(x, yy)
+        }
+        ctx.stroke()
+        ctx.restore()
+    }
+
+    /** Mount/position/remove widget-decoration DOM at their document positions
+     *  (overlays inside the scroll stack, reused by `key`). */
+    private syncWidgets(layouts: BlockLayout[], decorations: Decoration[]): void
+    {
+        const present = new Set<string>()
+        const widgets = decorations.filter((d): d is WidgetDecoration => d.kind === 'widget')
+        for (let i = 0; i < widgets.length; i++)
+        {
+            const w = widgets[i]
+            const key = w.key ?? `__w${i}`
+            present.add(key)
+            let el = this.mountedWidgets.get(key)
+            if (!el)
+            {
+                el = typeof w.dom === 'function' ? w.dom() : w.dom
+                el.style.position = 'absolute'
+                el.style.zIndex = '3'
+                if (!el.style.pointerEvents) el.style.pointerEvents = 'none'
+                this.stack.appendChild(el)
+                this.mountedWidgets.set(key, el)
+            }
+            const co = this.posToCoords(layouts, w.pos)
+            if (co)
+            {
+                el.style.left = `${co.x + (w.offsetX ?? 0)}px`
+                el.style.top = `${co.y + (w.offsetY ?? 0)}px`
+                el.style.display = ''
+            }
+            else { el.style.display = 'none' }
+        }
+        for (const [key, el] of this.mountedWidgets)
+        {
+            if (present.has(key)) continue
+            el.remove()
+            this.mountedWidgets.delete(key)
         }
     }
 
@@ -1900,6 +2030,36 @@ export class CanvasEditor
         if (frag.strikethrough)
         {
             ctx.fillRect(x, line.y + shift + Math.round(fontSize * 0.52), frag.width, thickness)
+        }
+    }
+
+    /** Invoke `cb` with the canvas rect of each line-slice of doc range
+     *  [from, to). Used by inline decorations (and shaped like selection rects). */
+    private forEachRangeRect(
+        layouts: BlockLayout[],
+        from: number,
+        to: number,
+        cb: (r: { x: number, y: number, w: number, h: number }) => void,
+    ): void
+    {
+        for (const block of layouts)
+        {
+            if (block.isAtom || block.text.length === 0) continue
+            if (block.pmEndPos < from || block.pmStartPos > to) continue
+            for (let li = 0; li < block.lines.length; li++)
+            {
+                const line = block.lines[li]
+                const isLast = li === block.lines.length - 1
+                const lineStart = block.pmStartPos + line.pmStart
+                const lineEnd = block.pmStartPos
+                    + (isLast ? block.text.length : block.lines[li + 1].pmStart)
+                if (lineEnd < from || lineStart > to) continue
+                const a = Math.max(from, lineStart)
+                const b = Math.min(to, lineEnd)
+                const x1 = this.xForOffsetInLine(block, line, a - block.pmStartPos)
+                const x2 = this.xForOffsetInLine(block, line, b - block.pmStartPos)
+                if (x2 > x1) cb({ x: x1, y: line.y, w: x2 - x1, h: block.lineHeight })
+            }
         }
     }
 
@@ -2269,9 +2429,11 @@ export class CanvasEditor
             this.scrollCaretIntoView = false
         }
 
-        this.paintToCanvas(layouts, totalHeight, virtualized)
+        const decorations = this.decorationsFor ? this.decorationsFor(this.state) : []
+        this.paintToCanvas(layouts, totalHeight, virtualized, decorations)
         this.paintCaret(caretCoords)
         this.syncNodeViews(layouts)
+        this.syncWidgets(layouts, decorations)
 
         if (caretCoords)
         {

@@ -68,6 +68,7 @@ The container element should be an empty block-level element. The editor creates
 | `ariaLabel` | `'Rich text editor'` | Accessible name (the input's `aria-label`) |
 | `a11yMirror` | `true` | Maintain a screen-reader-visible DOM mirror of the document |
 | `editable` | `true` | Start editable or read-only (read-only keeps navigation/selection/copy, drops edits); toggle with `setEditable()` |
+| `decorations` | `undefined` | `(state) => Decoration[]` — transient overlays (search highlight, squiggles, collab cursors, inline widgets, node backgrounds); recomputed each render. See `Decoration.{inline,node,widget}` |
 | `markStyles` | defaults below | Maps mark names → a style `{ fontWeight, fontStyle, fontFamily, color, background, underline, strikethrough }`, or a `(mark) => style` function to read attributes |
 | `blockStyles` | `heading` / `blockquote` / `code_block` defaults | Maps block-type names → text style `{ fontSize, fontWeight, fontStyle, fontFamily, lineHeight, color }` + box decorations `{ paddingLeft/Right/Top/Bottom, background, borderLeft }` (or a `(node) => style` fn) |
 | `keymap` | `{}` | ProseMirror key bindings, checked before built-in keys |
@@ -283,9 +284,11 @@ editor needs to implement.
 
 ### Decorations
 
-- [ ] **Inline decorations** — search highlights, spellcheck squiggles
-- [ ] **Collaborative cursors / selections** — remote carets and ranges
-- [ ] **Widget decorations** — inline buttons / annotations
+- [x] **Inline decorations** — background / underline (incl. wavy squiggle) / strikethrough over any range; powers search highlight + spellcheck (`Decoration.inline`)
+- [x] **Widget decorations** — mount DOM at a position (collab cursors, inline buttons/annotations) via `Decoration.widget`
+- [x] **Node decorations** — transient block background / left bar (`Decoration.node`)
+- [ ] **Inline text-color decorations** — needs run-splitting (current inline decos are paint overlays: bg/underline/strike)
+- [ ] **Collaborative cursors / selections** — remote carets (widget decorations are the building block; the collab transport is app-level)
 
 ### Input
 

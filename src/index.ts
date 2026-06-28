@@ -13,3 +13,11 @@ export type {
     NodeViewFn,
 } from './editor'
 export { markSpecs, buildMarkKeymap } from './marks'
+export { Decoration } from './decoration'
+export type {
+    InlineDecoration,
+    NodeDecoration,
+    WidgetDecoration,
+    InlineDecorationStyle,
+    NodeDecorationStyle,
+} from './decoration'

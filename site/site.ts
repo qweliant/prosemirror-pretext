@@ -8,7 +8,7 @@ import { EditorState, type Command } from 'prosemirror-state'
 import { toggleMark, setBlockType } from 'prosemirror-commands'
 import { history, undo, redo } from 'prosemirror-history'
 import { wrapInList, liftListItem } from 'prosemirror-schema-list'
-import { CanvasEditor, markSpecs, buildMarkKeymap, type RenderStats } from '../src'
+import { CanvasEditor, markSpecs, buildMarkKeymap, Decoration, type RenderStats, type Decoration as Deco } from '../src'
 
 const EDITOR_FONT = '17px "M PLUS Rounded 1c", system-ui, sans-serif'
 const photo = (seed: string, w: number, h: number) => `https://picsum.photos/seed/${seed}/${w}/${h}`
@@ -115,8 +115,26 @@ async function boot(): Promise<void> {
     await new Promise((r) => setTimeout(r, 60))
 
     let sync = () => {}
+    let query = ''
     const statsEl = document.getElementById('render-stats')!
     const peek = document.getElementById('mirror-peek') as HTMLElement
+
+    // Search highlight: inline decorations over every match (not in the doc).
+    const searchDecos = (state: EditorState): Deco[] => {
+        if (!query) return []
+        const decos: Deco[] = []
+        const q = query.toLowerCase()
+        state.doc.descendants((node, pos) => {
+            if (!node.isText || !node.text) return
+            const text = node.text.toLowerCase()
+            let i = text.indexOf(q)
+            while (i !== -1) {
+                decos.push(Decoration.inline(pos + i, pos + i + q.length, { background: '#fff06a' }))
+                i = text.indexOf(q, i + q.length)
+            }
+        })
+        return decos
+    }
     const editor = new CanvasEditor({
         state: EditorState.create({ doc, schema, plugins: [history()] }),
         container: document.getElementById('editor-embed')!,
@@ -125,6 +143,7 @@ async function boot(): Promise<void> {
         keymap: { ...buildMarkKeymap(schema), 'Mod-z': undo, 'Mod-y': redo, 'Shift-Mod-z': redo },
         nodeViews: { image: imageView },
         floatRect: (n) => n.type.name === 'image' && n.attrs['x'] != null ? { x: n.attrs['x'], y: n.attrs['y'], width: n.attrs['width'] ?? 220 } : null,
+        decorations: searchDecos,
         onRender(s: RenderStats) {
             statsEl.innerHTML = `${s.blockCount} blocks · ${s.lineCount} lines · ${s.renderTimeMs.toFixed(1)}ms · <span class="reflow">0 reflows ✨</span>`
             if (!peek.hidden) renderPeek()
@@ -176,6 +195,13 @@ async function boot(): Promise<void> {
         ro.classList.toggle('on', !editor.editable)
         ro.textContent = editor.editable ? '🔒 read-only' : '🔓 editable'
         editor.focus()
+    })
+
+    // ── Search highlight (decorations recompute each render) ──
+    const search = document.getElementById('search') as HTMLInputElement
+    search.addEventListener('input', () => {
+        query = search.value
+        editor.dispatch(editor.state.tr) // empty tr → re-render → decorations() reruns
     })
 
     // ── Screen-reader mirror peek (proof the canvas is still accessible) ──

@@ -123,6 +123,11 @@
             border-radius: 999px; padding: 4px 12px;
         }
         .stats-bar .mini-btn.on { background: var(--sun); }
+        .stats-bar .search {
+            font-family: var(--round); font-weight: 600; font-size: 12.5px;
+            border: 2px solid var(--frog-dark); border-radius: 999px; padding: 4px 12px;
+            background: #fff; color: var(--ink); width: 200px; max-width: 40vw;
+        }
         #render-stats .reflow { color: #d8ffe0; }
 
         .mirror-peek {
@@ -173,7 +178,7 @@
         footer a { color: var(--pond-deep); font-weight: 700; }
         .note { font-size: 12.5px; color: #6b8b5c; max-width: 640px; margin: 12px auto 0; }
     </style>
-  <script type="module" crossorigin src="/prosemirror-pretext/assets/index-Cj87sfs-.js"></script>
+  <script type="module" crossorigin src="/prosemirror-pretext/assets/index-EMQiVeCT.js"></script>
 </head>
 
 <body>
@@ -213,6 +218,7 @@
                     <div id="editor-embed"></div>
                 </div>
                 <div class="stats-bar">
+                    <input id="search" class="search" placeholder="🔍 highlight text… (decorations!)" />
                     <span id="render-stats">measuring…</span>
                     <span style="display:flex;gap:8px">
                         <button id="readonly-toggle" class="mini-btn">🔒 read-only</button>
@@ -339,8 +345,8 @@
             </div>
             <p class="note">⚠️ Experimental &amp; honest about it: built on <code class="inline">@chenglou/pretext</code>
                 (0.0.x). DOM-position APIs (<code class="inline">domAtPos</code>) are N/A by design — we map positions to
-                <i>pixels</i> (<code class="inline">posAtCoords</code>/<code class="inline">coordsAtPos</code>). Read-only
-                ships; decorations are next.</p>
+                <i>pixels</i> (<code class="inline">posAtCoords</code>/<code class="inline">coordsAtPos</code>).
+                Read-only and decorations ship (try the search box above 🔍).</p>
         </div>
     </section>
 
