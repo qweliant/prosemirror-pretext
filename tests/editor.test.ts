@@ -1473,6 +1473,72 @@ describe('floating nodes (text wrap)', () =>
 })
 
 
+describe('view API parity (posAtCoords / endOfTextblock / editable / paste)', () =>
+{
+    function ed(texts: string[], opts: any = {})
+    {
+        const doc = schema.node('doc', null, texts.map((t) =>
+            schema.node('paragraph', null, t ? [schema.text(t)] : [])))
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        return new CanvasEditor({ state: EditorState.create({ doc, schema }), container, ...opts })
+    }
+
+    test('posAtCoords maps viewport coords to a document position', () =>
+    {
+        const e = ed(['hello'])
+        // mock canvas rect is all zeros, so left/top are content coords directly
+        const hit = e.posAtCoords({ left: 0, top: 5 })
+        expect(hit).not.toBeNull()
+        expect(hit!.pos).toBe(1) // start of the paragraph's text
+        expect(hit!.inside).toBe(-1) // not inside an atom
+        e.destroy()
+    })
+
+    test('endOfTextblock reflects the caret position within its block', () =>
+    {
+        const e = ed(['abc'])
+        e.dispatch(e.state.tr.setSelection(TextSelection.atStart(e.state.doc)))
+        expect(e.endOfTextblock('left')).toBe(true)
+        expect(e.endOfTextblock('right')).toBe(false)
+        e.dispatch(e.state.tr.setSelection(TextSelection.atEnd(e.state.doc)))
+        expect(e.endOfTextblock('right')).toBe(true)
+        expect(e.endOfTextblock('left')).toBe(false)
+        e.destroy()
+    })
+
+    test('read-only drops document edits but keeps selection', () =>
+    {
+        const e = ed(['hi'], { editable: false })
+        expect(e.editable).toBe(false)
+        e.dispatch(e.state.tr.insertText('X', 1)) // a doc change → dropped
+        expect(e.state.doc.textContent).toBe('hi')
+        // selection-only transactions still apply
+        e.dispatch(e.state.tr.setSelection(TextSelection.atEnd(e.state.doc)))
+        expect(e.state.selection.head).toBe(3)
+        // re-enabling restores editing
+        e.setEditable(true)
+        e.dispatch(e.state.tr.insertText('X', 1))
+        expect(e.state.doc.textContent).toBe('Xhi')
+        e.destroy()
+    })
+
+    test('pasteHTML / pasteText insert programmatically', () =>
+    {
+        const e = ed([''])
+        e.pasteHTML('<p>bold <strong>bit</strong></p>')
+        expect(e.state.doc.textContent).toContain('bold bit')
+        let hasStrong = false
+        e.state.doc.descendants((n) => { if (n.isText && n.marks.some((m) => m.type.name === 'strong')) hasStrong = true })
+        expect(hasStrong).toBe(true)
+        const e2 = ed([''])
+        e2.pasteText('one\n\ntwo')
+        expect(e2.state.doc.childCount).toBe(2)
+        e.destroy(); e2.destroy()
+    })
+})
+
+
 describe('text alignment', () =>
 {
     function ed(align: string | null, text = 'hello')

@@ -124,6 +124,9 @@ export interface CanvasEditorOptions
      * Default: 'Rich text editor'.
      */
     ariaLabel?: string
+    /** Start in editable (default) or read-only mode. Read-only still allows
+     *  navigation, selection, and copy — it just drops document changes. */
+    editable?: boolean
     /**
      * Maintain a visually-hidden, screen-reader-visible DOM mirror of the
      * document (built from the schema's `toDOM`) so assistive tech can read the
@@ -535,6 +538,8 @@ export class CanvasEditor
     private composing = false
     private abortController: AbortController | null = null
     private dragging = false
+    // Read-only mode drops document-changing transactions (see dispatch).
+    private isEditable = true
 
     // ─── Vertical Navigation ───────────────────────────────────────────
     // Target X pinned across consecutive vertical moves so the caret
@@ -665,6 +670,9 @@ export class CanvasEditor
         this.textarea.setAttribute('aria-label', options.ariaLabel ?? 'Rich text editor')
         this.textarea.setAttribute('aria-multiline', 'true')
         this.textarea.setAttribute('role', 'textbox')
+        this.isEditable = options.editable ?? true
+        this.textarea.readOnly = !this.isEditable
+        this.textarea.setAttribute('aria-readonly', String(!this.isEditable))
 
         // Polite live region: format/structure changes and custom announcements.
         this.liveRegion = document.createElement('div')
@@ -728,6 +736,8 @@ export class CanvasEditor
 
     dispatch(tr: Transaction): void
     {
+        // Read-only: allow selection/navigation transactions, drop edits.
+        if (!this.isEditable && tr.docChanged) return
         this.state = this.state.apply(tr)
         this.lastInputTime = performance.now()
         this.caretVisible = true
@@ -821,6 +831,65 @@ export class CanvasEditor
     focus(): void
     {
         this.textarea.focus()
+    }
+
+    /** Whether the editor's input surface currently holds focus. */
+    hasFocus(): boolean
+    {
+        return typeof document !== 'undefined' && document.activeElement === this.textarea
+    }
+
+    /** Read-only mode: navigation/selection/copy still work; edits are dropped. */
+    get editable(): boolean
+    {
+        return this.isEditable
+    }
+
+    setEditable(value: boolean): void
+    {
+        this.isEditable = value
+        this.textarea.readOnly = !value
+        this.textarea.setAttribute('aria-readonly', String(!value))
+        this.scheduleRender()
+    }
+
+    /**
+     * Map viewport coordinates to a document position (mirrors
+     * `EditorView.posAtCoords`). `inside` is the position of a directly-enclosing
+     * atom block, or -1. Returns null when there's no layout / nothing hit.
+     */
+    posAtCoords(coords: { left: number, top: number }): { pos: number, inside: number } | null
+    {
+        const rect = this.canvas.getBoundingClientRect()
+        const x = coords.left - rect.left
+        const y = coords.top - rect.top + (this.scroller?.scrollTop ?? 0)
+        const hit = this.clickToPos(this.lastLayouts, x, y)
+        if (!hit) return null
+        let inside = -1
+        for (const b of this.lastLayouts)
+        {
+            if (b.isAtom && y >= b.yOffset && y <= b.yOffset + b.height) { inside = b.pmStartPos; break }
+        }
+        return { pos: hit.pos, inside }
+    }
+
+    /**
+     * Whether the caret is at the visual edge of its textblock in `dir` (mirrors
+     * `EditorView.endOfTextblock`) — useful for deciding when an arrow should
+     * leave the block. 'up'/'down' test the first/last line; the rest test the
+     * block's start/end column.
+     */
+    endOfTextblock(dir: 'up' | 'down' | 'left' | 'right' | 'forward' | 'backward'): boolean
+    {
+        const axis = dir === 'up' || dir === 'down' ? 'vert' : 'horiz'
+        const d: 1 | -1 = dir === 'down' || dir === 'right' || dir === 'forward' ? 1 : -1
+        return this.atTextblockEdge(axis, d)
+    }
+
+    /** Programmatically paste plain text (blank lines split paragraphs). */
+    pasteText(text: string): void
+    {
+        this.pastePlainText(text)
     }
 
     /**
@@ -2732,8 +2801,8 @@ export class CanvasEditor
         this.dispatch(tr.scrollIntoView())
     }
 
-    /** Parse an HTML clipboard payload via the schema and replace the selection. */
-    private pasteHTML(html: string): void
+    /** Parse an HTML string via the schema and replace the selection (rich paste). */
+    pasteHTML(html: string): void
     {
         try
         {
