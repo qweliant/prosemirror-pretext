@@ -67,6 +67,7 @@ The container element should be an empty block-level element. The editor creates
 | `ruleColor` | `'#3a3a42'` | Color of a `horizontal_rule` leaf |
 | `ariaLabel` | `'Rich text editor'` | Accessible name (the input's `aria-label`) |
 | `a11yMirror` | `true` | Maintain a screen-reader-visible DOM mirror of the document |
+| `editable` | `true` | Start editable or read-only (read-only keeps navigation/selection/copy, drops edits); toggle with `setEditable()` |
 | `markStyles` | defaults below | Maps mark names → a style `{ fontWeight, fontStyle, fontFamily, color, background, underline, strikethrough }`, or a `(mark) => style` function to read attributes |
 | `blockStyles` | `heading` / `blockquote` / `code_block` defaults | Maps block-type names → text style `{ fontSize, fontWeight, fontStyle, fontFamily, lineHeight, color }` + box decorations `{ paddingLeft/Right/Top/Bottom, background, borderLeft }` (or a `(node) => style` fn) |
 | `keymap` | `{}` | ProseMirror key bindings, checked before built-in keys |

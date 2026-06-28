@@ -4,15 +4,14 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>prosemirror-pretext 🐸 canvas text editor</title>
+    <title>prosemirror-pretext 🐸 a canvas ProseMirror view</title>
     <meta name="description"
-        content="A canvas-rendered ProseMirror view — no contenteditable, no DOM text. Pure-arithmetic layout, float-wrap, and a screen-reader mirror." />
+        content="A ProseMirror view rendered to canvas — no contenteditable, no DOM text. Pure-arithmetic layout, magazine float-wrap, and a screen-reader mirror." />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link rel="stylesheet"
         href="https://fonts.googleapis.com/css2?family=Mochiy+Pop+P+One&family=M+PLUS+Rounded+1c:wght@400;500;700;800&family=Inter:wght@400;500;600;700&display=swap" />
     <style>
-        /* ── Keroppi pond palette ───────────────────────────────────────── */
         :root {
             --frog: #7ec14b;
             --frog-deep: #4f9e2c;
@@ -22,609 +21,179 @@
             --coral: #ff5a5a;
             --pond: #8ad6f2;
             --pond-deep: #46a8d8;
-            --sky: #d8f3ff;
+            --sky: #e7faf0;
             --sun: #ffe066;
-            --grape: #b69bff;
             --ink: #2b4a1e;
             --round: "M PLUS Rounded 1c", system-ui, sans-serif;
             --pop: "Mochiy Pop P One", system-ui, sans-serif;
         }
 
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
-
-        html {
-            scroll-behavior: smooth;
-        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        html { scroll-behavior: smooth; }
 
         body {
             font-family: var(--round);
             color: var(--ink);
-            background:
-                radial-gradient(120% 60% at 50% 0%, var(--sky) 0%, #eafff0 45%, #d6f5e6 100%) fixed;
+            background: linear-gradient(180deg, var(--sky) 0%, #f3fcf6 40%, #eef9f2 100%) fixed;
+            line-height: 1.6;
             overflow-x: hidden;
-            line-height: 1.55;
         }
 
-        /* floating pond bubbles + sparkles in the background */
-        .pond-deco {
-            position: fixed;
-            inset: 0;
-            pointer-events: none;
-            z-index: 0;
-            overflow: hidden;
+        /* a few quiet floating accents (toned down) */
+        .deco { position: fixed; inset: 0; pointer-events: none; z-index: 0; overflow: hidden; opacity: .6; }
+        .deco span {
+            position: absolute; font-size: clamp(16px, 2.4vw, 30px);
+            animation: bob 11s ease-in-out infinite;
         }
+        @keyframes bob { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-16px)} }
+        @media (prefers-reduced-motion: reduce) { .deco span { animation: none } }
 
-        .pond-deco span {
-            position: absolute;
-            font-size: clamp(18px, 3vw, 40px);
-            opacity: 0.85;
-            animation: bob 9s ease-in-out infinite;
-            filter: drop-shadow(0 4px 6px rgba(0, 0, 0, .08));
-        }
+        .wrap { position: relative; z-index: 1; max-width: 1000px; margin: 0 auto; padding: 0 20px; }
 
-        @keyframes bob {
+        /* ── Hero (calm) ─────────────────────────────────────────────────── */
+        header.hero { text-align: center; padding: 70px 20px 34px; position: relative; z-index: 1; }
 
-            0%,
-            100% {
-                transform: translateY(0) rotate(-6deg);
-            }
-
-            50% {
-                transform: translateY(-22px) rotate(8deg);
-            }
-        }
-
-        @media (prefers-reduced-motion: reduce) {
-            .pond-deco span {
-                animation: none;
-            }
-        }
-
-        .wrap {
-            position: relative;
-            z-index: 1;
-            max-width: 1040px;
-            margin: 0 auto;
-            padding: 0 20px;
-        }
-
-        /* ── Hero ───────────────────────────────────────────────────────── */
-        header.hero {
-            text-align: center;
-            padding: 64px 20px 40px;
-            position: relative;
-            z-index: 1;
-        }
-
-        .badge-ribbon {
-            display: inline-flex;
-            gap: 8px;
-            flex-wrap: wrap;
-            justify-content: center;
-            margin-bottom: 22px;
-        }
-
+        .badge-ribbon { display: inline-flex; gap: 8px; flex-wrap: wrap; justify-content: center; margin-bottom: 20px; }
         .chip {
-            font-family: var(--round);
-            font-weight: 700;
-            font-size: 13px;
-            padding: 6px 14px;
-            border-radius: 999px;
-            background: #fff;
-            border: 2.5px solid var(--frog-deep);
-            color: var(--frog-dark);
-            box-shadow: 0 3px 0 var(--frog-deep);
+            font-weight: 700; font-size: 13px; padding: 5px 13px; border-radius: 999px;
+            background: #fff; border: 2px solid var(--frog-deep); color: var(--frog-dark);
         }
-
-        .chip.pink {
-            border-color: var(--cheek);
-            color: #c43a5e;
-            box-shadow: 0 3px 0 var(--cheek);
-        }
-
-        .chip.blue {
-            border-color: var(--pond-deep);
-            color: #1d6f96;
-            box-shadow: 0 3px 0 var(--pond-deep);
-        }
+        .chip.pink { border-color: var(--cheek); color: #c43a5e; }
+        .chip.blue { border-color: var(--pond-deep); color: #1d6f96; }
 
         h1.title {
-            font-family: var(--pop);
-            font-size: clamp(38px, 7vw, 78px);
-            line-height: 1.02;
-            color: var(--frog-deep);
-            text-shadow:
-                0 3px 0 #fff,
-                0 6px 0 var(--frog-dark),
-                0 14px 24px rgba(47, 110, 28, .25);
-            letter-spacing: -1px;
+            font-family: var(--pop); font-size: clamp(34px, 6vw, 60px); line-height: 1.05;
+            color: var(--frog-deep); letter-spacing: -.5px;
         }
+        h1.title .pretext { color: var(--coral); }
 
-        h1.title .pretext {
-            color: var(--coral);
-            text-shadow: 0 3px 0 #fff, 0 6px 0 #b53b3b;
-        }
+        .tagline { font-size: clamp(16px, 2.2vw, 20px); font-weight: 500; color: var(--frog-dark); max-width: 660px; margin: 16px auto 4px; }
+        .kao { font-family: var(--pop); color: var(--pond-deep); font-size: 15px; margin-top: 8px; }
 
-        .tagline {
-            font-size: clamp(16px, 2.4vw, 22px);
-            font-weight: 500;
-            color: var(--frog-dark);
-            max-width: 640px;
-            margin: 18px auto 6px;
-        }
-
-        .kao {
-            font-family: var(--pop);
-            color: var(--pond-deep);
-            font-size: 18px;
-            margin-top: 6px;
-        }
-
-        /* ── CSS frog mascot (original art, not Sanrio's) ───────────────── */
-        .frog {
-            width: 150px;
-            height: 132px;
-            margin: 8px auto 18px;
-            position: relative;
-            animation: hop 3.6s ease-in-out infinite;
-        }
-
-        @keyframes hop {
-
-            0%,
-            100% {
-                transform: translateY(0);
-            }
-
-            50% {
-                transform: translateY(-12px);
-            }
-        }
-
-        @media (prefers-reduced-motion: reduce) {
-            .frog {
-                animation: none;
-            }
-        }
-
-        .frog .head {
-            position: absolute;
-            bottom: 0;
-            left: 11px;
-            width: 128px;
-            height: 100px;
-            background: linear-gradient(180deg, var(--frog) 0%, var(--frog-deep) 100%);
-            border: 4px solid var(--frog-dark);
-            border-radius: 52% 52% 48% 48%;
-        }
-
-        .frog .belly {
-            position: absolute;
-            bottom: 4px;
-            left: 38px;
-            width: 74px;
-            height: 46px;
-            background: var(--belly);
-            border-radius: 50%;
-        }
-
-        .frog .eye {
-            position: absolute;
-            top: 0;
-            width: 50px;
-            height: 50px;
-            background: var(--frog);
-            border: 4px solid var(--frog-dark);
-            border-radius: 50%;
-        }
-
-        .frog .eye.l {
-            left: 22px;
-        }
-
-        .frog .eye.r {
-            right: 22px;
-        }
-
-        .frog .eye::after {
-            content: "";
-            position: absolute;
-            inset: 6px;
-            background: #fff;
-            border-radius: 50%;
-        }
-
-        .frog .eye::before {
-            content: "";
-            position: absolute;
-            width: 13px;
-            height: 13px;
-            background: #1b1b1b;
-            border-radius: 50%;
-            top: 16px;
-            left: 14px;
-            z-index: 2;
-        }
-
-        .frog .cheek {
-            position: absolute;
-            bottom: 30px;
-            width: 18px;
-            height: 11px;
-            background: var(--cheek);
-            border-radius: 50%;
-            opacity: .85;
-        }
-
-        .frog .cheek.l {
-            left: 30px;
-        }
-
-        .frog .cheek.r {
-            right: 30px;
-        }
-
-        .frog .smile {
-            position: absolute;
-            bottom: 34px;
-            left: 50%;
-            transform: translateX(-50%);
-            width: 44px;
-            height: 22px;
-            border: 4px solid var(--frog-dark);
-            border-top: none;
-            border-radius: 0 0 44px 44px;
-        }
-
-        /* ── Buttons ────────────────────────────────────────────────────── */
-        .cta {
-            display: inline-flex;
-            gap: 12px;
-            flex-wrap: wrap;
-            justify-content: center;
-            margin-top: 22px;
-        }
-
+        .cta { display: inline-flex; gap: 10px; flex-wrap: wrap; justify-content: center; margin-top: 22px; }
         .btn {
-            font-family: var(--pop);
-            font-size: 16px;
-            text-decoration: none;
-            padding: 13px 26px;
-            border-radius: 999px;
-            border: 3px solid var(--frog-dark);
-            background: var(--frog);
-            color: #fff;
-            box-shadow: 0 5px 0 var(--frog-dark);
-            transition: transform .08s ease, box-shadow .08s ease;
+            font-family: var(--pop); font-size: 15px; text-decoration: none; padding: 11px 22px; border-radius: 999px;
+            border: 2.5px solid var(--frog-dark); background: var(--frog); color: #fff;
+            box-shadow: 0 4px 0 var(--frog-dark); transition: transform .08s, box-shadow .08s;
         }
-
-        .btn:active {
-            transform: translateY(4px);
-            box-shadow: 0 1px 0 var(--frog-dark);
-        }
-
-        .btn.coral {
-            background: var(--coral);
-            border-color: #b53b3b;
-            box-shadow: 0 5px 0 #b53b3b;
-        }
-
-        .btn.ghost {
-            background: #fff;
-            color: var(--frog-dark);
-        }
+        .btn:active { transform: translateY(3px); box-shadow: 0 1px 0 var(--frog-dark); }
+        .btn.coral { background: var(--coral); border-color: #b53b3b; box-shadow: 0 4px 0 #b53b3b; }
+        .btn.ghost { background: #fff; color: var(--frog-dark); }
 
         code.inline {
-            font-family: "Inter", monospace;
-            background: #fff;
-            border: 2px dashed var(--pond-deep);
-            border-radius: 8px;
-            padding: 2px 8px;
-            color: var(--pond-deep);
-            font-weight: 600;
+            font-family: "Inter", monospace; background: #fff; border: 1.5px dashed var(--pond-deep);
+            border-radius: 7px; padding: 1px 7px; color: var(--pond-deep); font-weight: 600; font-size: .92em;
         }
 
-        /* ── Section scaffolding ────────────────────────────────────────── */
-        section {
-            position: relative;
-            z-index: 1;
-            padding: 30px 0;
-        }
+        section { position: relative; z-index: 1; padding: 28px 0; }
+        h2.sec { font-family: var(--pop); font-size: clamp(22px, 3.6vw, 32px); color: var(--frog-deep); text-align: center; margin-bottom: 4px; }
+        h2.sec .dot { color: var(--cheek); }
+        .sub { text-align: center; color: var(--frog-dark); font-weight: 500; margin-bottom: 20px; }
+        .lilies { text-align: center; font-size: 22px; letter-spacing: 12px; padding: 4px 0; user-select: none; }
 
-        .panel {
-            background: #fffefb;
-            border: 4px solid var(--frog-deep);
-            border-radius: 28px;
-            box-shadow: 0 10px 0 rgba(79, 158, 44, .25), 0 22px 50px rgba(47, 110, 28, .12);
-            padding: 26px;
-        }
-
-        h2.sec {
-            font-family: var(--pop);
-            font-size: clamp(24px, 4vw, 36px);
-            color: var(--frog-deep);
-            text-align: center;
-            margin-bottom: 6px;
-        }
-
-        h2.sec .dot {
-            color: var(--cheek);
-        }
-
-        .sub {
-            text-align: center;
-            color: var(--frog-dark);
-            font-weight: 500;
-            margin-bottom: 22px;
-        }
-
-        /* lily-pad divider */
-        .lilies {
-            text-align: center;
-            font-size: 26px;
-            letter-spacing: 14px;
-            padding: 6px 0 2px;
-            user-select: none;
-        }
-
-        /* ── Embedded editor ────────────────────────────────────────────── */
+        /* ── Embedded editor ─────────────────────────────────────────────── */
         .pond-frame {
-            background:
-                linear-gradient(180deg, var(--pond) 0%, var(--pond-deep) 100%);
-            border: 5px solid var(--frog-dark);
-            border-radius: 30px;
-            padding: 16px;
-            box-shadow: inset 0 4px 18px rgba(0, 0, 0, .15), 0 14px 36px rgba(70, 168, 216, .35);
-            position: relative;
+            background: linear-gradient(180deg, var(--pond) 0%, var(--pond-deep) 100%);
+            border: 4px solid var(--frog-dark); border-radius: 26px; padding: 15px;
+            box-shadow: inset 0 4px 16px rgba(0,0,0,.14), 0 12px 30px rgba(70,168,216,.28); position: relative;
         }
-
         .pond-frame::before {
-            content: "🪷 live demo — type, format, drag the image 🐸";
-            position: absolute;
-            top: -16px;
-            left: 50%;
-            transform: translateX(-50%);
-            white-space: nowrap;
-            font-family: var(--pop);
-            font-size: 13px;
-            background: var(--sun);
-            color: #6b5400;
-            border: 3px solid var(--frog-dark);
-            border-radius: 999px;
-            padding: 4px 16px;
-            box-shadow: 0 3px 0 var(--frog-dark);
+            content: "🪷 live — type, format, drag a photo to float it";
+            position: absolute; top: -15px; left: 50%; transform: translateX(-50%); white-space: nowrap;
+            font-family: var(--pop); font-size: 12px; background: var(--sun); color: #6b5400;
+            border: 2.5px solid var(--frog-dark); border-radius: 999px; padding: 4px 14px;
         }
-
-        .editor-card {
-            background: #ffffff;
-            border-radius: 18px;
-            padding: 16px;
-            overflow: hidden;
-        }
-
-        #embed-toolbar {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 6px;
-            margin-bottom: 14px;
-        }
-
+        .editor-card { background: #fff; border-radius: 16px; padding: 16px; overflow: hidden; }
+        #embed-toolbar { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 12px; }
         #embed-toolbar .tb {
-            font-family: var(--round);
-            font-weight: 700;
-            min-width: 34px;
-            height: 30px;
-            padding: 0 10px;
-            border: 2.5px solid var(--frog-deep);
-            border-radius: 10px;
-            background: #f4fff0;
-            color: var(--frog-dark);
-            cursor: pointer;
+            font-family: var(--round); font-weight: 700; min-width: 32px; height: 29px; padding: 0 9px;
+            border: 2px solid var(--frog-deep); border-radius: 9px; background: #f4fff0; color: var(--frog-dark); cursor: pointer; font-size: 13px;
         }
+        #embed-toolbar .tb:hover { background: #e3ffd6; }
+        #embed-toolbar .tb.active { background: var(--frog); color: #fff; }
+        #embed-toolbar .sep { width: 2px; background: #d7eccb; margin: 2px 3px; }
 
-        #embed-toolbar .tb:hover {
-            background: #e3ffd6;
+        .stats-bar {
+            display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: space-between;
+            margin-top: 12px; padding: 8px 6px 2px; color: #eafff2; font-size: 13px; font-weight: 600;
         }
-
-        #embed-toolbar .tb.active {
-            background: var(--frog);
-            color: #fff;
-            border-color: var(--frog-dark);
+        .stats-bar .mini-btn {
+            font-family: var(--round); font-weight: 700; font-size: 12.5px; cursor: pointer;
+            background: rgba(255,255,255,.92); border: 2px solid var(--frog-dark); color: var(--frog-dark);
+            border-radius: 999px; padding: 4px 12px;
         }
+        .stats-bar .mini-btn.on { background: var(--sun); }
+        #render-stats .reflow { color: #d8ffe0; }
 
-        #embed-toolbar .sep {
-            width: 2px;
-            background: #d7eccb;
-            margin: 2px 4px;
+        .mirror-peek {
+            margin-top: 14px; background: #14361f; color: #cdebd2; border: 3px solid var(--frog-dark);
+            border-radius: 16px; padding: 14px 16px; font-family: "Inter", monospace; font-size: 12px; line-height: 1.55;
+            white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow: auto;
         }
+        .mirror-peek b { color: var(--frog); }
 
-        /* ── Feature cards ──────────────────────────────────────────────── */
-        .grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
-            gap: 18px;
+        /* ── Cards / unique ──────────────────────────────────────────────── */
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+        .card { background: #fffefb; border: 2.5px solid var(--frog-deep); border-radius: 20px; padding: 18px; box-shadow: 0 5px 0 rgba(79,158,44,.18); }
+        .card .ico { font-size: 30px; display: block; margin-bottom: 6px; }
+        .card h3 { font-family: var(--pop); font-size: 16px; color: var(--frog-deep); margin-bottom: 5px; }
+        .card p { font-size: 14px; color: #3c5a30; }
+        .card.b2 { border-color: var(--pond-deep); box-shadow: 0 5px 0 rgba(70,168,216,.22); } .card.b2 h3 { color: var(--pond-deep); }
+        .card.b3 { border-color: var(--cheek); box-shadow: 0 5px 0 rgba(255,122,155,.26); } .card.b3 h3 { color: #c43a5e; }
+
+        .unique { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+        .u {
+            background: #fff; border-radius: 20px; padding: 20px; border-left: 8px solid var(--frog);
+            box-shadow: 0 6px 18px rgba(47,110,28,.1);
         }
+        .u.c2 { border-left-color: var(--pond-deep); } .u.c3 { border-left-color: var(--cheek); } .u.c4 { border-left-color: var(--sun); }
+        .u h3 { font-family: var(--pop); font-size: 17px; color: var(--frog-deep); margin-bottom: 6px; }
+        .u p { font-size: 14px; color: #3c5a30; }
+        .u .vs { font-size: 12.5px; color: #8a8f86; margin-top: 8px; }
 
-        .card {
-            background: #fffefb;
-            border: 3px solid var(--frog-deep);
-            border-radius: 22px;
-            padding: 20px;
-            box-shadow: 0 6px 0 rgba(79, 158, 44, .2);
-        }
-
-        .card .ico {
-            font-size: 34px;
-            display: block;
-            margin-bottom: 8px;
-        }
-
-        .card h3 {
-            font-family: var(--pop);
-            font-size: 18px;
-            color: var(--frog-deep);
-            margin-bottom: 6px;
-        }
-
-        .card p {
-            font-size: 14.5px;
-            color: #3c5a30;
-        }
-
-        .card.b2 {
-            border-color: var(--pond-deep);
-            box-shadow: 0 6px 0 rgba(70, 168, 216, .25);
-        }
-
-        .card.b2 h3 {
-            color: var(--pond-deep);
-        }
-
-        .card.b3 {
-            border-color: var(--cheek);
-            box-shadow: 0 6px 0 rgba(255, 122, 155, .3);
-        }
-
-        .card.b3 h3 {
-            color: #c43a5e;
-        }
-
-        /* ── Code block ─────────────────────────────────────────────────── */
         pre.code {
-            background: #14361f;
-            color: #d8ffd0;
-            border: 4px solid var(--frog-dark);
-            border-radius: 18px;
-            padding: 20px 22px;
-            overflow-x: auto;
-            font-family: "Inter", ui-monospace, monospace;
-            font-size: 13.5px;
-            line-height: 1.7;
-            box-shadow: 0 8px 0 rgba(47, 110, 28, .3);
+            background: #14361f; color: #d8ffd0; border: 3px solid var(--frog-dark); border-radius: 16px;
+            padding: 18px 20px; overflow-x: auto; font-family: "Inter", ui-monospace, monospace; font-size: 13px; line-height: 1.7;
         }
+        pre.code .k { color: #8ed64b; } pre.code .s { color: #ffd479; } pre.code .c { color: #7fae8a; font-style: italic; }
 
-        pre.code .k {
-            color: #8ed64b;
-        }
-
-        pre.code .s {
-            color: #ffd479;
-        }
-
-        pre.code .c {
-            color: #7fae8a;
-            font-style: italic;
-        }
-
-        /* ── Pipeline (lily pads) ───────────────────────────────────────── */
-        .pipe {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 8px;
-            flex-wrap: wrap;
-        }
-
+        .pipe { display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap; }
         .pad {
-            background: var(--frog);
-            color: #fff;
-            border: 3px solid var(--frog-dark);
-            border-radius: 50% 50% 48% 48%;
-            width: 132px;
-            height: 100px;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            text-align: center;
-            font-family: var(--pop);
-            font-size: 14px;
-            box-shadow: 0 6px 0 var(--frog-dark);
+            background: var(--frog); color: #fff; border: 2.5px solid var(--frog-dark); border-radius: 50% 50% 48% 48%;
+            width: 124px; height: 92px; display: flex; flex-direction: column; align-items: center; justify-content: center;
+            text-align: center; font-family: var(--pop); font-size: 13px; box-shadow: 0 5px 0 var(--frog-dark);
         }
+        .pad small { font-family: var(--round); font-weight: 500; font-size: 10.5px; opacity: .9; }
+        .pad.blue { background: var(--pond-deep); border-color: #1d6f96; box-shadow: 0 5px 0 #1d6f96; }
+        .pad.coral { background: var(--coral); border-color: #b53b3b; box-shadow: 0 5px 0 #b53b3b; }
+        .arrow { font-size: 24px; color: var(--frog-deep); }
+        .panel { background: #fffefb; border: 3px solid var(--frog-deep); border-radius: 24px; padding: 22px; box-shadow: 0 8px 0 rgba(79,158,44,.18); }
 
-        .pad small {
-            font-family: var(--round);
-            font-weight: 500;
-            font-size: 11px;
-            opacity: .9;
-        }
-
-        .pad.blue {
-            background: var(--pond-deep);
-            border-color: #1d6f96;
-            box-shadow: 0 6px 0 #1d6f96;
-        }
-
-        .pad.coral {
-            background: var(--coral);
-            border-color: #b53b3b;
-            box-shadow: 0 6px 0 #b53b3b;
-        }
-
-        .arrow {
-            font-size: 28px;
-            color: var(--frog-deep);
-        }
-
-        /* ── Footer ─────────────────────────────────────────────────────── */
-        footer {
-            text-align: center;
-            padding: 40px 20px 60px;
-            color: var(--frog-dark);
-            position: relative;
-            z-index: 1;
-        }
-
-        footer a {
-            color: var(--pond-deep);
-            font-weight: 700;
-        }
-
-        .note {
-            font-size: 12.5px;
-            color: #6b8b5c;
-            max-width: 620px;
-            margin: 14px auto 0;
-        }
+        footer { text-align: center; padding: 36px 20px 56px; color: var(--frog-dark); position: relative; z-index: 1; }
+        footer a { color: var(--pond-deep); font-weight: 700; }
+        .note { font-size: 12.5px; color: #6b8b5c; max-width: 640px; margin: 12px auto 0; }
     </style>
 </head>
 
 <body>
-    <div class="pond-deco" aria-hidden="true">
-        <span style="left:5%;top:14%">🫧</span>
-        <span style="left:90%;top:10%;animation-delay:-2s">✨</span>
-        <span style="left:14%;top:62%;animation-delay:-4s">🍃</span>
-        <span style="left:84%;top:54%;animation-delay:-1s">💚</span>
-        <span style="left:48%;top:8%;animation-delay:-3s">⭐</span>
-        <span style="left:72%;top:80%;animation-delay:-5s">🫧</span>
-        <span style="left:24%;top:24%;animation-delay:-2.5s">☁️</span>
-        <span style="left:62%;top:34%;animation-delay:-1.5s">🌿</span>
+    <div class="deco" aria-hidden="true">
+        <span style="left:6%;top:16%">🫧</span>
+        <span style="left:91%;top:12%;animation-delay:-3s">✨</span>
+        <span style="left:88%;top:60%;animation-delay:-6s">🍃</span>
+        <span style="left:8%;top:66%;animation-delay:-2s">🪷</span>
     </div>
 
     <header class="hero">
-        <div class="frog" aria-hidden="true">
-            <div class="head"></div>
-            <div class="belly"></div>
-            <div class="eye l"></div>
-            <div class="eye r"></div>
-            <div class="cheek l"></div>
-            <div class="cheek r"></div>
-            <div class="smile"></div>
-        </div>
         <div class="badge-ribbon">
             <span class="chip">🐸 canvas-native</span>
             <span class="chip pink">no contenteditable</span>
             <span class="chip blue">a11y mirror</span>
-            <span class="chip">MIT</span>
+            <span class="chip">0 reflows</span>
         </div>
-        <h1 class="title">prose<span class="pretext">mirror</span><br />-pretext</h1>
-        <p class="tagline">A ProseMirror view that renders to <b>&lt;canvas&gt;</b> — no contenteditable, no DOM
-            text nodes. Pure-arithmetic layout, magazine-style float-wrap, and a screen-reader mirror. ✨</p>
-        <p class="kao">( ◕ ‿ ◕ )っ  canvas, all the way down</p>
+        <h1 class="title">prosemirror<span class="pretext">-pretext</span></h1>
+        <p class="tagline">A ProseMirror view rendered to <b>&lt;canvas&gt;</b> — no contenteditable, no DOM text
+            nodes. Pure-arithmetic layout, magazine-style float-wrap, and a real screen-reader mirror. ✨</p>
+        <p class="kao">( ◕ ‿ ◕ )っ canvas, all the way down</p>
         <div class="cta">
             <a class="btn" href="#try">🪷 try it live</a>
             <a class="btn coral" href="https://github.com/qweliant/prosemirror-pretext">★ github</a>
@@ -632,9 +201,9 @@
         </div>
     </header>
 
-    <div class="lilies" aria-hidden="true">🪷 🐸 🪷 🐸 🪷</div>
+    <div class="lilies" aria-hidden="true">🪷 🐸 🪷</div>
 
-    <!-- ── Live editor ─────────────────────────────────────────────────── -->
+    <!-- ── Live editor (shows every feature) ───────────────────────────── -->
     <section id="try">
         <div class="wrap">
             <div class="pond-frame">
@@ -642,70 +211,109 @@
                 <div class="editor-card">
                     <div id="editor-embed"></div>
                 </div>
+                <div class="stats-bar">
+                    <span id="render-stats">measuring…</span>
+                    <span style="display:flex;gap:8px">
+                        <button id="readonly-toggle" class="mini-btn">🔒 read-only</button>
+                        <button id="mirror-toggle" class="mini-btn">🦻 screen-reader view</button>
+                    </span>
+                </div>
             </div>
+            <pre id="mirror-peek" class="mirror-peek" hidden></pre>
+            <p class="sub" style="margin-top:14px">Headings · <b>bold</b>/<i>italic</i>/<code
+                    class="inline">code</code>/links/<u>underline</u>/strike/super·sub/color/highlight · lists (nested,
+                ordered) · blockquote · code block · rule · alignment · images (drag to float, drag corner to resize) ·
+                gap cursor · rich paste · undo/redo</p>
         </div>
     </section>
 
-    <!-- ── Features ────────────────────────────────────────────────────── -->
+    <!-- ── Why it's actually different ──────────────────────────────────── -->
     <section>
         <div class="wrap">
-            <h2 class="sec">why a frog drew this<span class="dot"> .</span></h2>
-            <p class="sub">every glyph is placed by <code class="inline">ctx.fillText()</code> — and the editor
-                still does the things you expect</p>
-            <div class="grid">
-                <div class="card">
-                    <span class="ico">🎨</span>
-                    <h3>Canvas rendering</h3>
-                    <p>Text drawn straight to canvas via Pretext's pure-arithmetic line breaking. No reflow, no DOM
-                        text nodes, no contenteditable quirks.</p>
+            <h2 class="sec">why this one's different<span class="dot"> .</span></h2>
+            <p class="sub">not "another rich-text editor" — a different rendering substrate</p>
+            <div class="unique">
+                <div class="u">
+                    <h3>🚫 No contenteditable</h3>
+                    <p>Zero DOM text nodes. Every glyph is one <code class="inline">ctx.fillText()</code>. None of the
+                        cross-browser contenteditable selection/IME/paste chaos that every other editor fights.</p>
+                    <p class="vs">vs. Slate / TipTap / Lexical — all contenteditable under the hood.</p>
                 </div>
-                <div class="card b2">
-                    <span class="ico">🌊</span>
-                    <h3>Float-wrap</h3>
-                    <p>Drag an image and the paragraphs wrap around it — the same obstacle-carving Pretext's own
-                        demos use, wired to real document nodes.</p>
+                <div class="u c2">
+                    <h3>🌊 Float-wrap, both sides</h3>
+                    <p>Drag a photo anywhere and text reflows around it instantly — wrapping on <i>both</i> sides of an
+                        obstacle, recomputed every drag frame.</p>
+                    <p class="vs">CSS Shapes can't: float-only, one side, no live line geometry.</p>
                 </div>
-                <div class="card b3">
-                    <span class="ico">🦻</span>
-                    <h3>Accessibility mirror</h3>
-                    <p>A hidden, screen-reader-visible DOM mirror of the doc, a labelled textbox, live-region
-                        announcements, and reduced-motion support.</p>
+                <div class="u c3">
+                    <h3>🦻 Canvas you can still read</h3>
+                    <p>Canvas is normally invisible to assistive tech. We keep a hidden, screen-reader-visible DOM mirror
+                        in sync — open <b>“screen-reader view”</b> above to see exactly what it reads.</p>
+                    <p class="vs">Most canvas editors are an accessibility dead end.</p>
                 </div>
-                <div class="card b2">
-                    <span class="ico">📐</span>
-                    <h3>Real ProseMirror</h3>
-                    <p>Genuine PM document model, transactions, schema, marks, history. We just replaced
-                        <code class="inline">prosemirror-view</code>.</p>
-                </div>
-                <div class="card b3">
-                    <span class="ico">📝</span>
-                    <h3>Batteries</h3>
-                    <p>Headings, marks, links, nested lists, blockquote, code blocks, images, gap cursor, alignment,
-                        rich paste, undo/redo.</p>
-                </div>
-                <div class="card">
-                    <span class="ico">⚡</span>
-                    <h3>Fast layout</h3>
-                    <p>A Y-independent layout cache + per-block re-segmentation means typing only re-measures the run
-                        that changed.</p>
+                <div class="u c4">
+                    <h3>⚡ Layout is arithmetic</h3>
+                    <p>Pretext measures once, then line-breaks with pure math — <b>no layout reflow, ever</b>. The
+                        <span class="reflow">“0 reflows”</span> under the editor isn't marketing; it's the architecture.
+                    </p>
+                    <p class="vs">DOM editors trigger a reflow on every measurement.</p>
                 </div>
             </div>
         </div>
     </section>
 
-    <!-- ── Quick start ─────────────────────────────────────────────────── -->
+    <!-- ── Feature grid ─────────────────────────────────────────────────── -->
+    <section>
+        <div class="wrap">
+            <h2 class="sec">everything you'd expect<span class="dot"> 🐣</span></h2>
+            <p class="sub">it's a real ProseMirror document — we just replaced the view layer</p>
+            <div class="grid">
+                <div class="card"><span class="ico">✍️</span>
+                    <h3>Marks &amp; nodes</h3>
+                    <p>Bold, italic, code, links, underline, strike, super/subscript, text color, highlight; headings,
+                        blockquote, code blocks, rules.</p>
+                </div>
+                <div class="card b2"><span class="ico">📋</span>
+                    <h3>Lists &amp; alignment</h3>
+                    <p>Nested bullet/ordered lists with markers + indent, Tab/Shift-Tab nesting, and left/center/right
+                        block alignment.</p>
+                </div>
+                <div class="card b3"><span class="ico">🖼️</span>
+                    <h3>Images</h3>
+                    <p>Block node views; drag the corner to resize, drag the body to float so text wraps around — the
+                        same obstacle model Pretext's demos use.</p>
+                </div>
+                <div class="card b2"><span class="ico">⌨️</span>
+                    <h3>Real editing</h3>
+                    <p>Grapheme-aware caret, gap cursor between blocks, hard breaks, rich HTML paste, undo/redo, and a
+                        familiar <code class="inline">prosemirror-view</code>-shaped API.</p>
+                </div>
+                <div class="card b3"><span class="ico">🔒</span>
+                    <h3>Read-only mode</h3>
+                    <p>Toggle <code class="inline">editable</code> — navigation, selection, and copy keep working while
+                        edits are dropped. (Try the button above.)</p>
+                </div>
+                <div class="card"><span class="ico">🧩</span>
+                    <h3>Bring your schema</h3>
+                    <p>Peer-deps the ProseMirror stack; you define the schema, marks, and node views. Float-wrap and
+                        styling are opt-in per node.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ── Quick start ──────────────────────────────────────────────────── -->
     <section id="start">
         <div class="wrap">
-            <h2 class="sec">quick start<span class="dot"> 🐣</span></h2>
-            <p class="sub">it's a peer of the ProseMirror stack — bring your own schema</p>
-            <pre class="code"><span class="c"># install (peer deps: prosemirror-{model,state,commands,keymap,gapcursor,schema-list})</span>
-<span class="k">bun</span> add prosemirror-pretext
+            <h2 class="sec">quick start<span class="dot"> 🍵</span></h2>
+            <p class="sub">a peer of the ProseMirror stack — bring your own schema</p>
+            <pre class="code"><span class="k">bun</span> add prosemirror-pretext
 
-<span class="c">// then — canvas, all the way down 🐸</span>
+<span class="c">// canvas, all the way down 🐸</span>
 <span class="k">import</span> { CanvasEditor, markSpecs, buildMarkKeymap } <span class="k">from</span> <span class="s">'prosemirror-pretext'</span>
 <span class="k">import</span> { EditorState } <span class="k">from</span> <span class="s">'prosemirror-state'</span>
 
-<span class="k">await</span> document.fonts.ready <span class="c">// fonts must be loaded before layout</span>
+<span class="k">await</span> document.fonts.ready <span class="c">// fonts must load before layout</span>
 
 <span class="k">const</span> editor = <span class="k">new</span> CanvasEditor({
   state: EditorState.create({ doc, schema }),
@@ -715,7 +323,7 @@
         </div>
     </section>
 
-    <!-- ── Pipeline ────────────────────────────────────────────────────── -->
+    <!-- ── Pipeline ─────────────────────────────────────────────────────── -->
     <section>
         <div class="wrap">
             <h2 class="sec">how the lily pads connect<span class="dot"> 🪷</span></h2>
@@ -729,27 +337,19 @@
                 </div>
             </div>
             <p class="note">⚠️ Experimental &amp; honest about it: built on <code class="inline">@chenglou/pretext</code>
-                (0.0.x). DOM-position APIs (<code class="inline">domAtPos</code> etc.) are N/A by design — we map
-                positions to <i>pixels</i>, not DOM. Decorations &amp; read-only mode are on the way.</p>
+                (0.0.x). DOM-position APIs (<code class="inline">domAtPos</code>) are N/A by design — we map positions to
+                <i>pixels</i> (<code class="inline">posAtCoords</code>/<code class="inline">coordsAtPos</code>). Read-only
+                ships; decorations are next.</p>
         </div>
     </section>
 
     <footer>
-        <div class="frog" aria-hidden="true" style="transform:scale(.7)">
-            <div class="head"></div>
-            <div class="belly"></div>
-            <div class="eye l"></div>
-            <div class="eye r"></div>
-            <div class="cheek l"></div>
-            <div class="cheek r"></div>
-            <div class="smile"></div>
-        </div>
-        <p>made with 💚 in a pond ·
+        <p>🐸 made with 💚 in a pond ·
             <a href="https://github.com/qweliant/prosemirror-pretext">github</a> ·
             <a href="https://github.com/chenglou/pretext">pretext</a> ·
             <a href="https://prosemirror.net">prosemirror</a>
         </p>
-        <p class="note">Keroppi-coded, but the frog above is original CSS art — no Sanrio assets are bundled. 🐸💕</p>
+        <p class="note">Keroppi-coded color &amp; vibes only — no Sanrio assets are bundled. 🐸💕</p>
     </footer>
 
     <script type="module" src="/site.ts"></script>
