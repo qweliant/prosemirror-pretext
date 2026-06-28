@@ -19,15 +19,16 @@ const nodes: Record<string, NodeSpec> = {
     doc: { content: '(heading | paragraph | blockquote | code_block | horizontal_rule | bullet_list | ordered_list | image | runButton)+' },
     paragraph: {
         content: 'text*',
-        toDOM: () => ['p', 0],
-        parseDOM: [{ tag: 'p' }],
+        attrs: { align: { default: null } },
+        toDOM: (n) => ['p', n.attrs['align'] ? { style: `text-align:${n.attrs['align']}` } : {}, 0],
+        parseDOM: [{ tag: 'p', getAttrs: (d) => ({ align: (d as HTMLElement).style.textAlign || null }) }],
     },
     heading: {
         content: 'text*',
         group: 'block',
-        attrs: { level: { default: 1 } },
-        toDOM: (n) => [`h${n.attrs['level']}`, 0],
-        parseDOM: [1, 2, 3].map((l) => ({ tag: `h${l}`, attrs: { level: l } })),
+        attrs: { level: { default: 1 }, align: { default: null } },
+        toDOM: (n) => [`h${n.attrs['level']}`, n.attrs['align'] ? { style: `text-align:${n.attrs['align']}` } : {}, 0],
+        parseDOM: [1, 2, 3].map((l) => ({ tag: `h${l}`, getAttrs: (d) => ({ level: l, align: (d as HTMLElement).style.textAlign || null }) })),
     },
     // Simple (non-nesting) blockquote + code block: text-only blocks the flat
     // layout can style as boxes. Real nesting (quote → paragraphs) needs lists.
@@ -73,11 +74,18 @@ const nodes: Record<string, NodeSpec> = {
     image: {
         atom: true,
         group: 'block',
-        attrs: { src: {}, alt: { default: '' } },
-        toDOM: (n) => ['img', { src: n.attrs['src'], alt: n.attrs['alt'] }],
+        attrs: { src: {}, alt: { default: '' }, width: { default: null }, x: { default: null }, y: { default: null } },
+        toDOM: (n) => ['img', {
+            src: n.attrs['src'], alt: n.attrs['alt'],
+            ...(n.attrs['width'] ? { width: n.attrs['width'] } : {}),
+        }],
         parseDOM: [{
             tag: 'img[src]',
-            getAttrs: (d) => ({ src: (d as HTMLElement).getAttribute('src'), alt: (d as HTMLElement).getAttribute('alt') ?? '' }),
+            getAttrs: (d) => ({
+                src: (d as HTMLElement).getAttribute('src'),
+                alt: (d as HTMLElement).getAttribute('alt') ?? '',
+                width: Number((d as HTMLElement).getAttribute('width')) || null,
+            }),
         }],
     },
     // A leaf/atom block: a snippet of code with a Run button (a node view).
@@ -209,6 +217,34 @@ const insertRule: Command = (state, dispatch) =>
     return true
 }
 
+/** Set the `align` attribute on every textblock in the selection. */
+function setAlign(align: string | null): Command
+{
+    return (state, dispatch) =>
+    {
+        const { from, to } = state.selection
+        let tr = state.tr
+        let any = false
+        state.doc.nodesBetween(from, to, (node, pos) =>
+        {
+            if (node.isTextblock && node.type.spec.attrs?.['align'])
+            {
+                tr = tr.setNodeMarkup(pos, undefined, { ...node.attrs, align })
+                any = true
+            }
+        })
+        if (any) dispatch?.(tr)
+        return any
+    }
+}
+
+/** Is every textblock in the selection set to this alignment? */
+function alignActive(state: EditorState, align: string): boolean
+{
+    return (state.selection.$from.parent.attrs['align'] ?? 'left') === align
+        || (align === 'left' && !state.selection.$from.parent.attrs['align'])
+}
+
 /** Prompt for an image URL and insert it at the selection. */
 const insertImage: Command = (state, dispatch) =>
 {
@@ -331,6 +367,9 @@ function buildToolbar(editor: CanvasEditor): () => void
     addBlockButton('{ }', toggleBlock('code_block'), () => blockActive(editor.state, 'code_block'))
     addBlockButton('• List', toggleList('bullet_list'), () => inList(editor.state, 'bullet_list'))
     addBlockButton('1. List', toggleList('ordered_list'), () => inList(editor.state, 'ordered_list'))
+    addBlockButton('⇤', setAlign(null), () => alignActive(editor.state, 'left'))
+    addBlockButton('↔', setAlign('center'), () => alignActive(editor.state, 'center'))
+    addBlockButton('⇥', setAlign('right'), () => alignActive(editor.state, 'right'))
     addBlockButton('🖼', insertImage, () => false)
     addBlockButton('─', insertRule, () => false)
 
@@ -419,15 +458,103 @@ function setupBubble(editor: CanvasEditor): () => void
 
 // ─── Node view: the "run" button block ──────────────────────────────────────
 
-function imageView(node: ProsemirrorNode): HTMLElement
+function imageView(node: ProsemirrorNode, getPos: () => number): HTMLElement
 {
+    const wrap = document.createElement('div')
+    wrap.style.position = 'relative'
+    wrap.style.display = 'inline-block'
+    wrap.style.maxWidth = '100%'
+
     const img = document.createElement('img')
     img.src = node.attrs['src'] as string
     img.alt = (node.attrs['alt'] as string) ?? ''
     img.style.display = 'block'
     img.style.maxWidth = '100%'
     img.style.borderRadius = '6px'
-    return img
+    img.style.cursor = 'grab'
+    if (node.attrs['width']) img.style.width = `${node.attrs['width']}px`
+    wrap.appendChild(img)
+
+    // Drag the image body to float it (text wraps around it). We preview with a
+    // transform during the drag and only commit x/y/width on release — so the
+    // node view isn't torn down and recreated on every move.
+    img.addEventListener('pointerdown', (e) =>
+    {
+        e.preventDefault()
+        img.setPointerCapture(e.pointerId)
+        img.style.cursor = 'grabbing'
+        const ed = (window as any).editor as CanvasEditor
+        const cr = ((ed as any).canvas as HTMLCanvasElement).getBoundingClientRect()
+        const wr0 = wrap.getBoundingClientRect()
+        const x0 = wr0.left - cr.left
+        const y0 = wr0.top - cr.top
+        const startX = e.clientX
+        const startY = e.clientY
+        let dx = 0
+        let dy = 0
+        const move = (ev: PointerEvent) =>
+        {
+            dx = ev.clientX - startX
+            dy = ev.clientY - startY
+            wrap.style.transform = `translate(${dx}px, ${dy}px)`
+        }
+        const up = (ev: PointerEvent) =>
+        {
+            img.releasePointerCapture(ev.pointerId)
+            img.style.cursor = 'grab'
+            wrap.removeEventListener('pointermove', move)
+            wrap.removeEventListener('pointerup', up)
+            wrap.style.transform = ''
+            if (dx === 0 && dy === 0) return // a click, not a drag
+            ed.command((state, dispatch) =>
+            {
+                dispatch?.(state.tr.setNodeMarkup(getPos(), undefined, {
+                    ...node.attrs,
+                    x: Math.max(0, Math.round(x0 + dx)),
+                    y: Math.max(0, Math.round(y0 + dy)),
+                    width: node.attrs['width'] ?? 220,
+                }))
+                return true
+            })
+        }
+        wrap.addEventListener('pointermove', move)
+        wrap.addEventListener('pointerup', up)
+    })
+
+    // Bottom-right drag handle: live-previews the width (text below reflows via
+    // the editor's ResizeObserver) and commits it to the node on release.
+    const handle = document.createElement('div')
+    handle.className = 'img-resize'
+    handle.setAttribute('aria-hidden', 'true')
+    wrap.appendChild(handle)
+    handle.addEventListener('pointerdown', (e) =>
+    {
+        e.preventDefault()
+        e.stopPropagation() // don't select the node
+        const startX = e.clientX
+        const startW = img.offsetWidth
+        handle.setPointerCapture(e.pointerId)
+        const move = (ev: PointerEvent) =>
+        {
+            img.style.width = `${Math.max(40, startW + (ev.clientX - startX))}px`
+        }
+        const up = (ev: PointerEvent) =>
+        {
+            handle.releasePointerCapture(ev.pointerId)
+            wrap.removeEventListener('pointermove', move)
+            wrap.removeEventListener('pointerup', up)
+            const width = img.offsetWidth
+            const ed = (window as any).editor as CanvasEditor
+            ed.command((state, dispatch) =>
+            {
+                dispatch?.(state.tr.setNodeMarkup(getPos(), undefined, { ...node.attrs, width }))
+                return true
+            })
+        }
+        wrap.addEventListener('pointermove', move)
+        wrap.addEventListener('pointerup', up)
+    })
+    return wrap
 }
 
 function runButtonView(node: ProsemirrorNode): HTMLElement
@@ -475,6 +602,7 @@ async function boot(): Promise<void>
     const editor = new CanvasEditor({
         state: EditorState.create({ doc, schema, plugins: [history()] }),
         container,
+        width: CONTENT_WIDTH,
         keymap: {
             ...buildMarkKeymap(schema),
             'Mod-z': undo,
@@ -482,6 +610,10 @@ async function boot(): Promise<void>
             'Shift-Mod-z': redo,
         },
         nodeViews: { runButton: runButtonView, image: imageView },
+        // An image with an x/y becomes a float: text wraps around it.
+        floatRect: (node) => node.type.name === 'image' && node.attrs['x'] != null
+            ? { x: node.attrs['x'], y: node.attrs['y'], width: node.attrs['width'] ?? 220 }
+            : null,
         placeholder: 'Start typing…',
         ariaLabel: 'Demo document — ProseMirror + Pretext canvas editor',
         onRender(stats)
@@ -507,7 +639,7 @@ async function boot(): Promise<void>
 
 // ─── Draggable float ─────────────────────────────────────────────────────────
 
-const CONTENT_WIDTH = 460
+const CONTENT_WIDTH = 560
 
 function setupFloat(editor: CanvasEditor): void
 {

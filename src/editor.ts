@@ -7,6 +7,10 @@ import {
     type Command, type Transaction,
 } from 'prosemirror-state'
 import { GapCursor } from 'prosemirror-gapcursor'
+import {
+    clamp, expandCollapsedWhitespace, hitTestInText,
+    nextGraphemeBoundary, prevGraphemeBoundary,
+} from './text'
 
 // prosemirror-gapcursor exposes these statics at runtime but omits them from
 // its published types; alias them with the real signatures.
@@ -126,6 +130,13 @@ export interface CanvasEditorOptions
      * structure the canvas can't expose. Default: true.
      */
     a11yMirror?: boolean
+    /**
+     * Make a node float: text flows around it (à la Pretext's obstacles) instead
+     * of it taking a block line. Return a content-space rect (height is the node
+     * view's measured height) or null to keep the node in normal flow. The node
+     * still needs a `nodeViews` entry that renders + positions it.
+     */
+    floatRect?: (node: PMNode) => { x: number, y: number, width: number } | null
 }
 
 /** Builds the DOM for a leaf/atom block node. See `nodeViews`. */
@@ -207,9 +218,21 @@ interface ResolvedBlockStyle
     paddingBottom: number
     background: string | null
     borderLeft: { width: number, color: string } | null
+    textAlign: 'left' | 'center' | 'right'
 }
 
 const HEADING_SCALE: Record<number, number> = { 1: 2, 2: 1.5, 3: 1.25, 4: 1.1, 5: 1, 6: 0.9 }
+
+/** Horizontal offset to add to a line's left edge for the block's alignment. */
+function alignOffset(availWidth: number, lineWidth: number, align: 'left' | 'center' | 'right'): number
+{
+    if (align === 'center') return Math.max(0, (availWidth - lineWidth) / 2)
+    if (align === 'right') return Math.max(0, availWidth - lineWidth)
+    return 0
+}
+
+/** Elements that make a node view interactive (so it must stay in the a11y tree). */
+const FOCUSABLE_SEL = 'a[href], button, input, select, textarea, [tabindex], [contenteditable="true"]'
 
 /** Visually hidden, but kept in the accessibility tree (the "sr-only" recipe). */
 const SR_ONLY: Partial<CSSStyleDeclaration> = {
@@ -296,6 +319,9 @@ export interface BlockLayout
     pmEndPos: number
     /** A leaf/atom block rendered by a node view (no text lines). */
     isAtom?: boolean
+    /** Set when the block is a floating node: its content-space rect (text wraps
+     *  around it; the node view is positioned here rather than full-width). */
+    floatRect?: { x: number, y: number, width: number, height: number }
     /** Resolved block base style (per-block headings etc.; editor base by default). */
     lineHeight: number
     font: string
@@ -440,6 +466,11 @@ export class CanvasEditor
     // Exclusion rects the text flows around. Empty by default — the cached,
     // fixed-width layout path is used whenever there are no floats.
     private floats: FloatRect[]
+    // The full exclusion set used for a given layout pass: consumer `floats`
+    // plus rects derived from floating nodes (see floatRect). Read by slotForBand.
+    private activeFloats: FloatRect[] = []
+    // Derives a float rect for a node (text wraps around it), or null for in-flow.
+    private readonly floatRectFor: ((node: PMNode) => { x: number, y: number, width: number } | null) | null
     // Breathing room kept around each float so text never kisses its edge.
     private readonly floatGutter: number
 
@@ -595,6 +626,7 @@ export class CanvasEditor
             compiled(this.commandView() as never, event)
 
         this.floats = options.floats ?? []
+        this.floatRectFor = options.floatRect ?? null
         this.floatGutter = options.floatGutter ?? 12
         this.linkMark = options.linkMark ?? 'link'
         this.onFollowLink = options.onFollowLink
@@ -872,37 +904,6 @@ export class CanvasEditor
         return w
     }
 
-    /**
-     * Map a fragment's collapsed text back onto its source run, preserving the
-     * original (uncollapsed) whitespace. Non-space characters align exactly;
-     * each collapsed space stands for a run of whitespace in the source. Any
-     * whitespace trimmed at a line start is skipped first. Returns the real
-     * slice and the new source index.
-     */
-    private expandCollapsedWhitespace(
-        source: string, start: number, collapsed: string,
-    ): [string, number]
-    {
-        const ws = /\s/
-        let si = start
-        // Leading whitespace dropped at a line/wrap start.
-        if (collapsed.length > 0 && collapsed[0] !== ' ')
-        {
-            while (si < source.length && ws.test(source[si])) si++
-        }
-        for (let ci = 0; ci < collapsed.length; ci++)
-        {
-            if (collapsed[ci] === ' ')
-            {
-                while (si < source.length && ws.test(source[si])) si++
-            }
-            else if (si < source.length)
-            {
-                si++
-            }
-        }
-        return [source.slice(start, si), si]
-    }
 
     /** Lay out one block, choosing the single-font fast path or the marked path. */
     private layoutBlock(node: PMNode, indent = 0): CachedBlock
@@ -930,14 +931,18 @@ export class CanvasEditor
         // space as a real character (default 'normal' collapses runs of
         // whitespace), so line text stays in lockstep with PM offsets and the
         // caret doesn't drift when you type consecutive spaces.
+        const availW = this.blockContentWidth(base)
         const prepared = prepareWithSegments(text, base.font, { whiteSpace: 'pre-wrap' })
         const { lines, height } = layoutWithLines(
-            prepared, this.blockContentWidth(base), base.lineHeight,
+            prepared, availW, base.lineHeight,
         )
         let acc = 0
         const cachedLines: CachedLine[] = lines.map((l) =>
         {
-            const cl = { text: l.text, width: l.width, pmStart: acc, x: base.paddingLeft }
+            const cl = {
+                text: l.text, width: l.width, pmStart: acc,
+                x: base.paddingLeft + alignOffset(availW, l.width, base.textAlign),
+            }
             acc += l.text.length
             // 'pre-wrap' breaks on a hard newline but drops it from the line
             // text; skip it so the next line's offset stays aligned with source.
@@ -1020,6 +1025,11 @@ export class CanvasEditor
      * the editor's base; `blockStyles` overrides per node type (e.g. headings). */
     private resolveBlockStyle(node: PMNode): ResolvedBlockStyle
     {
+        // Per-instance text alignment from the node's `align` attribute.
+        const a = node.attrs['align']
+        const textAlign: 'left' | 'center' | 'right' =
+            a === 'center' || a === 'right' ? a : 'left'
+
         const entry = this.blockStyles[node.type.name]
         const bs = typeof entry === 'function' ? entry(node) : entry
         if (!bs)
@@ -1029,7 +1039,7 @@ export class CanvasEditor
                 fontFamily: this.baseFontFamily, fontWeight: '', fontStyle: '',
                 lineHeight: this.lineHeight, color: null,
                 paddingLeft: 0, paddingRight: 0, paddingTop: 0, paddingBottom: 0,
-                background: null, borderLeft: null,
+                background: null, borderLeft: null, textAlign,
             }
         }
         const fontSize = bs.fontSize ?? this.baseFontSize
@@ -1043,7 +1053,7 @@ export class CanvasEditor
             lineHeight: bs.lineHeight ?? this.lineHeight, color: bs.color ?? null,
             paddingLeft: bs.paddingLeft ?? 0, paddingRight: bs.paddingRight ?? 0,
             paddingTop: bs.paddingTop ?? 0, paddingBottom: bs.paddingBottom ?? 0,
-            background: bs.background ?? null, borderLeft: bs.borderLeft ?? null,
+            background: bs.background ?? null, borderLeft: bs.borderLeft ?? null, textAlign,
         }
     }
 
@@ -1184,7 +1194,7 @@ export class CanvasEditor
             walkRichInlineLineRanges(prepared, width, (range) =>
             {
                 const line = this.buildMarkedLine(prepared, range, ctx, lines.length === 0)
-                if (base.paddingLeft) line.x = base.paddingLeft
+                line.x = base.paddingLeft + alignOffset(width, line.width, base.textAlign)
                 lines.push(line)
             })
             if (segLineStart > 0 && lines.length > segLineStart)
@@ -1249,7 +1259,7 @@ export class CanvasEditor
             const start = ctx.consumed[f.itemIndex]
             // Pretext collapses runs of whitespace inside a fragment; re-expand
             // against the source so every space stays a real editable character.
-            const [text, end] = this.expandCollapsedWhitespace(m.trimmed, start, f.text)
+            const [text, end] = expandCollapsedWhitespace(m.trimmed, start, f.text)
             ctx.consumed[f.itemIndex] = end
             const pmStart = m.pmStart + m.leadTrim + start
 
@@ -1303,7 +1313,7 @@ export class CanvasEditor
         const bandBottom = bandTop + lineHeight
         const g = this.floatGutter
         let slots: { left: number, right: number }[] = [{ left: 0, right: this.containerWidth }]
-        for (const f of this.floats)
+        for (const f of this.activeFloats)
         {
             // Inflate the rect by the gutter so text clears it on every side.
             if (bandBottom <= f.y - g || bandTop >= f.y + f.height + g) continue
@@ -1340,13 +1350,13 @@ export class CanvasEditor
         {
             const slot = this.slotForBand(topY + bandTop, lh)
             if (!slot) { bandTop += lh; continue }
-            const x = slot.x + base.paddingLeft
             const w = slot.width - base.paddingLeft - base.paddingRight
             const line = layoutNextLine(prepared, cursor, w)
             if (!line) break
             lines.push({
                 text: line.text, width: line.width, pmStart: acc,
-                x, yOffset: bandTop,
+                x: slot.x + base.paddingLeft + alignOffset(w, line.width, base.textAlign),
+                yOffset: bandTop,
             })
             acc += line.text.length
             // Skip the hard newline 'pre-wrap' dropped at the break (see layoutBlock).
@@ -1394,7 +1404,7 @@ export class CanvasEditor
                 const range = layoutNextRichInlineLineRange(prepared, w, cursor)
                 if (!range) break
                 const line = this.buildMarkedLine(prepared, range, ctx, lines.length === 0)
-                line.x = slot.x + base.paddingLeft
+                line.x = slot.x + base.paddingLeft + alignOffset(w, line.width, base.textAlign)
                 line.yOffset = bandTop
                 lines.push(line)
                 cursor = range.end
@@ -1420,16 +1430,50 @@ export class CanvasEditor
         const result: BlockLayout[] = []
         let cursorY = 0
 
-        const floating = this.floats.length > 0
-
         const descs: BlockDesc[] = []
         this.collectBlocks(this.state.doc, 0, 0, null, descs)
+
+        // Pre-pass: derive float rects from floating nodes so text on every band
+        // (not just below them) flows around them. Their measured node-view height
+        // completes the rect; out of flow, they don't advance the block cursor.
+        const floatRects = new Map<PMNode, { x: number, y: number, width: number, height: number }>()
+        if (this.floatRectFor)
+        {
+            for (const d of descs)
+            {
+                if (!d.leaf || this.isRuleNode(d.node)) continue
+                const r = this.floatRectFor(d.node)
+                if (!r) continue
+                floatRects.set(d.node, {
+                    x: r.x, y: r.y, width: r.width,
+                    height: this.nodeViewHeights.get(d.node) ?? this.defaultAtomHeight,
+                })
+            }
+        }
+        this.activeFloats = floatRects.size > 0
+            ? [...this.floats, ...floatRects.values()]
+            : this.floats
+        const floating = this.activeFloats.length > 0
 
         for (const { node, pos, indent, marker, leaf } of descs)
         {
             // Leaf/atom block (node view or canvas-drawn rule): reserve height.
             if (leaf)
             {
+                const fr = floatRects.get(node)
+                if (fr)
+                {
+                    // Floating node: positioned at its rect, out of the flow.
+                    result.push({
+                        type: node.type.name, node, text: '', yOffset: fr.y, height: fr.height,
+                        lines: [], pmStartPos: pos, pmEndPos: pos + node.nodeSize,
+                        isAtom: true, lineHeight: this.lineHeight, font: this.font,
+                        fontSize: this.baseFontSize, color: null,
+                        paddingTop: 0, paddingBottom: 0, background: null, borderLeft: null,
+                        marker, floatRect: fr,
+                    })
+                    continue
+                }
                 const height = this.isRuleNode(node)
                     ? this.lineHeight
                     : (this.nodeViewHeights.get(node) ?? this.defaultAtomHeight)
@@ -2068,7 +2112,7 @@ export class CanvasEditor
             if (frags.length === 0) return line.pmStart
             if (targetX <= frags[0].x)
             {
-                return frags[0].pmStart + this.hitTestInText(frags[0].text, frags[0].font, targetX - frags[0].x)
+                return frags[0].pmStart + hitTestInText(this.measureCtx, this.segmenter, frags[0].text, frags[0].font, targetX - frags[0].x)
             }
             for (let i = 0; i < frags.length; i++)
             {
@@ -2086,14 +2130,14 @@ export class CanvasEditor
                             ? prev.pmStart + prev.text.length
                             : f.pmStart
                     }
-                    return f.pmStart + this.hitTestInText(f.text, f.font, targetX - f.x)
+                    return f.pmStart + hitTestInText(this.measureCtx, this.segmenter, f.text, f.font, targetX - f.x)
                 }
             }
             const last = frags[frags.length - 1]
             return last.pmStart + last.text.length
         }
 
-        return line.pmStart + this.hitTestInText(line.text, block.font, targetX)
+        return line.pmStart + hitTestInText(this.measureCtx, this.segmenter, line.text, block.font, targetX)
     }
 
     /**
@@ -2101,32 +2145,6 @@ export class CanvasEditor
      * boundary nearest `targetX`, returning a UTF-16 offset into `text`. Never
      * splits a surrogate pair, ZWJ sequence, or combining mark.
      */
-    private hitTestInText(text: string, font: string, targetX: number): number
-    {
-        this.measureCtx.font = font
-        const bounds = this.graphemeBoundaries(text)
-        let lo = 0
-        let hi = bounds.length - 1
-        while (lo < hi)
-        {
-            const mid = (lo + hi + 1) >> 1
-            const w = this.measureCtx.measureText(text.substring(0, bounds[mid])).width
-            if (w <= targetX) lo = mid
-            else hi = mid - 1
-        }
-
-        let offset = bounds[lo]
-        if (lo < bounds.length - 1)
-        {
-            const wLo = bounds[lo] === 0
-                ? 0
-                : this.measureCtx.measureText(text.substring(0, bounds[lo])).width
-            const wHi = this.measureCtx.measureText(text.substring(0, bounds[lo + 1])).width
-            if ((targetX - wLo) > (wHi - targetX)) offset = bounds[lo + 1]
-        }
-        return offset
-    }
-
     /**
      * The href of a link mark covering the document position, or null. Checks
      * the characters on both sides so a click anywhere on the link resolves.
@@ -2227,9 +2245,11 @@ export class CanvasEditor
                 this.mountedViews.set(block.node, view)
             }
             view.pos = block.pmStartPos
-            view.container.style.left = '0px'
-            view.container.style.top = `${block.yOffset}px`
-            view.container.style.width = `${this.containerWidth}px`
+            // Floating nodes sit at their rect; in-flow ones span the content.
+            const fr = block.floatRect
+            view.container.style.left = `${fr ? fr.x : 0}px`
+            view.container.style.top = `${fr ? fr.y : block.yOffset}px`
+            view.container.style.width = `${fr ? fr.width : this.containerWidth}px`
 
             // Reserve the element's real height; re-layout once when it changes.
             const measured = view.container.offsetHeight
@@ -2259,6 +2279,13 @@ export class CanvasEditor
         view.dom = this.nodeViews[node.type.name](node, () => view.pos)
         container.appendChild(view.dom)
         this.stack.appendChild(container)
+
+        // Avoid the screen reader reading this atom twice: the structural mirror
+        // already represents it in document order. A non-interactive view (e.g.
+        // an image) is hidden here so only the mirror is read; an interactive one
+        // (buttons/links) stays exposed because the mirror can't operate it.
+        const interactive = view.dom.matches?.(FOCUSABLE_SEL) || !!view.dom.querySelector?.(FOCUSABLE_SEL)
+        if (this.a11yMirror && !interactive) container.setAttribute('aria-hidden', 'true')
 
         // Click on the block's chrome (not an interactive child that stops
         // propagation) selects the node.
@@ -2591,7 +2618,7 @@ export class CanvasEditor
         if ($from.parent.isTextblock)
         {
             const text = $from.parent.textContent
-            const prev = this.prevGraphemeBoundary(text, $from.parentOffset)
+            const prev = prevGraphemeBoundary(this.segmenter, text, $from.parentOffset)
             const delta = $from.parentOffset - prev
             if (delta > 0)
             {
@@ -2618,7 +2645,7 @@ export class CanvasEditor
         if ($to.parent.isTextblock)
         {
             const text = $to.parent.textContent
-            const next = this.nextGraphemeBoundary(text, $to.parentOffset)
+            const next = nextGraphemeBoundary(this.segmenter, text, $to.parentOffset)
             const delta = next - $to.parentOffset
             if (delta > 0)
             {
@@ -2791,41 +2818,6 @@ export class CanvasEditor
         return null
     }
 
-    // ─── Grapheme helpers ──────────────────────────────────────────────
-
-    private nextGraphemeBoundary(text: string, pos: number): number
-    {
-        if (pos >= text.length) return text.length
-        for (const { index } of this.segmenter.segment(text))
-        {
-            if (index > pos) return index
-        }
-        return text.length
-    }
-
-    private prevGraphemeBoundary(text: string, pos: number): number
-    {
-        if (pos <= 0) return 0
-        let prev = 0
-        for (const { index } of this.segmenter.segment(text))
-        {
-            if (index >= pos) return prev
-            prev = index
-        }
-        return prev
-    }
-
-    private graphemeBoundaries(text: string): number[]
-    {
-        const boundaries: number[] = []
-        for (const { index } of this.segmenter.segment(text))
-        {
-            boundaries.push(index)
-        }
-        boundaries.push(text.length)
-        return boundaries
-    }
-
     /**
      * Step `direction` graphemes from `pos` within the current textblock.
      * Falls through to a single-position step when at a block edge so
@@ -2839,11 +2831,11 @@ export class CanvasEditor
         const offset = $pos.parentOffset
         if (direction > 0)
         {
-            const next = this.nextGraphemeBoundary(text, offset)
+            const next = nextGraphemeBoundary(this.segmenter, text, offset)
             if (next > offset) return pos + (next - offset)
             return pos + 1
         }
-        const prev = this.prevGraphemeBoundary(text, offset)
+        const prev = prevGraphemeBoundary(this.segmenter, text, offset)
         if (prev < offset) return pos - (offset - prev)
         return pos - 1
     }
@@ -3166,12 +3158,4 @@ export class CanvasEditor
             this.scheduleRender()
         }, this.caretBlinkMs)
     }
-}
-
-
-// ─── Helpers ───────────────────────────────────────────────────────────────
-
-function clamp(n: number, min: number, max: number): number
-{
-    return Math.max(min, Math.min(max, n))
 }

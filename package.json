@@ -24,7 +24,9 @@
   },
   "scripts": {
     "dev": "vite",
+    "dev:site": "vite --config vite.site.config.ts",
     "build": "vite build && tsc -p tsconfig.build.json",
+    "build:site": "vite build --config vite.site.config.ts",
     "build:types": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "bun test",

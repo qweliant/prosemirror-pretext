@@ -71,6 +71,7 @@ The container element should be an empty block-level element. The editor creates
 | `blockStyles` | `heading` / `blockquote` / `code_block` defaults | Maps block-type names → text style `{ fontSize, fontWeight, fontStyle, fontFamily, lineHeight, color }` + box decorations `{ paddingLeft/Right/Top/Bottom, background, borderLeft }` (or a `(node) => style` fn) |
 | `keymap` | `{}` | ProseMirror key bindings, checked before built-in keys |
 | `floats` | `[]` | Rects (`{ x, y, width, height }`) the text flows around |
+| `floatRect` | `undefined` | `(node) => { x, y, width } \| null` — float a doc node so text wraps around it (height comes from its node view); null keeps it in flow |
 | `floatGutter` | `12` | Gap in px kept between text and each float |
 | `linkMark` | `'link'` | Schema mark name treated as a followable link |
 | `onFollowLink` | opens in new tab | `(href, event)` run on Cmd/Ctrl-click of a link |
@@ -223,8 +224,22 @@ Same primitives power inline link editors, hovercards, and autocomplete popups.
 
 ```bash
 bun install
-bun run dev
+bun run dev          # the standalone playground (index.html + demo/)
+bun run dev:site     # the kawaii docs site with an embedded live editor (site/)
 ```
+
+## Docs site (GitHub Pages)
+
+The 🐸 landing page in `site/` builds to `docs/` as a self-contained static app
+(the editor + deps bundled in), ready for GitHub Pages:
+
+```bash
+bun run build:site   # → docs/ (committed; served by Pages)
+```
+
+Enable it once under **Settings → Pages → Deploy from a branch → `main` / `/docs`**.
+It serves at `https://<user>.github.io/prosemirror-pretext/` (the base path is set
+in `vite.site.config.ts`).
 
 ## Rendering roadmap
 
@@ -251,13 +266,13 @@ editor needs to implement.
 - [x] **Code block** — monospace + background panel + padding via `blockStyles` (built-in `code_block`); `pre-wrap` preserves whitespace
 - [x] **Horizontal rule** — canvas-drawn leaf block (`horizontal_rule` / `hr`), selectable like an atom (`ruleColor`)
 - [x] **Lists** (bullet / ordered) — recursive tree walk → per-level indent + bullet/number markers in the gutter; Enter splits an item, Tab/Shift-Tab nest/lift (via `prosemirror-schema-list`)
-- [ ] **Text alignment** — `left | right | center | justify` block attribute (distribute space; last line ragged)
+- [x] **Text alignment** — `left | center | right` via a block's `align` attribute (caret/click/selection all follow the shift). `justify` not yet (needs inter-word distribution)
 - [ ] **Tables** — grid layout with per-cell text flow
 
 ### Media & embeds
 
 - [x] **Atom block node views** — interactive DOM (buttons, embeds) positioned over reserved space (`nodeViews`)
-- [x] **Images** — a block atom rendered by a node view (a real `<img>`), selectable/deletable like any atom (resize handles + float-wrap still TODO)
+- [x] **Images** — a block atom rendered by a node view (a real `<img>`); drag-to-resize (corner handle), and drag-to-float so text wraps around it (`floatRect`, reusing the float engine — the same obstacle-wrap Pretext's own demos use)
 - [ ] **Inline atoms** — mentions/chips, emoji images, hard breaks, inline math (these are *inline*, not block)
 
 ### Selection & affordances

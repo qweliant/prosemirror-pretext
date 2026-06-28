@@ -6,11 +6,13 @@ import { history, undo, redo } from 'prosemirror-history'
 import { CanvasEditor, type RenderStats } from '../src/editor'
 import { GapCursor } from 'prosemirror-gapcursor'
 import { markSpecs, buildMarkKeymap } from '../src/marks'
+import { expandCollapsedWhitespace } from '../src/text'
 
 const nodes: Record<string, NodeSpec> = {
     doc: { content: '(paragraph | widget | heading | blockquote | code_block | horizontal_rule | bullet_list | ordered_list)+' },
     paragraph: {
         content: 'text*',
+        attrs: { align: { default: null } },
         toDOM: () => ['p', 0],
         parseDOM: [{ tag: 'p' }],
     },
@@ -777,16 +779,14 @@ describe('marked text coordinates', () =>
 
     test('expandCollapsedWhitespace re-expands runs of spaces from the source', () =>
     {
-        const { ed } = makeEditor(['x'])
         const ex = (s: string, start: number, c: string) =>
-            (ed as any).expandCollapsedWhitespace(s, start, c)
+            expandCollapsedWhitespace(s, start, c)
         // Pretext collapsed "hello   world" → "hello world"; restore all spaces.
         expect(ex('hello   world', 0, 'hello world')).toEqual(['hello   world', 13])
         // Already single-spaced: unchanged.
         expect(ex('a b c', 0, 'a b c')).toEqual(['a b c', 5])
         // Continuing a run across a wrap (start offset into source).
         expect(ex('foo   bar baz', 0, 'foo bar')).toEqual(['foo   bar', 9])
-        ed.destroy()
     })
 
     test('caret advances through a trailing space collapsed out of a marked run', () =>
@@ -1130,6 +1130,34 @@ describe('accessibility', () =>
         expect((e as any).liveRegion.textContent).toBe('Ran: 42')
         e.destroy()
     })
+
+    test('a non-interactive node view is hidden from AT (mirror represents it)', () =>
+    {
+        const doc = schema.node('doc', null, [
+            schema.node('paragraph', null, [schema.text('x')]),
+            schema.node('widget'),
+        ])
+        const e = mk(doc) // widget node view is a plain <div>
+        const views = [...(e as any).mountedViews.values()] as any[]
+        expect(views.length).toBe(1)
+        expect(views[0].container.getAttribute('aria-hidden')).toBe('true')
+        e.destroy()
+    })
+
+    test('an interactive node view stays exposed to AT', () =>
+    {
+        const doc = schema.node('doc', null, [schema.node('widget')])
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        const e = new CanvasEditor({
+            state: EditorState.create({ doc, schema }),
+            container,
+            nodeViews: { widget: () => { const d = document.createElement('div'); d.appendChild(document.createElement('button')); return d } },
+        })
+        const views = [...(e as any).mountedViews.values()] as any[]
+        expect(views[0].container.getAttribute('aria-hidden')).toBeNull()
+        e.destroy()
+    })
 })
 
 
@@ -1396,6 +1424,97 @@ describe('hard breaks in marked text + code-block exit', () =>
         expect(ed.state.doc.childCount).toBe(2)
         expect(ed.state.doc.child(1).type.name).toBe('paragraph')
         ed.destroy()
+    })
+})
+
+
+describe('floating nodes (text wrap)', () =>
+{
+    function mk(doc: any, floatRect: any)
+    {
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        return new CanvasEditor({
+            state: EditorState.create({ doc, schema }),
+            container,
+            nodeViews: { widget: () => document.createElement('div') },
+            floatRect,
+        })
+    }
+
+    test('a floatRect node leaves the flow; following blocks do not shift down', () =>
+    {
+        const doc = schema.node('doc', null, [
+            schema.node('widget'),
+            schema.node('paragraph', null, [schema.text('hello world')]),
+        ])
+        const e = mk(doc, (n: any) => n.type.name === 'widget' ? { x: 0, y: 0, width: 100 } : null)
+        const ls = (e as any).lastLayouts as any[]
+        const w = ls.find((b) => b.type === 'widget')
+        const para = ls.find((b) => b.type === 'paragraph')
+        expect(w.floatRect).toMatchObject({ x: 0, y: 0, width: 100 })
+        expect(para.yOffset).toBe(0) // the float is out of flow, so text starts at top
+        expect((e as any).activeFloats.length).toBe(1)
+        e.destroy()
+    })
+
+    test('without a floatRect the same node stays in flow (pushes text down)', () =>
+    {
+        const doc = schema.node('doc', null, [
+            schema.node('widget'),
+            schema.node('paragraph', null, [schema.text('hello')]),
+        ])
+        const e = mk(doc, () => null)
+        const ls = (e as any).lastLayouts as any[]
+        expect(ls.find((b) => b.type === 'paragraph').yOffset).toBeGreaterThan(0)
+        expect((e as any).activeFloats.length).toBe(0)
+        e.destroy()
+    })
+})
+
+
+describe('text alignment', () =>
+{
+    function ed(align: string | null, text = 'hello')
+    {
+        const doc = schema.node('doc', null, [
+            schema.node('paragraph', { align }, [schema.text(text)]),
+        ])
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        return new CanvasEditor({ state: EditorState.create({ doc, schema }), container })
+    }
+
+    test('left (default) keeps lines at the left edge', () =>
+    {
+        const e = ed(null)
+        expect((e as any).lastLayouts[0].lines[0].x).toBe(0)
+        e.destroy()
+    })
+
+    test('center offsets the line by half the slack', () =>
+    {
+        // mock: width 460, "hello" = 5*8 = 40 → (460-40)/2 = 210
+        const e = ed('center')
+        expect((e as any).lastLayouts[0].lines[0].x).toBe(210)
+        e.destroy()
+    })
+
+    test('right pushes the line to the right edge', () =>
+    {
+        const e = ed('right') // 460 - 40 = 420
+        expect((e as any).lastLayouts[0].lines[0].x).toBe(420)
+        e.destroy()
+    })
+
+    test('clicking aligned text maps to the right offset (caret follows the shift)', () =>
+    {
+        const e = ed('right')
+        const line = (e as any).lastLayouts[0].lines[0]
+        // click near the right-shifted line start → lands at block start, not 0
+        const hit = (e as any).clickToPos((e as any).lastLayouts, line.x + 1, line.y + 5)
+        expect(hit.pos).toBe(1) // start of the paragraph's text
+        e.destroy()
     })
 })
 
