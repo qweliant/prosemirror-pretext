@@ -231,15 +231,13 @@ bun run dev:site     # the kawaii docs site with an embedded live editor (site/)
 ## Docs site (GitHub Pages)
 
 The 🐸 landing page in `site/` builds to `docs/` as a self-contained static app
-(the editor + deps bundled in), ready for GitHub Pages:
+(the editor + deps bundled in). A GitHub Actions workflow
+(`.github/workflows/pages.yml`) builds and deploys it on every push to `main`, so
+you just push — no committed build artifacts (`docs/` is gitignored).
 
-```bash
-bun run build:site   # → docs/ (committed; served by Pages)
-```
-
-Enable it once under **Settings → Pages → Deploy from a branch → `main` / `/docs`**.
-It serves at `https://<user>.github.io/prosemirror-pretext/` (the base path is set
-in `vite.site.config.ts`).
+One-time setup: **Settings → Pages → Source → GitHub Actions**. It then serves at
+`https://<user>.github.io/prosemirror-pretext/` (base path set in
+`vite.site.config.ts`). To preview locally: `bun run dev:site`.
 
 ## Rendering roadmap
 
