@@ -130,6 +130,9 @@ export interface CanvasEditorOptions
     /** Start in editable (default) or read-only mode. Read-only still allows
      *  navigation, selection, and copy — it just drops document changes. */
     editable?: boolean
+    /** Focus the editor on construction. Default true; set false for embeds so
+     *  mounting one doesn't steal focus or scroll the page to it. */
+    autofocus?: boolean
     /**
      * Transient, non-document styling layered over the text: search highlights,
      * spellcheck squiggles, collab cursors, inline widgets, per-node backgrounds.
@@ -574,6 +577,7 @@ export class CanvasEditor
     private dragging = false
     // Read-only mode drops document-changing transactions (see dispatch).
     private isEditable = true
+    private readonly autofocus: boolean = true
 
     // ─── Vertical Navigation ───────────────────────────────────────────
     // Target X pinned across consecutive vertical moves so the caret
@@ -707,6 +711,7 @@ export class CanvasEditor
         this.textarea.setAttribute('aria-multiline', 'true')
         this.textarea.setAttribute('role', 'textbox')
         this.isEditable = options.editable ?? true
+        this.autofocus = options.autofocus ?? true
         this.textarea.readOnly = !this.isEditable
         this.textarea.setAttribute('aria-readonly', String(!this.isEditable))
 
@@ -997,7 +1002,7 @@ export class CanvasEditor
     /** measureText for a whole string, memoized by font+text (see widthCache). */
     private measureWidth(text: string, font: string): number
     {
-        const key = `${font} ${text}`
+        const key = `${font}${text}`
         let w = this.widthCache.get(key)
         if (w === undefined)
         {
@@ -2835,7 +2840,8 @@ export class CanvasEditor
             this.scheduleRender()
         }, { signal })
 
-        this.textarea.focus()
+        // preventScroll so mounting an editor mid-page doesn't jump the viewport.
+        if (this.autofocus) this.textarea.focus({ preventScroll: true })
     }
 
     /** The schema's list-item node type, if it defines one. */

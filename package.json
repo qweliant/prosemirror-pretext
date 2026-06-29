@@ -1,6 +1,6 @@
 {
   "name": "prosemirror-pretext",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Canvas-based text editor powered by ProseMirror and Pretext",
   "type": "module",
   "packageManager": "bun@1.1.28",
@@ -13,7 +13,8 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",

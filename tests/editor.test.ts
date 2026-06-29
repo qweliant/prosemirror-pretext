@@ -1523,6 +1523,18 @@ describe('overridable handlers', () =>
         e.destroy()
     })
 
+    test('autofocus:false does not grab focus on construction', () =>
+    {
+        const doc = schema.node('doc', null, [schema.node('paragraph', null, [schema.text('hi')])])
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        const e = new CanvasEditor({ state: EditorState.create({ doc, schema }), container, autofocus: false })
+        expect(e.hasFocus()).toBe(false)
+        e.focus()
+        expect(e.hasFocus()).toBe(true)
+        e.destroy()
+    })
+
     test('handlers.domEvents binds arbitrary events on the container', () =>
     {
         let hits = 0

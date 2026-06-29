@@ -68,6 +68,7 @@ The container element should be an empty block-level element. The editor creates
 | `ariaLabel` | `'Rich text editor'` | Accessible name (the input's `aria-label`) |
 | `a11yMirror` | `true` | Maintain a screen-reader-visible DOM mirror of the document |
 | `editable` | `true` | Start editable or read-only (read-only keeps navigation/selection/copy, drops edits); toggle with `setEditable()` |
+| `autofocus` | `true` | Focus on construction. Set `false` for embeds so mounting doesn't steal focus or scroll the page |
 | `decorations` | `undefined` | `(state) => Decoration[]` — transient overlays (search highlight, squiggles, collab cursors, inline widgets, node backgrounds); recomputed each render. See `Decoration.{inline,node,widget}` |
 | `handlers` | `{}` | Overridable event handlers (`keyDown`, `click`, `doubleClick`, `paste`, `domEvents`) — return `true` to suppress the built-in behavior (à la prosemirror-view's `handle*`) |
 | `markStyles` | defaults below | Maps mark names → a style `{ fontWeight, fontStyle, fontFamily, color, background, underline, strikethrough }`, or a `(mark) => style` function to read attributes |
