@@ -259,11 +259,13 @@
                     <p class="vs">Most canvas editors are an accessibility dead end.</p>
                 </div>
                 <div class="u c4">
-                    <h3>⚡ Layout is arithmetic</h3>
-                    <p>Pretext measures once, then line-breaks with pure math — <b>no layout reflow, ever</b>. The
+                    <h3>⚡ Flat input latency</h3>
+                    <p>Pretext line-breaks with pure math, so reading the caret position each keystroke is a
+                        <b>cache lookup, not a reflow</b> — and stays <b>flat as the document grows</b>. The
                         <span class="reflow">“0 reflows”</span> under the editor isn't marketing; it's the architecture.
                     </p>
-                    <p class="vs">DOM editors trigger a reflow on every measurement.</p>
+                    <p class="vs">DOM editors pay a read-after-write reflow that scales with the page — ~11× slower
+                        at 8k blocks. <a href="https://github.com/qweliant/prosemirror-pretext/tree/main/bench">see the benchmark →</a></p>
                 </div>
             </div>
         </div>
@@ -325,6 +327,8 @@
 <span class="k">const</span> editor = <span class="k">new</span> CanvasEditor({
   state: EditorState.create({ doc, schema }),
   container: document.querySelector(<span class="s">'#editor'</span>),
+  font: <span class="s">'16px Georgia, serif'</span>,
+  lineHeight: 26, <span class="c">// set it ~1.4–1.6× your font — it's not derived from `font`</span>
   ariaLabel: <span class="s">'My notes'</span>,
 })</pre>
         </div>

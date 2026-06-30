@@ -10,6 +10,13 @@ The browser's DOM was never designed for high-frequency layout calculations. Eve
 - **Pretext** handles the *where* -- sub-millisecond line breaking and glyph positioning.
 - **Canvas** handles the *how* -- pixel-level rendering at device resolution.
 
+The payoff shows up at scale: typing in a large document and reading the caret
+position each keystroke (what any bubble menu / collab cursor does), DOM
+editors pay a *read-after-write tax* — `getBoundingClientRect` forces a
+synchronous relayout whose cost grows with the document. `coordsAtPos` here is
+arithmetic against a cache, so it stays flat. See [Performance](#performance)
+and the reproducible [`bench/`](bench/).
+
 ## Install
 
 ```bash
@@ -54,7 +61,7 @@ The container element should be an empty block-level element. The editor creates
 | `state` | *(required)* | ProseMirror `EditorState` with schema + initial doc |
 | `container` | *(required)* | Element that will host the canvas + textarea |
 | `font` | `'16px Inter'` | CSS font string for text rendering |
-| `lineHeight` | `26` | Line height in px |
+| `lineHeight` | `26` | Line height in px. **Not derived from `font`** — set it yourself, ~1.3–1.6× your font size. Too small and lines overlap/clip; the caret height is `lineHeight` too. (Per-block `blockStyles` can override it; the built-in `heading` sizes its own line height.) |
 | `width` | `460` | Content area width in px |
 | `blockGap` | `20` | Vertical gap between block nodes in px |
 | `maxHeight` | `null` | If set, scrolls when content exceeds this height |
@@ -209,6 +216,12 @@ editor.coordsAtPos(pos)   // → { x, y, height } in viewport coords (or null)
 editor.selectionRect()    // → { left, right, top, bottom } in viewport coords (null if empty)
 ```
 
+`coordsAtPos` is accurate immediately after a `dispatch` (layout is recomputed
+lazily on read) and never forces a browser reflow — it reads a cache the editor
+maintains. If you need the canvas repainted synchronously rather than on the
+next animation frame (e.g. before a screenshot or measurement), call
+`editor.flush()`.
+
 A bubble menu is then just a positioned DOM element updated on each render
 (`onRender` fires on every selection change):
 
@@ -223,6 +236,33 @@ function update() {
 ```
 
 Same primitives power inline link editors, hovercards, and autocomplete popups.
+
+## Performance
+
+The architectural win is **flat per-keystroke latency**: editing cost is
+decoupled from document size and CSS complexity. The metric that matters is
+*read-after-write* — apply an edit, then read the caret's pixel position, every
+keystroke (what a bubble menu, slash command, or collab cursor does).
+
+Typing in the middle of a document, reading the caret each keystroke, at 6× CPU
+throttle ([`bench/`](bench/), reproducible):
+
+| blocks | prosemirror-view (DOM) | prosemirror-pretext (canvas) |
+| --: | --: | --: |
+| 200 | 0.1 ms | 0.1 ms |
+| 800 | 1.1 ms | 0.1 ms |
+| 3,200 | 3.8 ms | 0.5 ms |
+| 8,000 | 9.8 ms | 0.9 ms |
+
+The DOM grows linearly (`getBoundingClientRect` forces a synchronous relayout
+whose cost tracks the document); the canvas stays flat (`coordsAtPos` is a cache
+lookup). At ordinary sizes it's a tie — the browser's incremental layout is
+excellent, and you don't need a canvas editor for a short note. The edge shows
+up at scale. Run it yourself: `bun run bench`.
+
+This holds with the accessibility mirror enabled and under virtualization
+(`maxHeight`): caret reads never read layout on the hot path, so they don't
+flush the hidden DOM mirror.
 
 ## Demo
 
@@ -245,9 +285,9 @@ One-time setup: **Settings → Pages → Source → GitHub Actions**. It then se
 
 ## Rendering roadmap
 
-Actively being built; not yet published to npm. Editing, selection, marks
-(bold/italic/code), floats, undo/redo, clipboard, and viewport virtualization
-already work (see the sections above).
+Published on npm (`prosemirror-pretext`); see [CHANGELOG.md](CHANGELOG.md).
+Editing, selection, marks (bold/italic/code), floats, undo/redo, clipboard, and
+viewport virtualization already work (see the sections above).
 
 Because this editor replaces `prosemirror-view` with canvas, **everything the
 DOM would normally render has to be drawn by us.** The list below is the rest
@@ -275,7 +315,7 @@ editor needs to implement.
 
 - [x] **Atom block node views** — interactive DOM (buttons, embeds) positioned over reserved space (`nodeViews`)
 - [x] **Images** — a block atom rendered by a node view (a real `<img>`); drag-to-resize (corner handle), and drag-to-float so text wraps around it (`floatRect`, reusing the float engine — the same obstacle-wrap Pretext's own demos use)
-- [~] **Inline atoms** — text-like chips/mentions/emoji are doable today as styled inline ranges (marks / inline decorations); true *interactive inline DOM* node views need Pretext fixed-width inline boxes (deferred)
+- [~] **Inline atoms** — text-like chips/mentions/emoji are doable today as styled inline ranges (marks / inline decorations). Interactive inline DOM node views aren't wired yet, but they're *not* blocked on the layout engine: Pretext's rich-inline already reserves atomic fixed-width boxes (`break: 'never'` + `extraWidth`). Design + a content-holding node-view sketch in [`design/node-views.md`](design/node-views.md)
 
 ### Selection & affordances
 
