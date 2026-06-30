@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.3
+
+### Fixed
+
+- `coordsAtPos` no longer forces a synchronous layout when the editor is
+  virtualized (`maxHeight` scroller) with the accessibility mirror enabled — the
+  common real-world setup. It was reading `getBoundingClientRect` and
+  `scroller.scrollTop` on every call, each of which flushes layout (including the
+  hidden DOM mirror) when the document is dirty. Both are now cached and
+  refreshed once per frame, so per-keystroke caret reads stay flat with document
+  size under virtualization too.
+
 ## 0.1.2
 
 Performance and correctness work, much of it surfaced by the new latency

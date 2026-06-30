@@ -582,6 +582,10 @@ export class CanvasEditor {
   // Invalidated on scroll/resize, the only things that move the canvas's
   // top-left; growing its height does not.
   private canvasRectCache: { left: number; top: number } | null = null;
+  // Cached scroller offset, refreshed each frame and on scroll. Reading
+  // `scroller.scrollTop` directly on the coordsAtPos hot path would force a
+  // synchronous layout (of the a11y mirror) when the document is dirty.
+  private lastScrollTop = 0;
   // Layout is recomputed lazily: a dispatch marks it dirty, and the next
   // `coordsAtPos` or frame render rebuilds it (paint stays on the frame). So a
   // caret read right after a keystroke is both fresh and paint-free.
@@ -1042,10 +1046,9 @@ export class CanvasEditor {
     );
     if (!coords) return null;
     const rect = this.canvasOffset();
-    const scrollTop = this.scroller?.scrollTop ?? 0;
     return {
       x: rect.left + coords.x,
-      y: rect.top + coords.y - scrollTop,
+      y: rect.top + coords.y - this.lastScrollTop,
       height: coords.height,
     };
   }
@@ -2936,6 +2939,13 @@ export class CanvasEditor {
       this.textarea.style.transform = `translate(${caretCoords.x}px, ${caretCoords.y}px)`;
     }
 
+    // Refresh the cached canvas offset + scroll position once per frame (layout
+    // is already being touched here), so coordsAtPos never reads layout on the
+    // hot path — which would force a synchronous layout of the a11y mirror.
+    const rect = this.canvas.getBoundingClientRect();
+    this.canvasRectCache = { left: rect.left, top: rect.top };
+    if (this.scroller) this.lastScrollTop = this.scroller.scrollTop;
+
     const dt = performance.now() - t0;
 
     this.onRender?.({
@@ -3364,28 +3374,29 @@ export class CanvasEditor {
       );
     }
 
-    // Repaint the visible slice as the user scrolls (virtualized mode).
+    // Repaint the visible slice as the user scrolls (virtualized mode). The
+    // render refreshes the cached canvas offset, so we don't null it here —
+    // nulling would push a getBoundingClientRect onto the next coordsAtPos read,
+    // forcing a synchronous layout.
     this.scroller?.addEventListener(
       "scroll",
       () => {
-        this.canvasRectCache = null;
+        if (this.scroller) this.lastScrollTop = this.scroller.scrollTop;
         this.scheduleRender();
       },
       { signal },
     );
 
     // The canvas's viewport top-left only moves when the page scrolls or
-    // reflows; drop the cached offset so coordsAtPos recomputes it once.
+    // reflows; a render (which refreshes the cached offset) is enough.
     if (typeof window !== "undefined") {
-      const dropOffset = () => {
-        this.canvasRectCache = null;
-      };
-      window.addEventListener("scroll", dropOffset, {
+      const refresh = () => this.scheduleRender();
+      window.addEventListener("scroll", refresh, {
         signal,
         passive: true,
         capture: true,
       });
-      window.addEventListener("resize", dropOffset, { signal });
+      window.addEventListener("resize", refresh, { signal });
     }
 
     // preventScroll so mounting an editor mid-page doesn't jump the viewport.
