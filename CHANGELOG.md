@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.4
+
+### Changed
+
+- The accessibility mirror now finds the changed block via a document diff and
+  re-serializes only that one, instead of an identity scan over every top-level
+  block each keystroke. With this, **no per-keystroke work in the editing path is
+  O(document size)** — caret reads, layout, and the mirror are all O(log n) or
+  better. (Marginal on benchmarks at typical sizes; it removes the last linear
+  scan for pathological documents and slower devices.)
+
 ## 0.1.3
 
 ### Fixed

@@ -905,10 +905,11 @@ export class CanvasEditor {
   }
 
   /**
-   * Keep the hidden screen-reader mirror in sync incrementally: only the
-   * top-level blocks whose node identity changed are re-serialized, so typing in
-   * one block is O(1) DOM work instead of re-serializing the whole document
-   * every keystroke. Falls back to a full rebuild when the block count changes.
+   * Keep the hidden screen-reader mirror in sync incrementally. A document diff
+   * (`findDiffStart`/`findDiffEnd`) locates the contiguous range of top-level
+   * blocks that changed, and only those are re-serialized — so typing in one
+   * block is O(log n) to find it + O(1) DOM work, not an O(blocks) scan every
+   * keystroke. Falls back to a full rebuild when the block count changes.
    */
   private updateMirror(prev: PMNode | null, cur: PMNode): void {
     const mirror = this.a11yMirror;
@@ -922,10 +923,22 @@ export class CanvasEditor {
       mirror.replaceChildren(this.serializer.serializeFragment(kids));
       return;
     }
-    for (let i = 0; i < kids.childCount; i++) {
+    const ds = prev.content.findDiffStart(kids);
+    if (ds === null) return; // identical content
+    const de = prev.content.findDiffEnd(kids);
+    // Map the changed position range to top-level child indices. The identity
+    // skip below makes an over-wide range harmless, so a boundary-rounded end is
+    // fine.
+    const start = prev.resolve(ds).index(0);
+    const end = de
+      ? prev.resolve(Math.min(prev.content.size, de.a)).index(0)
+      : start;
+    for (let i = start; i <= end && i < kids.childCount; i++) {
       if (prev.child(i) === kids.child(i)) continue; // unchanged subtree
-      const dom = this.serializer.serializeNode(kids.child(i));
-      mirror.replaceChild(dom, mirror.childNodes[i]);
+      mirror.replaceChild(
+        this.serializer.serializeNode(kids.child(i)),
+        mirror.childNodes[i],
+      );
     }
   }
 

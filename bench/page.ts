@@ -76,20 +76,21 @@ export async function run(keystrokes = 200): Promise<Row[]> {
 // cost scales with document size.
 async function sweep(sizes = [200, 800, 3200], keystrokes = 150) {
     const { buildSimpleDoc: bs, makeDomAdapter: md, makeCanvasAdapter: mc, measure } = await import('./core')
-    const rows: { size: number, dom: number, canvas: number }[] = []
+    const rows: { size: number, dom: number, canvas: number, domMax: number, canvasMax: number }[] = []
     for (const size of sizes) {
         const doc = bs(size)
         const caretPos = Math.floor(doc.content.size / 2)
-        const out: Record<string, number> = {}
+        const out: Record<string, { p50: number, max: number }> = {}
         for (const [name, make] of [['dom', md], ['canvas', (d: import('prosemirror-model').Node, m: HTMLElement) => mc(d, m, WIDTH)]] as const) {
             const mount = document.createElement('div'); mount.className = 'mount'; stage().appendChild(mount)
             const adapter = (make as (d: import('prosemirror-model').Node, m: HTMLElement) => import('./core').EditorAdapter)(doc, mount)
             await new Promise<void>((r) => requestAnimationFrame(() => r()))
-            out[name] = measure(adapter, { caretPos, keystrokes, readCaret: true }).p50
+            const s = measure(adapter, { caretPos, keystrokes, readCaret: true })
+            out[name] = { p50: s.p50, max: s.max }
             adapter.destroy(); mount.remove()
             await new Promise<void>((r) => requestAnimationFrame(() => r()))
         }
-        rows.push({ size, dom: out.dom, canvas: out.canvas })
+        rows.push({ size, dom: out.dom.p50, canvas: out.canvas.p50, domMax: out.dom.max, canvasMax: out.canvas.max })
     }
     return rows
 }
