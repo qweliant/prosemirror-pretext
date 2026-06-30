@@ -1,20 +1,16 @@
 # Changelog
 
-## 0.1.1
+## 0.1.2
 
 Performance and correctness work, much of it surfaced by the new latency
 benchmark (`bench/`). Per-keystroke cost is now decoupled from document size:
 typing in a large document and reading the caret each keystroke stays flat
-(~1ms) where it previously grew linearly with the document.
+(~1ms) where it previously grew linearly with the document (~10ms at 8k blocks).
 
 ### Added
 
-- `autofocus?: boolean` option (default `true`) — pass `false` to mount an editor
-  without stealing focus (e.g. an embed mid-page). Construction-time focus also
-  uses `{ preventScroll: true }`.
 - `flush()` — synchronously recompute layout and repaint instead of waiting for
   the next animation frame.
-- `"./package.json"` is now exported.
 
 ### Changed / Fixed
 
@@ -33,6 +29,19 @@ typing in a large document and reading the caret each keystroke stays flat
 - The hidden screen-reader DOM mirror updates incrementally — only the top-level
   block whose content changed is re-serialized, instead of re-serializing the
   whole document on every keystroke.
+
+## 0.1.1
+
+### Added
+
+- `autofocus?: boolean` option (default `true`) — pass `false` to mount an editor
+  without stealing focus (e.g. an embed mid-page). Construction-time focus also
+  uses `{ preventScroll: true }`.
+- `"./package.json"` is now exported (fixes `ERR_PACKAGE_PATH_NOT_EXPORTED`).
+
+### Fixed
+
+- Embedded editors size to their container's content width instead of overflowing.
 
 ## 0.1.0
 
