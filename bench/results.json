@@ -1,0 +1,247 @@
+{
+  "scenarios": [
+    {
+      "throttle": 4,
+      "rows": [
+        {
+          "scenario": "A · simple, no caret read",
+          "docKind": "simple",
+          "editor": "dom",
+          "readCaret": false,
+          "stats": {
+            "p50": 0.4000000059604645,
+            "p95": 0.9000000059604645,
+            "max": 1.0999999940395355,
+            "mean": 0.44833333330849806,
+            "n": 120
+          }
+        },
+        {
+          "scenario": "A · simple, no caret read",
+          "docKind": "simple",
+          "editor": "canvas",
+          "readCaret": false,
+          "stats": {
+            "p50": 0,
+            "p95": 0.19999998807907104,
+            "max": 0.7999999970197678,
+            "mean": 0.0324999999254942,
+            "n": 120
+          }
+        },
+        {
+          "scenario": "A · simple, read caret",
+          "docKind": "simple",
+          "editor": "dom",
+          "readCaret": true,
+          "stats": {
+            "p50": 0.4000000059604645,
+            "p95": 0.9000000059604645,
+            "max": 3.2999999970197678,
+            "mean": 0.45,
+            "n": 120
+          }
+        },
+        {
+          "scenario": "A · simple, read caret",
+          "docKind": "simple",
+          "editor": "canvas",
+          "readCaret": true,
+          "stats": {
+            "p50": 0.09999999403953552,
+            "p95": 0.7000000029802322,
+            "max": 0.9000000059604645,
+            "mean": 0.20833333333333334,
+            "n": 120
+          }
+        },
+        {
+          "scenario": "B · complex, no caret read",
+          "docKind": "complex",
+          "editor": "dom",
+          "readCaret": false,
+          "stats": {
+            "p50": 0,
+            "p95": 0.7000000029802322,
+            "max": 0.9000000059604645,
+            "mean": 0.1316666666418314,
+            "n": 120
+          }
+        },
+        {
+          "scenario": "B · complex, no caret read",
+          "docKind": "complex",
+          "editor": "canvas",
+          "readCaret": false,
+          "stats": {
+            "p50": 0,
+            "p95": 0.09999999403953552,
+            "max": 0.5,
+            "mean": 0.01000000002483527,
+            "n": 120
+          }
+        },
+        {
+          "scenario": "C · complex, read caret (kill shot)",
+          "docKind": "complex",
+          "editor": "dom",
+          "readCaret": true,
+          "stats": {
+            "p50": 0,
+            "p95": 0.7000000029802322,
+            "max": 0.800000011920929,
+            "mean": 0.13416666674117247,
+            "n": 120
+          }
+        },
+        {
+          "scenario": "C · complex, read caret (kill shot)",
+          "docKind": "complex",
+          "editor": "canvas",
+          "readCaret": true,
+          "stats": {
+            "p50": 0.09999999403953552,
+            "p95": 0.6000000089406967,
+            "max": 0.9000000059604645,
+            "mean": 0.13999999997516474,
+            "n": 120
+          }
+        }
+      ]
+    },
+    {
+      "throttle": 6,
+      "rows": [
+        {
+          "scenario": "A · simple, no caret read",
+          "docKind": "simple",
+          "editor": "dom",
+          "readCaret": false,
+          "stats": {
+            "p50": 0.7000000029802322,
+            "p95": 1.5,
+            "max": 1.7999999970197678,
+            "mean": 0.6975000000248353,
+            "n": 120
+          }
+        },
+        {
+          "scenario": "A · simple, no caret read",
+          "docKind": "simple",
+          "editor": "canvas",
+          "readCaret": false,
+          "stats": {
+            "p50": 0,
+            "p95": 0.7000000029802322,
+            "max": 1.2999999970197678,
+            "mean": 0.05749999992549419,
+            "n": 120
+          }
+        },
+        {
+          "scenario": "A · simple, read caret",
+          "docKind": "simple",
+          "editor": "dom",
+          "readCaret": true,
+          "stats": {
+            "p50": 0.7000000029802322,
+            "p95": 1.3999999910593033,
+            "max": 4.5999999940395355,
+            "mean": 0.6733333333084981,
+            "n": 120
+          }
+        },
+        {
+          "scenario": "A · simple, read caret",
+          "docKind": "simple",
+          "editor": "canvas",
+          "readCaret": true,
+          "stats": {
+            "p50": 0.10000000894069672,
+            "p95": 1.2000000029802322,
+            "max": 1.5,
+            "mean": 0.3333333333333333,
+            "n": 120
+          }
+        },
+        {
+          "scenario": "B · complex, no caret read",
+          "docKind": "complex",
+          "editor": "dom",
+          "readCaret": false,
+          "stats": {
+            "p50": 0,
+            "p95": 1,
+            "max": 1.2999999970197678,
+            "mean": 0.18416666674117246,
+            "n": 120
+          }
+        },
+        {
+          "scenario": "B · complex, no caret read",
+          "docKind": "complex",
+          "editor": "canvas",
+          "readCaret": false,
+          "stats": {
+            "p50": 0,
+            "p95": 0.09999999403953552,
+            "max": 0.7999999970197678,
+            "mean": 0.014166666691501935,
+            "n": 120
+          }
+        },
+        {
+          "scenario": "C · complex, read caret (kill shot)",
+          "docKind": "complex",
+          "editor": "dom",
+          "readCaret": true,
+          "stats": {
+            "p50": 0.09999999403953552,
+            "p95": 0.9000000059604645,
+            "max": 1.2999999970197678,
+            "mean": 0.19416666676600774,
+            "n": 120
+          }
+        },
+        {
+          "scenario": "C · complex, read caret (kill shot)",
+          "docKind": "complex",
+          "editor": "canvas",
+          "readCaret": true,
+          "stats": {
+            "p50": 0,
+            "p95": 1.0999999940395355,
+            "max": 1.300000011920929,
+            "mean": 0.1949999999254942,
+            "n": 120
+          }
+        }
+      ]
+    }
+  ],
+  "sweep": {
+    "throttle": 6,
+    "rows": [
+      {
+        "size": 200,
+        "dom": 0.10000000894069672,
+        "canvas": 0.09999999403953552
+      },
+      {
+        "size": 800,
+        "dom": 1.1000000089406967,
+        "canvas": 0.09999999403953552
+      },
+      {
+        "size": 3200,
+        "dom": 3.7999999970197678,
+        "canvas": 0.5
+      },
+      {
+        "size": 8000,
+        "dom": 9.799999997019768,
+        "canvas": 0.9000000059604645
+      }
+    ]
+  }
+}

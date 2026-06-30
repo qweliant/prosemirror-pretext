@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>prosemirror-pretext · latency bench</title>
+  <style>
+    body { font: 14px/1.5 ui-sans-serif, system-ui, sans-serif; margin: 24px; color: #1b2a16; }
+    h1 { font-size: 18px; }
+    button { font: 600 14px/1 system-ui; padding: 8px 14px; border-radius: 8px; border: 1.5px solid #4f9e2c; background: #eaffe0; color: #2f6e1c; cursor: pointer; }
+    pre { background: #0d1f0a; color: #d7ffc7; padding: 14px; border-radius: 10px; overflow: auto; font: 12px/1.5 ui-monospace, monospace; }
+    /* The editors are mounted here, in a constrained scroll viewport so both
+       virtualize comparably. Kept on-screen so layout is real (not display:none). */
+    #stage { position: absolute; left: -10000px; top: 0; }
+    .mount { width: 700px; height: 400px; overflow: auto; border: 1px solid #ccc; }
+    .mount .ProseMirror { outline: none; font: 16px/1.625 Georgia, serif; padding: 10px; }
+    .mount blockquote { border-left: 3px solid #ccc; margin-left: 0; padding-left: 12px; }
+    .mount ul { padding-left: 22px; }
+  </style>
+</head>
+<body>
+  <h1>prosemirror-pretext — read-after-write latency bench</h1>
+  <p>Same ProseMirror document & transactions; only the view layer differs
+     (prosemirror-view DOM vs prosemirror-pretext canvas). Times are ms per
+     keystroke for <code>edit → relayout → read caret</code>.</p>
+  <p><button id="go">Run (200 keystrokes × 4 scenarios × 2 editors)</button></p>
+  <pre id="out">idle — click run, or drive window.__bench.run() from the automated runner.</pre>
+  <div id="stage"></div>
+  <script type="module" src="./page.ts"></script>
+</body>
+</html>

@@ -2303,3 +2303,89 @@ describe('input handler', () =>
         ed.destroy()
     })
 })
+
+describe('incremental layout correctness', () =>
+{
+    // The incremental layout path (single-block edits) must produce byte-for-byte
+    // the same positions as a full from-scratch layout. We compare coordsAtPos at
+    // every document position against a fresh editor built from the same doc.
+    function coordsAll(ed: CanvasEditor): string[]
+    {
+        const size = (ed as any).state.doc.content.size as number
+        const out: string[] = []
+        for (let p = 0; p <= size; p++)
+        {
+            const c = (ed as any).coordsAtPos(p)
+            out.push(c ? `${c.x.toFixed(2)},${c.y.toFixed(2)},${c.height.toFixed(2)}` : 'null')
+        }
+        return out
+    }
+
+    function freshFrom(ed: CanvasEditor): CanvasEditor
+    {
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        return new CanvasEditor({
+            state: EditorState.create({ doc: (ed as any).state.doc, schema }),
+            container,
+        })
+    }
+
+    test('single-block inserts match a from-scratch layout', () =>
+    {
+        const { ed } = makeEditor(['hello world', 'second paragraph here', 'third'])
+        const inserts: Array<[number, string]> = [
+            [3, 'X'], [1, 'Y'], [25, 'ZZ'], [40, 'q'], [2, 'a'],
+        ]
+        for (const [pos, text] of inserts)
+        {
+            ;(ed as any).dispatch((ed as any).state.tr.insertText(text, pos))
+            ;(ed as any).coordsAtPos(0) // force the incremental ensureLayout
+        }
+        expect(coordsAll(ed)).toEqual(coordsAll(freshFrom(ed)))
+        ed.destroy()
+    })
+
+    test('a height-changing insert (line wrap) shifts blocks below correctly', () =>
+    {
+        const { ed } = makeEditor(['short', 'below one', 'below two'])
+        // Insert enough to wrap the first paragraph onto multiple lines, changing
+        // its height — blocks below must shift down.
+        ;(ed as any).dispatch((ed as any).state.tr.insertText('x'.repeat(120), 3))
+        ;(ed as any).coordsAtPos(0)
+        expect(coordsAll(ed)).toEqual(coordsAll(freshFrom(ed)))
+        ed.destroy()
+    })
+
+    test('structural edits (split/join) fall back to a correct full layout', () =>
+    {
+        const { ed } = makeEditor(['alpha beta', 'gamma'])
+        // Split the first paragraph (block count changes → incremental bails).
+        const splitPos = 4
+        ;(ed as any).dispatch((ed as any).state.tr.split(splitPos))
+        ;(ed as any).coordsAtPos(0)
+        expect(coordsAll(ed)).toEqual(coordsAll(freshFrom(ed)))
+        // Join back.
+        ;(ed as any).dispatch((ed as any).state.tr.join((ed as any).state.doc.firstChild!.nodeSize))
+        ;(ed as any).coordsAtPos(0)
+        expect(coordsAll(ed)).toEqual(coordsAll(freshFrom(ed)))
+        ed.destroy()
+    })
+
+    test('fuzz: 60 random single-char inserts stay consistent', () =>
+    {
+        const { ed } = makeEditor(['one two three', 'four five six'])
+        let seed = 12345
+        const rand = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff
+        for (let i = 0; i < 60; i++)
+        {
+            const size = (ed as any).state.doc.content.size as number
+            const pos = 1 + Math.floor(rand() * Math.max(1, size - 2))
+            try { (ed as any).dispatch((ed as any).state.tr.insertText('z', pos)) }
+            catch { continue } // skip invalid (non-text) positions
+            ;(ed as any).coordsAtPos(0)
+        }
+        expect(coordsAll(ed)).toEqual(coordsAll(freshFrom(ed)))
+        ed.destroy()
+    })
+})
