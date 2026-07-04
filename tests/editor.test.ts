@@ -2389,3 +2389,55 @@ describe('incremental layout correctness', () =>
         ed.destroy()
     })
 })
+
+describe('touch input (mobile)', () =>
+{
+    // The full touch-event path (tap / long-press / handle drag) is verified in a
+    // real mobile browser; these lock in the core logic the handlers call.
+    test('the canvas opts into native vertical scroll via touch-action', () =>
+    {
+        const { ed } = makeEditor(['hello world'])
+        expect((ed as any).canvas.style.touchAction).toBe('pan-y')
+        ed.destroy()
+    })
+
+    test('selectWordAt selects the word under a point (long-press)', () =>
+    {
+        const { ed } = makeEditor(['hello world'])
+        // mock metrics: 8px/char, lineHeight 26 → x≈16 lands inside "hello", y in line 1
+        ;(ed as any).selectWordAt(18, 13)
+        const sel = ed.state.selection
+        expect(sel.empty).toBe(false)
+        expect(ed.state.doc.textBetween(sel.from, sel.to)).toBe('hello')
+        ed.destroy()
+    })
+
+    test('dragSelectionEnd moves one end and anchors the other', () =>
+    {
+        const { ed } = makeEditor(['hello world'])
+        ;(ed as any).selectWordAt(18, 13) // select "hello" (1..6)
+        ;(ed as any).dragSelectionEnd('to', 9) // drag the end into "world"
+        const sel = ed.state.selection
+        expect(sel.from).toBe(1) // anchored at start of "hello"
+        expect(sel.to).toBe(9)
+        expect(ed.state.doc.textBetween(sel.from, sel.to)).toBe('hello wo')
+        ed.destroy()
+    })
+
+    test('selection handles appear for a touch selection and hide when collapsed', async () =>
+    {
+        const { ed } = makeEditor(['hello world'])
+        ;(ed as any).touchSelection = true
+        ;(ed as any).selectWordAt(18, 13)
+        await nextFrame()
+        const h = (ed as any).selHandles as { from: HTMLElement, to: HTMLElement } | null
+        expect(h).not.toBeNull()
+        expect(h!.from.style.display).toBe('block')
+        expect(h!.to.style.display).toBe('block')
+        // Collapse the selection → handles hide.
+        ;(ed as any).setHead(3, false)
+        ;(ed as any).flush()
+        expect(h!.from.style.display).toBe('none')
+        ed.destroy()
+    })
+})

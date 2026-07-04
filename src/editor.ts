@@ -615,6 +615,16 @@ export class CanvasEditor {
   private composing = false;
   private abortController: AbortController | null = null;
   private dragging = false;
+  // Touch state: distinguish a tap (caret), a long-press (word select), and a
+  // swipe (native scroll). Selection handles are shown after a touch selection.
+  private touchStartX = 0;
+  private touchStartY = 0;
+  private touchMoved = false;
+  private longPressTimer: ReturnType<typeof setTimeout> | null = null;
+  private touchMode: "idle" | "scroll" | "select" = "idle";
+  private touchSelection = false;
+  private selHandles: { from: HTMLElement; to: HTMLElement } | null = null;
+  private draggingHandle: "from" | "to" | null = null;
   // Read-only mode drops document-changing transactions (see dispatch).
   private isEditable = true;
   private readonly autofocus: boolean = true;
@@ -739,6 +749,10 @@ export class CanvasEditor {
 
     this.canvas = document.createElement("canvas");
     this.canvas.style.display = "block";
+    // Let the browser own vertical scrolling (native momentum), while taps and
+    // long-presses are handled in JS. Also stops the 300ms tap delay / double-tap
+    // zoom on the editor surface.
+    this.canvas.style.touchAction = "pan-y";
     // The canvas is decorative pixels; assistive tech reads the mirror below.
     this.canvas.setAttribute("aria-hidden", "true");
     this.canvas.setAttribute("role", "presentation");
@@ -2713,7 +2727,10 @@ export class CanvasEditor {
    * canvas is pinned to the viewport, so its rect is viewport-relative —
    * adding scrollTop recovers the document Y. scrollTop is 0 otherwise.
    */
-  private eventToDocCoords(e: MouseEvent): { x: number; y: number } {
+  private eventToDocCoords(e: {
+    clientX: number;
+    clientY: number;
+  }): { x: number; y: number } {
     const rect = this.canvas.getBoundingClientRect();
     return {
       x: e.clientX - rect.left,
@@ -2947,6 +2964,7 @@ export class CanvasEditor {
     this.paintCaret(caretCoords);
     this.syncNodeViews(layouts);
     this.syncWidgets(layouts, decorations);
+    this.syncSelectionHandles();
 
     if (caretCoords) {
       this.textarea.style.transform = `translate(${caretCoords.x}px, ${caretCoords.y}px)`;
@@ -3222,6 +3240,7 @@ export class CanvasEditor {
       (e) => {
         if (e.button !== 0) return;
         e.preventDefault();
+        this.touchSelection = false; // mouse in use → hide touch handles
         const { x, y } = this.eventToDocCoords(e);
 
         // A click in a block seam (between stacked atoms) sets a gap cursor.
@@ -3326,6 +3345,134 @@ export class CanvasEditor {
       },
       { signal },
     );
+
+    // ── Touch input ──────────────────────────────────────────────────
+    // A tap places the caret; a long-press selects the word (and shows
+    // draggable handles); a swipe scrolls natively. Mouse events aren't used on
+    // touch (we preventDefault the tap/selection to suppress the synthesized
+    // click), so there's no double-handling.
+    const LONG_PRESS_MS = 500;
+    const TOUCH_MOVE_PX = 10;
+
+    this.canvas.addEventListener(
+      "touchstart",
+      (e) => {
+        if (e.touches.length !== 1) {
+          this.cancelLongPress(); // pinch/second finger: bail out of caret intent
+          this.touchMode = "scroll";
+          return;
+        }
+        const t = e.touches[0];
+        this.touchStartX = t.clientX;
+        this.touchStartY = t.clientY;
+        this.touchMoved = false;
+        this.touchMode = "idle";
+        this.cancelLongPress();
+        this.longPressTimer = setTimeout(() => {
+          this.longPressTimer = null;
+          if (this.touchMoved) return;
+          this.touchMode = "select";
+          const { x, y } = this.eventToDocCoords({
+            clientX: this.touchStartX,
+            clientY: this.touchStartY,
+          });
+          this.selectWordAt(x, y);
+          this.touchSelection = true;
+          this.textarea.focus({ preventScroll: true });
+          this.scheduleRender();
+        }, LONG_PRESS_MS);
+      },
+      { signal, passive: true },
+    );
+
+    this.canvas.addEventListener(
+      "touchmove",
+      (e) => {
+        if (e.touches.length !== 1) return;
+        const t = e.touches[0];
+        if (
+          !this.touchMoved &&
+          Math.hypot(t.clientX - this.touchStartX, t.clientY - this.touchStartY) >
+            TOUCH_MOVE_PX
+        ) {
+          this.touchMoved = true;
+          if (this.touchMode !== "select") {
+            this.touchMode = "scroll";
+            this.cancelLongPress();
+          }
+        }
+        if (this.touchMode === "select") {
+          // Long-press engaged: drag extends the selection, so suppress scroll.
+          e.preventDefault();
+          const { x, y } = this.eventToDocCoords(t);
+          const hit = this.clickToPos(this.lastLayouts, x, y);
+          if (hit) {
+            this.setHead(hit.pos, true);
+            this.caretBias = hit.bias;
+            this.scheduleRender();
+          }
+        }
+        // Otherwise it's a scroll — let the browser handle it (touch-action).
+      },
+      { signal, passive: false },
+    );
+
+    this.canvas.addEventListener(
+      "touchend",
+      (e) => {
+        const wasSelect = this.touchMode === "select";
+        const wasScroll = this.touchMode === "scroll" || this.touchMoved;
+        this.cancelLongPress();
+        this.touchMode = "idle";
+        if (wasSelect) {
+          e.preventDefault(); // keep the selection + suppress synthesized click
+          this.textarea.focus({ preventScroll: true });
+          return;
+        }
+        if (wasScroll) return; // a swipe — the browser already scrolled
+        // Quick tap → place the caret.
+        e.preventDefault();
+        const { x, y } = this.eventToDocCoords({
+          clientX: this.touchStartX,
+          clientY: this.touchStartY,
+        });
+        const gapPos = this.gapPosForClick(y);
+        if (gapPos !== null) {
+          this.dispatch(
+            this.state.tr.setSelection(
+              new GapCursor(this.state.doc.resolve(gapPos)),
+            ),
+          );
+        } else {
+          const hit = this.clickToPos(this.lastLayouts, x, y);
+          if (hit) {
+            // Consumer override (mention, checkbox…) — same as a mouse click.
+            if (this.handlers.click?.(this, hit.pos, e as unknown as MouseEvent)) {
+              this.textarea.focus({ preventScroll: true });
+              return;
+            }
+            this.setHead(hit.pos, false);
+            this.caretBias = hit.bias;
+          }
+        }
+        this.touchSelection = false; // collapsed caret → hide handles
+        this.textarea.focus({ preventScroll: true });
+      },
+      { signal, passive: false },
+    );
+
+    // Keep the caret above the on-screen keyboard: when the visual viewport
+    // shrinks (keyboard opens), scroll the caret-tracking textarea into view.
+    if (typeof window !== "undefined" && window.visualViewport) {
+      window.visualViewport.addEventListener(
+        "resize",
+        () => {
+          if (document.activeElement !== this.textarea) return;
+          this.textarea.scrollIntoView({ block: "center", behavior: "smooth" });
+        },
+        { signal },
+      );
+    }
 
     // The canvas selection lives in ProseMirror, not the DOM, so the
     // browser would copy the (empty) textarea. Serialize the selection
@@ -3626,6 +3773,137 @@ export class CanvasEditor {
     const sel = this.state.selection;
     if (sel.empty) return null;
     return this.state.doc.textBetween(sel.from, sel.to, "\n");
+  }
+
+  /**
+   * Cancel a pending long-press (finger moved, lifted, or a second touch).
+   */
+  private cancelLongPress(): void {
+    if (this.longPressTimer !== null) {
+      clearTimeout(this.longPressTimer);
+      this.longPressTimer = null;
+    }
+  }
+
+  /** Select the word under a canvas-space point (long-press / double-tap). */
+  private selectWordAt(x: number, y: number): void {
+    const hit = this.clickToPos(this.lastLayouts, x, y);
+    if (!hit) return;
+    const word = this.wordRangeAt(hit.pos);
+    if (!word) {
+      this.setHead(hit.pos, false);
+      this.caretBias = hit.bias;
+      return;
+    }
+    this.dispatch(
+      this.state.tr.setSelection(
+        TextSelection.between(
+          this.state.doc.resolve(word.from),
+          this.state.doc.resolve(word.to),
+        ),
+      ),
+    );
+  }
+
+  /** Move one end of the current selection to `pos`, keeping the other end
+   *  anchored — used by the draggable touch selection handles. */
+  private dragSelectionEnd(which: "from" | "to", pos: number): void {
+    const sel = this.state.selection;
+    const anchor = which === "from" ? sel.to : sel.from;
+    const size = this.state.doc.content.size;
+    this.dispatch(
+      this.state.tr.setSelection(
+        TextSelection.between(
+          this.state.doc.resolve(clamp(anchor, 0, size)),
+          this.state.doc.resolve(clamp(pos, 0, size)),
+        ),
+      ),
+    );
+    this.scheduleRender();
+  }
+
+  /** Lazily build the two selection-handle overlays (touch only). */
+  private ensureHandles(): { from: HTMLElement; to: HTMLElement } {
+    if (this.selHandles) return this.selHandles;
+    const make = (which: "from" | "to"): HTMLElement => {
+      const el = document.createElement("div");
+      Object.assign(el.style, {
+        position: "absolute",
+        width: "20px",
+        height: "20px",
+        marginLeft: "-10px",
+        borderRadius: "50%",
+        background: this.caretColor,
+        border: "2px solid #fff",
+        boxShadow: "0 1px 4px rgba(0,0,0,0.35)",
+        touchAction: "none",
+        zIndex: "4",
+        display: "none",
+      });
+      el.setAttribute("aria-hidden", "true");
+      const signal = this.abortController?.signal;
+      el.addEventListener(
+        "touchstart",
+        (e) => {
+          e.preventDefault();
+          this.draggingHandle = which;
+        },
+        { signal, passive: false },
+      );
+      el.addEventListener(
+        "touchmove",
+        (e) => {
+          if (this.draggingHandle !== which) return;
+          e.preventDefault();
+          const t = e.touches[0];
+          if (!t) return;
+          const { x, y } = this.eventToDocCoords(t);
+          const hit = this.clickToPos(this.lastLayouts, x, y);
+          if (hit) this.dragSelectionEnd(which, hit.pos);
+        },
+        { signal, passive: false },
+      );
+      el.addEventListener(
+        "touchend",
+        (e) => {
+          e.preventDefault();
+          this.draggingHandle = null;
+          this.textarea.focus({ preventScroll: true });
+        },
+        { signal, passive: false },
+      );
+      this.stack.appendChild(el);
+      return el;
+    };
+    this.selHandles = { from: make("from"), to: make("to") };
+    return this.selHandles;
+  }
+
+  /** Position/hide the touch selection handles (called each render). */
+  private syncSelectionHandles(): void {
+    const sel = this.state.selection;
+    const show =
+      this.touchSelection && !sel.empty && sel instanceof TextSelection;
+    if (!show) {
+      if (this.selHandles) {
+        this.selHandles.from.style.display = "none";
+        this.selHandles.to.style.display = "none";
+      }
+      return;
+    }
+    const handles = this.ensureHandles();
+    const place = (el: HTMLElement, pos: number) => {
+      const c = this.posToCoords(this.lastLayouts, pos);
+      if (!c) {
+        el.style.display = "none";
+        return;
+      }
+      el.style.display = "block";
+      el.style.left = `${c.x}px`;
+      el.style.top = `${c.y + c.height}px`;
+    };
+    place(handles.from, sel.from);
+    place(handles.to, sel.to);
   }
 
   /**

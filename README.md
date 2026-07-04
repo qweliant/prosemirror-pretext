@@ -335,6 +335,7 @@ editor needs to implement.
 ### Input
 
 - [x] **Rich paste** — `text/html` parsed through the schema's `parseDOM` rules (marks/headings/blocks survive); plain text splits blank lines into paragraphs
+- [x] **Touch input (mobile)** — tap places the caret and raises the keyboard; long-press selects a word and shows draggable **selection handles** (drag to extend); swipe scrolls natively (`touch-action: pan-y`); the caret is kept above the on-screen keyboard (`visualViewport`-aware). Mouse/touch/pen are unified. Not yet: an iOS-style magnifier loupe, double/triple-tap selection
 - [ ] **Drag & drop** — move nodes, drop images
 
 ## Architecture

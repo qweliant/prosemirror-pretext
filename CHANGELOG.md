@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.0
+
+### Added
+
+- **Touch input.** The editor is now usable on phones and tablets:
+  - **Tap** places the caret and raises the on-screen keyboard.
+  - **Long-press** selects the word under your finger and shows draggable
+    **selection handles**; drag a handle (or keep dragging after the long-press)
+    to extend the selection.
+  - **Swipe** scrolls natively (`touch-action: pan-y`), with no tap delay.
+  - Input is unified across mouse, touch, and pen; taps `preventDefault` the
+    synthesized mouse events so there's no double-handling.
+  - When the on-screen keyboard opens, the caret is scrolled into view
+    (`visualViewport`-aware).
+
+  Not yet: an iOS-style magnifier loupe, and double/triple-tap selection.
+
 ## 0.1.4
 
 ### Changed
