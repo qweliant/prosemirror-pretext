@@ -10,7 +10,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link rel="stylesheet"
-        href="https://fonts.googleapis.com/css2?family=Mochiy+Pop+P+One&family=M+PLUS+Rounded+1c:wght@400;500;700;800&family=Inter:wght@400;500;600;700&display=swap" />
+        href="https://fonts.googleapis.com/css2?family=Mochiy+Pop+P+One&family=M+PLUS+Rounded+1c:wght@400;500;700;800&family=Nunito:ital,wght@0,400;0,600;0,700;0,800;1,400&family=DM+Mono:wght@400;500&display=swap" />
     <style>
         :root {
             --frog: #7ec14b;
@@ -23,19 +23,25 @@
             --pond-deep: #46a8d8;
             --sky: #e7faf0;
             --sun: #ffe066;
-            --ink: #2b4a1e;
+            --ink: #33502a;
             --round: "M PLUS Rounded 1c", system-ui, sans-serif;
             --pop: "Mochiy Pop P One", system-ui, sans-serif;
+            /* Warm humanist for reading, a friendly mono for code — less clinical
+               than Inter + the default monospace fallback. */
+            --body: "Nunito", "M PLUS Rounded 1c", system-ui, sans-serif;
+            --mono: "DM Mono", ui-monospace, "SF Mono", monospace;
         }
 
         * { box-sizing: border-box; margin: 0; padding: 0; }
         html { scroll-behavior: smooth; }
 
         body {
-            font-family: var(--round);
+            font-family: var(--body);
             color: var(--ink);
             background: linear-gradient(180deg, var(--sky) 0%, #f3fcf6 40%, #eef9f2 100%) fixed;
-            line-height: 1.6;
+            line-height: 1.65;
+            letter-spacing: .1px;
+            -webkit-font-smoothing: antialiased;
             overflow-x: hidden;
         }
 
@@ -81,8 +87,8 @@
         .btn.ghost { background: #fff; color: var(--frog-dark); }
 
         code.inline {
-            font-family: "Inter", monospace; background: #fff; border: 1.5px dashed var(--pond-deep);
-            border-radius: 7px; padding: 1px 7px; color: var(--pond-deep); font-weight: 600; font-size: .92em;
+            font-family: var(--mono); background: #fff; border: 1.5px dashed var(--pond-deep);
+            border-radius: 7px; padding: 1px 7px; color: var(--pond-deep); font-weight: 500; font-size: .9em;
         }
 
         section { position: relative; z-index: 1; padding: 28px 0; }
@@ -98,7 +104,7 @@
             box-shadow: inset 0 4px 16px rgba(0,0,0,.14), 0 12px 30px rgba(70,168,216,.28); position: relative;
         }
         .pond-frame::before {
-            content: "🪷 live — type, format, drag a photo to float it";
+            content: "🪷 live — type or tap in, format, drag a photo to float";
             position: absolute; top: -15px; left: 50%; transform: translateX(-50%); white-space: nowrap;
             font-family: var(--pop); font-size: 12px; background: var(--sun); color: #6b5400;
             border: 2.5px solid var(--frog-dark); border-radius: 999px; padding: 4px 14px;
@@ -132,7 +138,7 @@
 
         .mirror-peek {
             margin-top: 14px; background: #14361f; color: #cdebd2; border: 3px solid var(--frog-dark);
-            border-radius: 16px; padding: 14px 16px; font-family: "Inter", monospace; font-size: 12px; line-height: 1.55;
+            border-radius: 16px; padding: 14px 16px; font-family: var(--mono); font-size: 12px; line-height: 1.6;
             white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow: auto;
         }
         .mirror-peek b { color: var(--frog); }
@@ -158,7 +164,7 @@
 
         pre.code {
             background: #14361f; color: #d8ffd0; border: 3px solid var(--frog-dark); border-radius: 16px;
-            padding: 18px 20px; overflow-x: auto; font-family: "Inter", ui-monospace, monospace; font-size: 13px; line-height: 1.7;
+            padding: 18px 20px; overflow-x: auto; font-family: var(--mono); font-size: 13px; line-height: 1.7;
         }
         pre.code .k { color: #8ed64b; } pre.code .s { color: #ffd479; } pre.code .c { color: #7fae8a; font-style: italic; }
 
@@ -178,7 +184,7 @@
         footer a { color: var(--pond-deep); font-weight: 700; }
         .note { font-size: 12.5px; color: #6b8b5c; max-width: 640px; margin: 12px auto 0; }
     </style>
-  <script type="module" crossorigin src="/prosemirror-pretext/assets/index-0jiOs04U.js"></script>
+  <script type="module" crossorigin src="/prosemirror-pretext/assets/index-BXgOuGJe.js"></script>
 </head>
 
 <body>

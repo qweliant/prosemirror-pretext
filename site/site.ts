@@ -49,9 +49,11 @@ const hl = (s: string) => schema.text(s, [schema.marks['highlight'].create(null)
 const li = (...inline: PMNode[]) => schema.node('list_item', null, [schema.node('paragraph', null, inline)])
 const liNest = (text: string, nested: PMNode) => schema.node('list_item', null, [schema.node('paragraph', null, [schema.text(text)]), nested])
 
+// Keep the floated photo from eating the whole column on a phone.
+const FLOAT_W = Math.max(150, Math.min(220, Math.round((typeof window !== 'undefined' ? window.innerWidth : 900) * 0.42)))
 const doc = schema.node('doc', null, [
     schema.node('heading', { level: 1 }, [schema.text('hello from the pond 🐸')]),
-    schema.node('image', { src: photo('pondlily', 220, 150), alt: 'a calm pond', x: 0, y: 120, width: 220 }),
+    schema.node('image', { src: photo('pondlily', FLOAT_W, Math.round(FLOAT_W * 0.68)), alt: 'a calm pond', x: 0, y: 120, width: FLOAT_W }),
     schema.node('paragraph', null, [
         m('Every glyph here is painted by '), m('ctx.fillText()', 'code'),
         m(' — no contenteditable. The photo to the left is a real '), m('image node', 'em'),
@@ -154,10 +156,16 @@ async function boot(): Promise<void> {
         }
         return decos
     }
+    const embed = document.getElementById('editor-embed')!
+    // Fit the phone/tablet screen instead of overflowing at a fixed 600px.
+    const editorWidth = Math.max(
+        280,
+        Math.min(600, embed.clientWidth || window.innerWidth - 80),
+    )
     const editor = new CanvasEditor({
         state: EditorState.create({ doc, schema, plugins: [history()] }),
-        container: document.getElementById('editor-embed')!,
-        width: 600, font: EDITOR_FONT,
+        container: embed,
+        width: editorWidth, font: EDITOR_FONT,
         ariaLabel: 'prosemirror-pretext live demo',
         keymap: { ...buildMarkKeymap(schema), 'Mod-z': undo, 'Mod-y': redo, 'Shift-Mod-z': redo },
         nodeViews: { image: imageView },
