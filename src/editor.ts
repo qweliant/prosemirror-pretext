@@ -52,6 +52,9 @@ import {
     HEADING_SCALE, DEFAULT_MARK_STYLES, LIST_INDENT, MARKER_PAD,
     FOCUSABLE_SEL, SR_ONLY, DRAG_THRESHOLD_PX,
 } from './constants'
+import {
+    isRuleNode, isListNode, isOrderedList, isLeafBlock, collectBlocks, isDocEmpty,
+} from './layout/blocks'
 
 // The public types live in ./types but are re-exported here so `src/index.ts`
 // and existing `from './editor'` imports keep resolving unchanged.
@@ -129,6 +132,11 @@ export class CanvasEditor {
 
   // ─── Node views (atom blocks) ──────────────────────────────────────
   private readonly nodeViews: Record<string, NodeViewFn>;
+  // The one thing ./layout/blocks needs from the editor: which node types
+  // render as a view. Bound once so the walk isn't rebuilding a closure per
+  // block — collectBlocks recurses over the whole document.
+  private readonly hasNodeView = (typeName: string): boolean =>
+    !!this.nodeViews[typeName];
   // Mounted views keyed by node identity (stable across unrelated edits).
   private readonly mountedViews = new Map<PMNode, MountedView>();
   // Measured heights so layout can reserve space for each atom block.
@@ -2046,39 +2054,26 @@ export class CanvasEditor {
   }
 
   /** A leaf block conventionally rendered as a horizontal rule. */
+  // Document-structure predicates and the tree->flat-list walk live in
+  // ./layout/blocks as free functions; these forward so call sites (and the
+  // test suite, which reaches for them) keep one spelling.
+
   private isRuleNode(node: PMNode): boolean {
-    const n = node.type.name;
-    return n === "horizontal_rule" || n === "hr";
+    return isRuleNode(node);
   }
 
   private isListNode(node: PMNode): boolean {
-    const n = node.type.name;
-    return (
-      n === "bullet_list" ||
-      n === "ordered_list" ||
-      n === "bulletList" ||
-      n === "orderedList"
-    );
+    return isListNode(node);
   }
 
   private isOrderedList(node: PMNode): boolean {
-    const n = node.type.name;
-    return n === "ordered_list" || n === "orderedList";
+    return isOrderedList(node);
   }
 
   private isLeafBlock(node: PMNode): boolean {
-    return (
-      !node.isTextblock &&
-      (!!this.nodeViews[node.type.name] || this.isRuleNode(node))
-    );
+    return isLeafBlock(node, this.hasNodeView);
   }
 
-  /**
-   * Flatten the document tree into block descriptors in document order. Lists
-   * recurse: each item's blocks carry a per-level indent, and the item's first
-   * block gets the bullet/number marker. Non-list containers recurse without
-   * indent. The flat (no-list) case yields exactly the top-level blocks.
-   */
   private collectBlocks(
     node: PMNode,
     contentStart: number,
@@ -2086,64 +2081,12 @@ export class CanvasEditor {
     marker: BlockDesc["marker"],
     out: BlockDesc[],
   ): void {
-    let pending = marker;
-    node.forEach((child, offset) => {
-      const pos = contentStart + offset;
-      if (this.isListNode(child)) {
-        const ordered = this.isOrderedList(child);
-        let n = ordered
-          ? ((child.attrs["order"] as number) ??
-            (child.attrs["start"] as number) ??
-            1)
-          : 0;
-        const markerX = depth * LIST_INDENT + MARKER_PAD;
-        child.forEach((item, itemOffset) => {
-          const itemPos = pos + 1 + itemOffset;
-          const text = ordered ? `${n}.` : "•";
-          this.collectBlocks(
-            item,
-            itemPos + 1,
-            depth + 1,
-            { text, x: markerX },
-            out,
-          );
-          n++;
-        });
-        pending = null;
-      } else if (child.isTextblock) {
-        out.push({
-          node: child,
-          pos,
-          indent: depth * LIST_INDENT,
-          marker: pending,
-          leaf: false,
-        });
-        pending = null;
-      } else if (this.isLeafBlock(child)) {
-        out.push({
-          node: child,
-          pos,
-          indent: depth * LIST_INDENT,
-          marker: pending,
-          leaf: true,
-        });
-        pending = null;
-      } else if (child.isBlock) {
-        // A generic block container (e.g. nesting blockquote): descend.
-        this.collectBlocks(child, pos + 1, depth, pending, out);
-        pending = null;
-      }
-    });
+    collectBlocks(node, contentStart, depth, marker, out, this.hasNodeView);
   }
 
   /** True when the document is a single empty text block. */
   private isDocEmpty(): boolean {
-    const doc = this.state.doc;
-    return (
-      doc.childCount === 1 &&
-      !!doc.firstChild?.isTextblock &&
-      doc.firstChild.content.size === 0
-    );
+    return isDocEmpty(this.state.doc);
   }
 
   /** Underline / strikethrough lines for a run, in the current fill color. */
