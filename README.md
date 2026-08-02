@@ -332,9 +332,14 @@ flush the hidden DOM mirror.
 
 ```bash
 bun install
-bun run dev          # the standalone playground (index.html + demo/)
-bun run dev:site     # the kawaii docs site with an embedded live editor (site/)
+bun run dev          # → redirects to the same demo, served from the repo root
+bun run dev:site     # the kawaii docs site with the live editor (site/)
 ```
+
+There is one demo, in `site/`: the landing page, the live editor, an interactive
+node view, decorations, the screen-reader mirror, and a scroll-virtualization
+lab that mounts up to 8,000 blocks with `maxHeight` and measures the
+per-keystroke cost in-page.
 
 ## Docs site (GitHub Pages)
 
