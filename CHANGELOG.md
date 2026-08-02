@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- Clicking the text beside a floated node no longer puts the caret before the
+  float. Hit-testing matched a block on its vertical band alone, and a float
+  owns a band but only part of the width — so every click on the text flowing
+  next to it resolved to the float instead. Blocks with a `floatRect` are now
+  narrowed by x as well as y, in both `posAtCoords` (including the `inside`
+  it reports) and internal click mapping. In-flow blocks span the full column
+  and are unaffected.
+
 - A node view's container no longer swallows input meant for the content behind
   it. The container's box is often larger than the node view inside it (an
   in-flow image narrower than the column, a floated node, an atom's reserved

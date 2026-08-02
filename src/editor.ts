@@ -1021,7 +1021,12 @@ export class CanvasEditor {
     if (!hit) return null;
     let inside = -1;
     for (const b of this.lastLayouts) {
-      if (b.isAtom && y >= b.yOffset && y <= b.yOffset + b.height) {
+      if (
+        b.isAtom &&
+        y >= b.yOffset &&
+        y <= b.yOffset + b.height &&
+        this.claimsX(b, x)
+      ) {
         inside = b.pmStartPos;
         break;
       }
@@ -2738,6 +2743,19 @@ export class CanvasEditor {
     };
   }
 
+  /**
+   * Whether a block owns the given x within its vertical band. In-flow blocks
+   * span the full column, so they always do. A floated node is the exception:
+   * it occupies a band but only part of the width, and text flows beside it at
+   * the same y — so claiming the whole band would put the caret before the
+   * float every time you clicked the text next to it.
+   */
+  private claimsX(b: BlockLayout, canvasX: number): boolean {
+    const fr = b.floatRect;
+    if (!fr) return true;
+    return canvasX >= fr.x && canvasX < fr.x + fr.width;
+  }
+
   private clickToPos(
     layouts: BlockLayout[],
     canvasX: number,
@@ -2748,6 +2766,7 @@ export class CanvasEditor {
     let block: BlockLayout | null = null;
     for (const b of layouts) {
       if (canvasY >= b.yOffset && canvasY < b.yOffset + b.height) {
+        if (!this.claimsX(b, canvasX)) continue;
         block = b;
         break;
       }
@@ -2759,6 +2778,7 @@ export class CanvasEditor {
       // click or drag crossed the gap between two paragraphs.
       let bestDist = Infinity;
       for (const b of layouts) {
+        if (!this.claimsX(b, canvasX)) continue;
         const dist =
           canvasY < b.yOffset
             ? b.yOffset - canvasY

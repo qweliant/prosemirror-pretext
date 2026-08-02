@@ -1471,6 +1471,69 @@ describe('floating nodes (text wrap)', () =>
         expect((e as any).activeFloats.length).toBe(0)
         e.destroy()
     })
+
+    // A float shares its vertical band with the text flowing beside it, so
+    // hit-testing has to narrow by x as well as y — see claimsX.
+    describe('hit-testing beside a float', () =>
+    {
+        // Float parked on the right: x 200..300, y 0..40 (defaultAtomHeight).
+        // Text wraps into the slot to its left.
+        function floated()
+        {
+            const doc = schema.node('doc', null, [
+                schema.node('widget'),
+                schema.node('paragraph', null, [schema.text('hello world beside the float')]),
+            ])
+            return mk(doc, (n: any) => n.type.name === 'widget'
+                ? { x: 200, y: 0, width: 100 }
+                : null)
+        }
+
+        test('a click left of the float lands in the text, not before the float', () =>
+        {
+            const e = floated()
+            const ls = (e as any).lastLayouts as any[]
+            const para = ls.find((b) => b.type === 'paragraph')
+            // x=10 is squarely over paragraph text; y=5 is inside the float's band.
+            const hit = (e as any).clickToPos(ls, 10, 5)
+            expect(hit.pos).toBeGreaterThanOrEqual(para.pmStartPos)
+            e.destroy()
+        })
+
+        test('a click on the float itself still selects the float', () =>
+        {
+            const e = floated()
+            const ls = (e as any).lastLayouts as any[]
+            const w = ls.find((b) => b.type === 'widget')
+            const hit = (e as any).clickToPos(ls, 250, 5)
+            expect(hit.pos).toBe(w.pmStartPos)
+            e.destroy()
+        })
+
+        test('posAtCoords reports `inside` only when the point is over the float', () =>
+        {
+            const e = floated()
+            const w = ((e as any).lastLayouts as any[]).find((b) => b.type === 'widget')
+            expect(e.posAtCoords({ left: 250, top: 5 })?.inside).toBe(w.pmStartPos)
+            expect(e.posAtCoords({ left: 10, top: 5 })?.inside).toBe(-1)
+            e.destroy()
+        })
+
+        test('an in-flow atom still claims its whole band', () =>
+        {
+            const doc = schema.node('doc', null, [
+                schema.node('widget'),
+                schema.node('paragraph', null, [schema.text('below')]),
+            ])
+            const e = mk(doc, () => null)
+            const ls = (e as any).lastLayouts as any[]
+            const w = ls.find((b) => b.type === 'widget')
+            // No floatRect → full-width, so any x in the band hits it.
+            expect((e as any).clickToPos(ls, 5, 5).pos).toBe(w.pmStartPos)
+            expect((e as any).clickToPos(ls, 400, 5).pos).toBe(w.pmStartPos)
+            e.destroy()
+        })
+    })
 })
 
 
