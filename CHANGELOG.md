@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- A node view's container no longer swallows input meant for the content behind
+  it. The container's box is often larger than the node view inside it (an
+  in-flow image narrower than the column, a floated node, an atom's reserved
+  height), and that empty area was absorbing clicks, drags, and hovers aimed at
+  the text — or another node — underneath. The container is now
+  `pointer-events: none` and only the node view's own element is interactive, so
+  node selection is bound to the view element rather than the container.
+
 ## 0.2.0
 
 ### Added

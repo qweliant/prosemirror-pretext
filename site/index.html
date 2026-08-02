@@ -97,49 +97,76 @@
         .sub { text-align: center; color: var(--frog-dark); font-weight: 500; margin-bottom: 20px; }
         .lilies { text-align: center; font-size: 22px; letter-spacing: 12px; padding: 4px 0; user-select: none; }
 
-        /* ── Embedded editor ─────────────────────────────────────────────── */
-        .pond-frame {
-            background: linear-gradient(180deg, var(--pond) 0%, var(--pond-deep) 100%);
-            border: 4px solid var(--frog-dark); border-radius: 26px; padding: 15px;
-            box-shadow: inset 0 4px 16px rgba(0,0,0,.14), 0 12px 30px rgba(70,168,216,.28); position: relative;
+        /* ── Embedded editor — clean, professional surface ───────────────── */
+        .editor-shell {
+            max-width: 720px; margin: 0 auto; background: #fff;
+            border: 1px solid #e2eed7; border-radius: 20px; overflow: hidden;
+            box-shadow: 0 14px 40px rgba(47,110,28,.10), 0 2px 8px rgba(47,110,28,.06);
         }
-        .pond-frame::before {
-            content: "🪷 live — type or tap in, format, drag a photo to float";
-            position: absolute; top: -15px; left: 50%; transform: translateX(-50%); white-space: nowrap;
-            font-family: var(--pop); font-size: 12px; background: var(--sun); color: #6b5400;
-            border: 2.5px solid var(--frog-dark); border-radius: 999px; padding: 4px 14px;
+        .editor-shell .brow {
+            display: flex; align-items: center; gap: 9px; padding: 12px 16px;
+            border-bottom: 1px solid #eef5e8; font: 700 12.5px var(--body); color: var(--frog-dark);
         }
-        .editor-card { background: #fff; border-radius: 16px; padding: 16px; overflow: hidden; }
-        #embed-toolbar { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 12px; }
+        .editor-shell .brow .live-dot {
+            width: 8px; height: 8px; border-radius: 50%; background: var(--frog);
+            box-shadow: 0 0 0 3px rgba(126,193,75,.22); flex: 0 0 auto;
+        }
+        .editor-shell .brow .hint { margin-left: auto; color: #9fb090; font-weight: 500; font-size: 11.5px; }
+        @media (max-width: 560px) { .editor-shell .brow .hint { display: none; } }
+
+        /* one quiet, scrollable row of grouped icon buttons */
+        #embed-toolbar {
+            display: flex; align-items: center; gap: 2px; padding: 7px 8px;
+            border-bottom: 1px solid #eef5e8; background: #fbfff5;
+            overflow-x: auto; scrollbar-width: none;
+            -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%);
+                    mask-image: linear-gradient(90deg, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%);
+        }
+        #embed-toolbar::-webkit-scrollbar { display: none; }
         #embed-toolbar .tb {
-            font-family: var(--round); font-weight: 700; min-width: 32px; height: 29px; padding: 0 9px;
-            border: 2px solid var(--frog-deep); border-radius: 9px; background: #f4fff0; color: var(--frog-dark); cursor: pointer; font-size: 13px;
+            flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+            width: 34px; height: 34px; padding: 0; border: 0; border-radius: 9px; cursor: pointer;
+            background: transparent; color: #3f5a30; font: 800 13px var(--body);
         }
-        #embed-toolbar .tb:hover { background: #e3ffd6; }
+        #embed-toolbar .tb svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+        #embed-toolbar .tb:hover { background: #eaf7df; color: var(--frog-dark); }
         #embed-toolbar .tb.active { background: var(--frog); color: #fff; }
-        #embed-toolbar .sep { width: 2px; background: #d7eccb; margin: 2px 3px; }
+        #embed-toolbar .tb .tb-i { font-style: italic; } #embed-toolbar .tb .tb-u { text-decoration: underline; } #embed-toolbar .tb .tb-s { text-decoration: line-through; }
+        #embed-toolbar .sep { flex: 0 0 auto; width: 1px; height: 20px; background: #e0ecd4; margin: 0 6px; }
+        @media (max-width: 640px) { #embed-toolbar .tb { width: 40px; height: 40px; } }
 
-        .stats-bar {
-            display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: space-between;
-            margin-top: 12px; padding: 8px 6px 2px; color: #eafff2; font-size: 13px; font-weight: 600;
-        }
-        .stats-bar .mini-btn {
-            font-family: var(--round); font-weight: 700; font-size: 12.5px; cursor: pointer;
-            background: rgba(255,255,255,.92); border: 2px solid var(--frog-dark); color: var(--frog-dark);
-            border-radius: 999px; padding: 4px 12px;
-        }
-        .stats-bar .mini-btn.on { background: var(--sun); }
-        .stats-bar .search {
-            font-family: var(--round); font-weight: 600; font-size: 12.5px;
-            border: 2px solid var(--frog-dark); border-radius: 999px; padding: 4px 12px;
-            background: #fff; color: var(--ink); width: 200px; max-width: 40vw;
-        }
-        #render-stats .reflow { color: #d8ffe0; }
+        .editor-card { padding: 8px 10px 12px; overflow: hidden; }
 
+        /* ── Under the hood (collapsible engineering proof) ──────────────── */
+        .under-hood { max-width: 720px; margin: 16px auto 0; }
+        .under-hood > summary {
+            cursor: pointer; list-style: none; display: inline-flex; align-items: center; gap: 8px;
+            font: 700 13px var(--body); color: var(--frog-dark); padding: 8px 15px; border-radius: 999px;
+            background: #fff; border: 1.5px solid #d7ecc9; user-select: none;
+        }
+        .under-hood > summary::-webkit-details-marker { display: none; }
+        .under-hood > summary::before { content: "▸"; color: var(--frog-deep); font-size: 11px; }
+        .under-hood[open] > summary::before { content: "▾"; }
+        .under-hood[open] > summary { background: #eaf7df; }
+        .hood-body {
+            margin-top: 12px; background: #fff; border: 1.5px solid #e2eed7; border-radius: 16px;
+            padding: 15px 16px; display: flex; flex-direction: column; gap: 12px;
+        }
+        .hood-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+        #render-stats { font: 600 12.5px var(--mono); color: var(--frog-dark); }
+        #render-stats .reflow { color: var(--frog-deep); }
+        .hood-body .search {
+            font: 500 13px var(--body); border: 1.5px solid #d7ecc9; border-radius: 999px;
+            padding: 7px 13px; background: #fbfff5; color: var(--ink); flex: 1 1 180px; min-width: 150px;
+        }
+        .hood-body .mini-btn {
+            font: 700 12.5px var(--body); cursor: pointer; background: #fff; border: 1.5px solid #d7ecc9;
+            color: var(--frog-dark); border-radius: 999px; padding: 7px 13px;
+        }
+        .hood-body .mini-btn.on { background: var(--sun); border-color: #e6c84a; }
         .mirror-peek {
-            margin-top: 14px; background: #14361f; color: #cdebd2; border: 3px solid var(--frog-dark);
-            border-radius: 16px; padding: 14px 16px; font-family: var(--mono); font-size: 12px; line-height: 1.6;
-            white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow: auto;
+            margin: 0; background: #14361f; color: #cdebd2; border-radius: 12px; padding: 12px 14px;
+            font: 12px/1.6 var(--mono); white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto;
         }
         .mirror-peek b { color: var(--frog); }
 
@@ -217,26 +244,34 @@
     <!-- ── Live editor (shows every feature) ───────────────────────────── -->
     <section id="try">
         <div class="wrap">
-            <div class="pond-frame">
+            <div class="editor-shell">
+                <div class="brow">
+                    <span class="live-dot"></span> live editor
+                    <span class="hint">type or tap in · long-press to select · drag a photo to float it</span>
+                </div>
                 <div id="embed-toolbar"></div>
                 <div class="editor-card">
                     <div id="editor-embed"></div>
                 </div>
-                <div class="stats-bar">
-                    <input id="search" class="search" placeholder="🔍 highlight text… (decorations!)" />
-                    <span id="render-stats">measuring…</span>
-                    <span style="display:flex;gap:8px">
+            </div>
+
+            <details class="under-hood">
+                <summary>under the hood</summary>
+                <div class="hood-body">
+                    <div class="hood-row"><span id="render-stats">measuring…</span></div>
+                    <div class="hood-row">
+                        <input id="search" class="search" placeholder="find &amp; highlight text…" />
                         <button id="collab-toggle" class="mini-btn">👥 collaborator</button>
                         <button id="readonly-toggle" class="mini-btn">🔒 read-only</button>
                         <button id="mirror-toggle" class="mini-btn">🦻 screen-reader view</button>
-                    </span>
+                    </div>
+                    <pre id="mirror-peek" class="mirror-peek" hidden></pre>
                 </div>
-            </div>
-            <pre id="mirror-peek" class="mirror-peek" hidden></pre>
-            <p class="sub" style="margin-top:14px">Headings · <b>bold</b>/<i>italic</i>/<code
-                    class="inline">code</code>/links/<u>underline</u>/strike/super·sub/color/highlight · lists (nested,
-                ordered) · blockquote · code block · rule · alignment · images (drag to float, drag corner to resize) ·
-                gap cursor · rich paste · undo/redo</p>
+            </details>
+
+            <p class="sub" style="margin-top:16px">Headings · <b>bold</b>/<i>italic</i>/<code
+                    class="inline">code</code>/links/<u>underline</u>/strike/color/highlight · lists · blockquote · code
+                block · alignment · images that float · rich paste · undo/redo — and it all works on touch.</p>
         </div>
     </section>
 

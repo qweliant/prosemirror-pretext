@@ -10,8 +10,30 @@ import { history, undo, redo } from 'prosemirror-history'
 import { wrapInList, liftListItem } from 'prosemirror-schema-list'
 import { CanvasEditor, markSpecs, buildMarkKeymap, Decoration, type RenderStats, type Decoration as Deco } from '../src'
 
-const EDITOR_FONT = '17px "M PLUS Rounded 1c", system-ui, sans-serif'
+// A clean editorial serif for the writing surface — reads like a real editor,
+// not a toy (the playful rounded fonts stay in the page chrome around it).
+const EDITOR_FONT = '17px Georgia, "Times New Roman", serif'
 const photo = (seed: string, w: number, h: number) => `https://picsum.photos/seed/${seed}/${w}/${h}`
+
+// Clean line icons (Lucide-style) for the toolbar. Bold/italic/underline/strike
+// and H1/H2 stay as styled text; everything else is an icon.
+const ICONS: Record<string, string> = {
+    code: '<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>',
+    link: '<path d="M9 17H7A5 5 0 0 1 7 7h2"/><path d="M15 7h2a5 5 0 1 1 0 10h-2"/><line x1="8" y1="12" x2="16" y2="12"/>',
+    highlight: '<path d="m9 11-6 6v3h9l3-3"/><path d="m22 12-4.6 4.6a2 2 0 0 1-2.8 0l-5.2-5.2a2 2 0 0 1 0-2.8L14 4"/>',
+    quote: '<line x1="4" y1="5" x2="4" y2="19"/><line x1="9" y1="7" x2="20" y2="7"/><line x1="9" y1="12" x2="20" y2="12"/><line x1="9" y1="17" x2="16" y2="17"/>',
+    codeblock: '<rect x="3" y="4" width="18" height="16" rx="2"/><polyline points="9 9 7 12 9 15"/><polyline points="15 9 17 12 15 15"/>',
+    list: '<line x1="9" y1="6" x2="20" y2="6"/><line x1="9" y1="12" x2="20" y2="12"/><line x1="9" y1="18" x2="20" y2="18"/><circle cx="4.5" cy="6" r="1.1" fill="currentColor" stroke="none"/><circle cx="4.5" cy="12" r="1.1" fill="currentColor" stroke="none"/><circle cx="4.5" cy="18" r="1.1" fill="currentColor" stroke="none"/>',
+    listOrdered: '<line x1="10" y1="6" x2="20" y2="6"/><line x1="10" y1="12" x2="20" y2="12"/><line x1="10" y1="18" x2="20" y2="18"/><text x="2" y="8.2" font-size="7" fill="currentColor" stroke="none">1</text><text x="2" y="14.2" font-size="7" fill="currentColor" stroke="none">2</text><text x="2" y="20.2" font-size="7" fill="currentColor" stroke="none">3</text>',
+    alignLeft: '<line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="15" y2="12"/><line x1="3" y1="18" x2="18" y2="18"/>',
+    alignCenter: '<line x1="3" y1="6" x2="21" y2="6"/><line x1="6" y1="12" x2="18" y2="12"/><line x1="5" y1="18" x2="19" y2="18"/>',
+    alignRight: '<line x1="3" y1="6" x2="21" y2="6"/><line x1="9" y1="12" x2="21" y2="12"/><line x1="6" y1="18" x2="21" y2="18"/>',
+    image: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.6"/><path d="m21 15-5-5L5 21"/>',
+    rule: '<line x1="3" y1="12" x2="21" y2="12"/>',
+    undo: '<path d="M9 14 4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-1"/>',
+    redo: '<path d="m15 14 5-5-5-5"/><path d="M20 9H9a5 5 0 0 0 0 10h1"/>',
+}
+const icon = (name: string) => `<svg viewBox="0 0 24 24" aria-hidden="true">${ICONS[name]}</svg>`
 
 // ── Schema (the full set of node types the editor supports) ──────────────────
 const nodes: Record<string, NodeSpec> = {
@@ -179,39 +201,42 @@ async function boot(): Promise<void> {
     })
     ;(window as any).editor = editor
 
-    // ── Toolbar ──
+    // ── Toolbar (grouped icon buttons) ──
     const bar = document.getElementById('embed-toolbar')!
     const items: { el: HTMLButtonElement, on: () => boolean }[] = []
-    const add = (label: string, cmd: Command, on: () => boolean = () => false) => {
-        const el = document.createElement('button'); el.className = 'tb'; el.textContent = label
+    const add = (inner: string, aria: string, cmd: Command, on: () => boolean = () => false) => {
+        const el = document.createElement('button'); el.className = 'tb'; el.innerHTML = inner
+        el.title = aria; el.setAttribute('aria-label', aria)
         el.addEventListener('mousedown', (e) => { e.preventDefault(); editor.command(cmd) })
         bar.appendChild(el); items.push({ el, on })
     }
     const sep = () => { const s = document.createElement('span'); s.className = 'sep'; bar.appendChild(s) }
     const mk = (n: string) => schema.marks[n]
-    add('B', toggleMark(mk('strong')), () => markActive(editor.state, mk('strong')))
-    add('I', toggleMark(mk('em')), () => markActive(editor.state, mk('em')))
-    add('U', toggleMark(mk('underline')), () => markActive(editor.state, mk('underline')))
-    add('S̶', toggleMark(mk('strikethrough')), () => markActive(editor.state, mk('strikethrough')))
-    add('</>', toggleMark(mk('code')), () => markActive(editor.state, mk('code')))
-    add('🔗', linkCmd, () => markActive(editor.state, mk('link')))
-    add('🖍', toggleMark(mk('highlight')), () => markActive(editor.state, mk('highlight')))
+    add('<span class="tb-b">B</span>', 'Bold', toggleMark(mk('strong')), () => markActive(editor.state, mk('strong')))
+    add('<span class="tb-i">I</span>', 'Italic', toggleMark(mk('em')), () => markActive(editor.state, mk('em')))
+    add('<span class="tb-u">U</span>', 'Underline', toggleMark(mk('underline')), () => markActive(editor.state, mk('underline')))
+    add('<span class="tb-s">S</span>', 'Strikethrough', toggleMark(mk('strikethrough')), () => markActive(editor.state, mk('strikethrough')))
+    add(icon('code'), 'Inline code', toggleMark(mk('code')), () => markActive(editor.state, mk('code')))
+    add(icon('link'), 'Link', linkCmd, () => markActive(editor.state, mk('link')))
+    add(icon('highlight'), 'Highlight', toggleMark(mk('highlight')), () => markActive(editor.state, mk('highlight')))
     sep()
-    add('H1', toggleBlock('heading', { level: 1 }), () => blockActive(editor.state, 'heading', { level: 1 }))
-    add('H2', toggleBlock('heading', { level: 2 }), () => blockActive(editor.state, 'heading', { level: 2 }))
-    add('❝', toggleBlock('blockquote'), () => blockActive(editor.state, 'blockquote'))
-    add('{ }', toggleBlock('code_block'), () => blockActive(editor.state, 'code_block'))
-    add('•', toggleList('bullet_list'), () => inList(editor.state, 'bullet_list'))
-    add('1.', toggleList('ordered_list'), () => inList(editor.state, 'ordered_list'))
+    add('H1', 'Heading 1', toggleBlock('heading', { level: 1 }), () => blockActive(editor.state, 'heading', { level: 1 }))
+    add('H2', 'Heading 2', toggleBlock('heading', { level: 2 }), () => blockActive(editor.state, 'heading', { level: 2 }))
+    add(icon('quote'), 'Blockquote', toggleBlock('blockquote'), () => blockActive(editor.state, 'blockquote'))
+    add(icon('codeblock'), 'Code block', toggleBlock('code_block'), () => blockActive(editor.state, 'code_block'))
     sep()
-    add('⇤', setAlign(null), () => false)
-    add('↔', setAlign('center'), () => false)
-    add('⇥', setAlign('right'), () => false)
+    add(icon('list'), 'Bulleted list', toggleList('bullet_list'), () => inList(editor.state, 'bullet_list'))
+    add(icon('listOrdered'), 'Numbered list', toggleList('ordered_list'), () => inList(editor.state, 'ordered_list'))
     sep()
-    add('🖼', insertImage)
-    add('─', insertHr)
-    add('↩︎', undo)
-    add('↪︎', redo)
+    add(icon('alignLeft'), 'Align left', setAlign(null))
+    add(icon('alignCenter'), 'Align center', setAlign('center'))
+    add(icon('alignRight'), 'Align right', setAlign('right'))
+    sep()
+    add(icon('image'), 'Insert image', insertImage)
+    add(icon('rule'), 'Divider', insertHr)
+    sep()
+    add(icon('undo'), 'Undo', undo)
+    add(icon('redo'), 'Redo', redo)
     sync = () => { for (const { el, on } of items) el.classList.toggle('active', on()) }
     sync()
 
@@ -287,16 +312,57 @@ function imageView(node: PMNode, getPos: () => number): HTMLElement {
     const img = document.createElement('img')
     img.src = node.attrs['src'] as string
     img.alt = (node.attrs['alt'] as string) ?? ''
-    img.style.cssText = 'display:block;max-width:100%;border-radius:12px;cursor:grab;box-shadow:0 4px 14px rgba(0,0,0,.18)'
+    // touch-action:none lets a finger-drag reposition the photo (float) instead
+    // of scrolling the page — this is what was broken on phones.
+    img.style.cssText = 'display:block;max-width:100%;border-radius:12px;cursor:grab;box-shadow:0 4px 14px rgba(0,0,0,.18);touch-action:none'
     if (node.attrs['width']) img.style.width = `${node.attrs['width']}px`
     wrap.appendChild(img)
 
     const handle = document.createElement('div')
-    handle.style.cssText = 'position:absolute;right:-6px;bottom:-6px;width:16px;height:16px;border-radius:50%;background:#a5b4fc;border:2px solid #fff;cursor:nwse-resize;box-shadow:0 1px 4px rgba(0,0,0,.3);touch-action:none'
+    handle.style.cssText = 'position:absolute;right:-6px;bottom:-6px;width:18px;height:18px;border-radius:50%;background:#4f9e2c;border:2px solid #fff;cursor:nwse-resize;box-shadow:0 1px 4px rgba(0,0,0,.3);touch-action:none'
     handle.setAttribute('aria-hidden', 'true')
     wrap.appendChild(handle)
 
     const ed = () => (window as any).editor as CanvasEditor
+
+    // ── Float controls: appear on hover/tap so you don't have to drag precisely ──
+    const tools = document.createElement('div')
+    tools.style.cssText = 'position:absolute;top:8px;left:50%;transform:translateX(-50%);display:none;gap:1px;background:rgba(20,54,31,.94);border-radius:11px;padding:3px;box-shadow:0 3px 12px rgba(0,0,0,.35);z-index:6;white-space:nowrap'
+    let hideT: ReturnType<typeof setTimeout>
+    const setPos = (kind: 'left' | 'center' | 'right' | 'inline') => {
+        const cw = (ed() as any).canvas.getBoundingClientRect().width as number
+        const w = (node.attrs['width'] as number) ?? img.offsetWidth ?? 220
+        const x = kind === 'inline' ? null
+            : kind === 'left' ? 0
+                : kind === 'center' ? Math.max(0, Math.round((cw - w) / 2))
+                    : Math.max(0, Math.round(cw - w))
+        ed().command((s, d) => { d?.(s.tr.setNodeMarkup(getPos(), undefined, { ...node.attrs, x, y: x === null ? null : (node.attrs['y'] ?? 40) })); return true })
+        ed().focus()
+    }
+    const tbtn = (inner: string, aria: string, fn: () => void) => {
+        const b = document.createElement('button')
+        b.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true" style="width:19px;height:19px;fill:none;stroke:#eafff2;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round">${inner}</svg>`
+        b.title = aria; b.setAttribute('aria-label', aria)
+        b.style.cssText = 'width:32px;height:30px;border:0;background:transparent;border-radius:8px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;touch-action:none'
+        b.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation() })
+        b.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); fn() })
+        b.addEventListener('pointerenter', () => { b.style.background = 'rgba(255,255,255,.16)' })
+        b.addEventListener('pointerleave', () => { b.style.background = 'transparent' })
+        return b
+    }
+    const INLINE_ICON = '<rect x="3" y="4" width="8" height="7" rx="1"/><line x1="13" y1="6" x2="21" y2="6"/><line x1="13" y1="10" x2="21" y2="10"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="3" y1="19" x2="21" y2="19"/>'
+    tools.append(
+        tbtn(ICONS['alignLeft'], 'Float left', () => setPos('left')),
+        tbtn(ICONS['alignCenter'], 'Center', () => setPos('center')),
+        tbtn(ICONS['alignRight'], 'Float right', () => setPos('right')),
+        tbtn(INLINE_ICON, 'Inline (in text flow)', () => setPos('inline')),
+    )
+    wrap.appendChild(tools)
+    wrap.addEventListener('pointerenter', () => { clearTimeout(hideT); tools.style.display = 'flex' })
+    wrap.addEventListener('pointerleave', (e) => {
+        clearTimeout(hideT)
+        hideT = setTimeout(() => { tools.style.display = 'none' }, e.pointerType === 'touch' ? 2600 : 160)
+    })
 
     handle.addEventListener('pointerdown', (e) => {
         e.preventDefault(); e.stopPropagation()

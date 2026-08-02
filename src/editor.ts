@@ -3036,6 +3036,12 @@ export class CanvasEditor {
     const container = document.createElement("div");
     container.style.position = "absolute";
     container.style.zIndex = "1";
+    // A container's box is often wider/taller than the node view inside it
+    // (an in-flow image narrower than the column, a floated node, reserved
+    // atom height). Its empty area must not swallow clicks, drags, or hovers
+    // meant for the text — or another node — behind it. Only the node view's
+    // own element is interactive.
+    container.style.pointerEvents = "none";
     const view: MountedView = {
       container,
       dom: container,
@@ -3043,6 +3049,7 @@ export class CanvasEditor {
       resizeObserver: null,
     };
     view.dom = this.nodeViews[node.type.name](node, () => view.pos);
+    view.dom.style.pointerEvents = "auto";
     container.appendChild(view.dom);
     this.stack.appendChild(container);
 
@@ -3056,9 +3063,10 @@ export class CanvasEditor {
     if (this.a11yMirror && !interactive)
       container.setAttribute("aria-hidden", "true");
 
-    // Click on the block's chrome (not an interactive child that stops
-    // propagation) selects the node.
-    container.addEventListener(
+    // Click on the node view (not an interactive child that stops propagation)
+    // selects the node. Bound to the view element, not the container, so the
+    // container's empty area stays click-through (pointer-events: none above).
+    view.dom.addEventListener(
       "mousedown",
       (e) => {
         e.preventDefault();
