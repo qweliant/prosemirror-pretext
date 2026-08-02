@@ -55,6 +55,7 @@ import {
 import {
     isRuleNode, isListNode, isOrderedList, isLeafBlock, collectBlocks, isDocEmpty,
 } from './layout/blocks'
+import { applyVirtualLayout, paintToCanvas, type PaintContext } from './paint'
 
 // The public types live in ./types but are re-exported here so `src/index.ts`
 // and existing `from './editor'` imports keep resolving unchanged.
@@ -1775,23 +1776,31 @@ export class CanvasEditor {
   // ─── Painting ──────────────────────────────────────────────────────
 
   /**
-   * Pin the canvas to the viewport and stretch the stack to the full
-   * document height when virtualizing, so the scroller's scrollbar spans
-   * the whole document while the canvas only ever covers one viewport.
-   * Reverts to in-flow, full-height painting otherwise.
+   * Painting lives in ./paint; these two forward with the context it needs.
+   * `paintCx` is rebuilt per frame because `doc` and `selection` change every
+   * dispatch — the rest are readonly config, so the object is the only cost.
    */
+  private get paintCx(): PaintContext {
+    return {
+      canvas: this.canvas,
+      scroller: this.scroller,
+      containerWidth: this.containerWidth,
+      font: this.font,
+      textColor: this.textColor,
+      firstLineColor: this.firstLineColor,
+      selectionColor: this.selectionColor,
+      ruleColor: this.ruleColor,
+      placeholder: this.placeholder,
+      placeholderColor: this.placeholderColor,
+      doc: this.state.doc,
+      selection: this.state.selection,
+      xForOffsetInLine: (block, line, offset) =>
+        this.xForOffsetInLine(block, line, offset),
+    };
+  }
+
   private applyVirtualLayout(virtualized: boolean, totalHeight: number): void {
-    if (virtualized) {
-      if (this.canvas.style.position !== "sticky") {
-        this.canvas.style.position = "sticky";
-        this.canvas.style.top = "0";
-      }
-      this.stack.style.height = `${totalHeight}px`;
-    } else if (this.canvas.style.position === "sticky") {
-      this.canvas.style.position = "";
-      this.canvas.style.top = "";
-      this.stack.style.height = "";
-    }
+    applyVirtualLayout(this.canvas, this.stack, virtualized, totalHeight);
   }
 
   private paintToCanvas(
@@ -1800,221 +1809,7 @@ export class CanvasEditor {
     virtualized: boolean,
     decorations: Decoration[] = [],
   ): void {
-    const inlineDecos = decorations.filter(
-      (d): d is InlineDecoration => d.kind === "inline",
-    );
-    const nodeDecos = decorations.filter(
-      (d): d is NodeDecoration => d.kind === "node",
-    );
-    const dpr = window.devicePixelRatio || 1;
-    const cssWidth = this.containerWidth;
-
-    const viewH = virtualized ? this.scroller!.clientHeight : 0;
-    const scrollTop = virtualized ? this.scroller!.scrollTop : 0;
-    // When the doc is shorter than the viewport there is nothing to
-    // scroll, so the canvas need only cover the content.
-    const cssHeight = virtualized ? Math.min(viewH, totalHeight) : totalHeight;
-
-    const targetW = Math.round(cssWidth * dpr);
-    const targetH = Math.round(cssHeight * dpr);
-
-    if (this.canvas.width !== targetW || this.canvas.height !== targetH) {
-      this.canvas.width = targetW;
-      this.canvas.height = targetH;
-      this.canvas.style.width = `${cssWidth}px`;
-      this.canvas.style.height = `${cssHeight}px`;
-    }
-
-    const ctx = this.canvas.getContext("2d")!;
-    // Scale for HiDPI, then shift document-space coords up by scrollTop so
-    // only the visible slice lands on the canvas. All downstream painting
-    // (selection, caret) keeps working in document space unchanged.
-    ctx.setTransform(dpr, 0, 0, dpr, 0, -scrollTop * dpr);
-    ctx.clearRect(0, scrollTop, cssWidth, cssHeight);
-
-    const viewTop = scrollTop;
-    const viewBottom = scrollTop + cssHeight;
-
-    const isVisible = (block: BlockLayout) =>
-      !virtualized ||
-      (block.yOffset + block.height >= viewTop && block.yOffset <= viewBottom);
-
-    // Block box decorations (code-block panel, blockquote bar) paint first,
-    // beneath highlights, selection, and text.
-    for (const block of layouts) {
-      if (!isVisible(block)) continue;
-      if (block.isAtom && this.isRuleNode(block.node)) {
-        ctx.fillStyle = this.ruleColor;
-        ctx.fillRect(
-          0,
-          Math.round(block.yOffset + block.height / 2),
-          this.containerWidth,
-          2,
-        );
-        continue;
-      }
-      if (!block.background && !block.borderLeft) continue;
-      if (block.background) {
-        ctx.fillStyle = block.background;
-        ctx.fillRect(0, block.yOffset, this.containerWidth, block.height);
-      }
-      if (block.borderLeft) {
-        ctx.fillStyle = block.borderLeft.color;
-        ctx.fillRect(0, block.yOffset, block.borderLeft.width, block.height);
-      }
-    }
-
-    // Node decorations: a transient background / left bar over a whole block.
-    for (const nd of nodeDecos) {
-      const block = layouts.find(
-        (b) => b.pmStartPos - 1 === nd.from || b.pmStartPos === nd.from,
-      );
-      if (!block || !isVisible(block)) continue;
-      if (nd.style.background) {
-        ctx.fillStyle = nd.style.background;
-        ctx.fillRect(0, block.yOffset, this.containerWidth, block.height);
-      }
-      if (nd.style.borderLeft) {
-        ctx.fillStyle = nd.style.borderLeft.color;
-        ctx.fillRect(0, block.yOffset, nd.style.borderLeft.width, block.height);
-      }
-    }
-
-    // Highlight backgrounds paint under everything (before the selection
-    // overlay, so selecting highlighted text still shows the selection).
-    for (const block of layouts) {
-      if (!isVisible(block)) continue;
-      for (const line of block.lines) {
-        if (!line.fragments) continue;
-        for (const frag of line.fragments) {
-          if (!frag.background) continue;
-          ctx.fillStyle = frag.background;
-          ctx.fillRect(line.x + frag.x, line.y, frag.width, block.lineHeight);
-        }
-      }
-    }
-
-    // Inline decoration backgrounds (e.g. search highlight) — under selection.
-    for (const d of inlineDecos) {
-      if (!d.style.background) continue;
-      ctx.fillStyle = d.style.background;
-      this.forEachRangeRect(layouts, d.from, d.to, (r) => {
-        if (r.y + r.h >= viewTop && r.y <= viewBottom)
-          ctx.fillRect(r.x, r.y, r.w, r.h);
-      });
-    }
-
-    const sel = this.state.selection;
-    if (!sel.empty) {
-      ctx.fillStyle = this.selectionColor;
-      this.paintSelectionRects(ctx, layouts, sel.from, sel.to);
-    }
-
-    ctx.font = this.font;
-    ctx.textBaseline = "top";
-
-    for (const block of layouts) {
-      // Cull blocks fully outside the viewport — the per-block yOffsets
-      // are the spatial index.
-      if (
-        virtualized &&
-        (block.yOffset + block.height < viewTop || block.yOffset > viewBottom)
-      ) {
-        continue;
-      }
-
-      // List marker (bullet/number) in the gutter of the first line.
-      if (block.marker && block.lines.length > 0) {
-        ctx.font = block.font;
-        ctx.fillStyle = this.textColor;
-        ctx.fillText(block.marker.text, block.marker.x, block.lines[0].y);
-      }
-
-      for (let i = 0; i < block.lines.length; i++) {
-        const line = block.lines[i];
-        const lineColor =
-          block.color ?? (i === 0 ? this.firstLineColor : this.textColor);
-
-        if (line.fragments) {
-          // Marked line: paint each run with its own font/color. A
-          // null fragment color falls back to the line color so plain
-          // runs keep the first-line accent.
-          for (const frag of line.fragments) {
-            ctx.font = frag.font;
-            ctx.fillStyle = frag.color ?? lineColor;
-            const fy = line.y + (frag.baselineShift ?? 0);
-            ctx.fillText(frag.text, line.x + frag.x, fy);
-            if (frag.underline || frag.strikethrough) {
-              this.paintDecoration(
-                ctx,
-                frag,
-                line,
-                frag.baselineShift ?? 0,
-                block.fontSize,
-              );
-            }
-          }
-        } else {
-          ctx.font = block.font;
-          ctx.fillStyle = lineColor;
-          ctx.fillText(line.text, line.x, line.y);
-        }
-      }
-    }
-
-    // Inline decoration lines (underline / spellcheck squiggle / strike) —
-    // painted over the text.
-    for (const d of inlineDecos) {
-      const { underline, strikethrough, wavy } = d.style;
-      if (!underline && !strikethrough) continue;
-      this.forEachRangeRect(layouts, d.from, d.to, (r) => {
-        if (r.y + r.h < viewTop || r.y > viewBottom) return;
-        if (underline) {
-          const y = r.y + Math.round(r.h * 0.82);
-          if (wavy) this.paintWavy(ctx, r.x, r.x + r.w, y, underline);
-          else {
-            ctx.fillStyle = underline;
-            ctx.fillRect(r.x, y, r.w, 2);
-          }
-        }
-        if (strikethrough) {
-          ctx.fillStyle = strikethrough;
-          ctx.fillRect(r.x, r.y + Math.round(r.h * 0.5), r.w, 2);
-        }
-      });
-    }
-
-    // Placeholder prompt when the whole document is empty.
-    if (this.placeholder && this.isDocEmpty() && layouts.length > 0) {
-      const block = layouts[0];
-      const line = block.lines[0];
-      ctx.font = block.font;
-      ctx.fillStyle = this.placeholderColor;
-      ctx.fillText(this.placeholder, line.x, line.y);
-    }
-  }
-
-  /** A wavy line from x1→x2 at baseline y (spellcheck-squiggle underline). */
-  private paintWavy(
-    ctx: CanvasRenderingContext2D,
-    x1: number,
-    x2: number,
-    y: number,
-    color: string,
-  ): void {
-    ctx.save();
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 1.4;
-    ctx.beginPath();
-    const amp = 1.6;
-    const period = 5;
-    for (let x = x1; x <= x2; x++) {
-      const yy = y + Math.sin(((x - x1) / period) * Math.PI) * amp;
-      if (x === x1) ctx.moveTo(x, yy);
-      else ctx.lineTo(x, yy);
-    }
-    ctx.stroke();
-    ctx.restore();
+    paintToCanvas(this.paintCx, layouts, totalHeight, virtualized, decorations);
   }
 
   /** Mount/position/remove widget-decoration DOM at their document positions
@@ -2053,7 +1848,6 @@ export class CanvasEditor {
     }
   }
 
-  /** A leaf block conventionally rendered as a horizontal rule. */
   // Document-structure predicates and the tree->flat-list walk live in
   // ./layout/blocks as free functions; these forward so call sites (and the
   // test suite, which reaches for them) keep one spelling.
@@ -2087,120 +1881,6 @@ export class CanvasEditor {
   /** True when the document is a single empty text block. */
   private isDocEmpty(): boolean {
     return isDocEmpty(this.state.doc);
-  }
-
-  /** Underline / strikethrough lines for a run, in the current fill color. */
-  private paintDecoration(
-    ctx: CanvasRenderingContext2D,
-    frag: LineFragment,
-    line: LineLayout,
-    shift: number,
-    fontSize: number,
-  ): void {
-    const x = line.x + frag.x;
-    const thickness = Math.max(1, Math.round(fontSize / 14));
-    if (frag.underline) {
-      ctx.fillRect(
-        x,
-        line.y + shift + Math.round(fontSize * 0.92),
-        frag.width,
-        thickness,
-      );
-    }
-    if (frag.strikethrough) {
-      ctx.fillRect(
-        x,
-        line.y + shift + Math.round(fontSize * 0.52),
-        frag.width,
-        thickness,
-      );
-    }
-  }
-
-  /** Invoke `cb` with the canvas rect of each line-slice of doc range
-   *  [from, to). Used by inline decorations (and shaped like selection rects). */
-  private forEachRangeRect(
-    layouts: BlockLayout[],
-    from: number,
-    to: number,
-    cb: (r: { x: number; y: number; w: number; h: number }) => void,
-  ): void {
-    for (const block of layouts) {
-      if (block.isAtom || block.text.length === 0) continue;
-      if (block.pmEndPos < from || block.pmStartPos > to) continue;
-      for (let li = 0; li < block.lines.length; li++) {
-        const line = block.lines[li];
-        const isLast = li === block.lines.length - 1;
-        const lineStart = block.pmStartPos + line.pmStart;
-        const lineEnd =
-          block.pmStartPos +
-          (isLast ? block.text.length : block.lines[li + 1].pmStart);
-        if (lineEnd < from || lineStart > to) continue;
-        const a = Math.max(from, lineStart);
-        const b = Math.min(to, lineEnd);
-        const x1 = this.xForOffsetInLine(block, line, a - block.pmStartPos);
-        const x2 = this.xForOffsetInLine(block, line, b - block.pmStartPos);
-        if (x2 > x1) cb({ x: x1, y: line.y, w: x2 - x1, h: block.lineHeight });
-      }
-    }
-  }
-
-  private paintSelectionRects(
-    ctx: CanvasRenderingContext2D,
-    layouts: BlockLayout[],
-    from: number,
-    to: number,
-  ): void {
-    for (const block of layouts) {
-      if (block.pmEndPos < from || block.pmStartPos > to) continue;
-
-      // Selected atom block: box its whole region (node selection).
-      if (block.isAtom) {
-        if (from <= block.pmStartPos && to >= block.pmEndPos) {
-          ctx.fillRect(0, block.yOffset, this.containerWidth, block.height);
-        }
-        continue;
-      }
-
-      // Empty paragraph fully inside the selection range: paint a stub.
-      if (block.text.length === 0) {
-        if (from <= block.pmStartPos && to >= block.pmEndPos) {
-          const line = block.lines[0];
-          ctx.fillRect(line.x, line.y, block.lineHeight / 3, block.lineHeight);
-        }
-        continue;
-      }
-
-      for (let li = 0; li < block.lines.length; li++) {
-        const line = block.lines[li];
-        const isLast = li === block.lines.length - 1;
-        const lineStart = block.pmStartPos + line.pmStart;
-        const lineEnd =
-          block.pmStartPos +
-          (isLast ? block.text.length : block.lines[li + 1].pmStart);
-
-        if (lineEnd < from) continue;
-        if (lineStart > to) break;
-
-        const a = Math.max(from, lineStart);
-        const x1 = this.xForOffsetInLine(block, line, a - block.pmStartPos);
-
-        // Selection continuing past this line trails to the container
-        // edge; otherwise stop at the selection end on this line.
-        const x2 =
-          to > lineEnd
-            ? line.x + this.containerWidth
-            : this.xForOffsetInLine(
-                block,
-                line,
-                Math.min(to, lineEnd) - block.pmStartPos,
-              );
-
-        if (x2 > x1) {
-          ctx.fillRect(x1, line.y, x2 - x1, block.lineHeight);
-        }
-      }
-    }
   }
 
   // ─── Caret + Coordinate Mapping ────────────────────────────────────
