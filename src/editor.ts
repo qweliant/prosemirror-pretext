@@ -1,5 +1,5 @@
 import {
-    type Mark, type Node as PMNode, type ResolvedPos,
+    type Mark, type Node as PMNode, type NodeType, type ResolvedPos,
     DOMParser as PMDOMParser, DOMSerializer, Slice, Fragment,
 } from 'prosemirror-model'
 import {
@@ -73,6 +73,8 @@ export interface CanvasEditorOptions
     placeholderColor?: string
     /** Color of a horizontal-rule leaf node. Default: '#3a3a42'. */
     ruleColor?: string
+    /** Color of the drop indicator drawn while dragging. Default: `caretColor`. */
+    dropIndicatorColor?: string
     /** If set, the content area scrolls when it exceeds this height in px. */
     maxHeight?: number
     /**
@@ -146,6 +148,13 @@ export interface CanvasEditorOptions
      */
     handlers?: EditorHandlers
     /**
+     * Drag & drop: drag a leaf/atom block to a new place in the document, and
+     * accept drops from outside (files, text, HTML). Default true. A node view
+     * that runs its own pointer gesture opts out per-node by calling
+     * `preventDefault()` on `pointerdown`; pass false to turn it off entirely.
+     */
+    dragDrop?: boolean
+    /**
      * Maintain a visually-hidden, screen-reader-visible DOM mirror of the
      * document (built from the schema's `toDOM`) so assistive tech can read the
      * structure the canvas can't expose. Default: true.
@@ -175,6 +184,24 @@ export interface EditorHandlers
     click?: (editor: CanvasEditor, pos: number, event: MouseEvent) => boolean
     doubleClick?: (editor: CanvasEditor, pos: number, event: MouseEvent) => boolean
     paste?: (editor: CanvasEditor, event: ClipboardEvent) => boolean
+    /**
+     * A drag of the block node at `pos` is about to begin (pointer events, so
+     * mouse/touch/pen alike). Return `true` to veto the drag — e.g. to pin a
+     * node, or to run your own gesture.
+     */
+    dragStart?: (editor: CanvasEditor, pos: number, event: PointerEvent) => boolean
+    /**
+     * Something was dropped onto the editor from outside (OS files, another
+     * tab). `pos` is the document position under the pointer. Return `true` to
+     * take the drop over completely — including file drops, which otherwise
+     * fall through to `dropFiles`.
+     */
+    drop?: (editor: CanvasEditor, pos: number, event: DragEvent) => boolean
+    /**
+     * Files were dropped at `pos`. There is no default: turning a file into a
+     * node means uploading it, which is the app's story, not the editor's.
+     */
+    dropFiles?: (editor: CanvasEditor, pos: number, files: File[], event: DragEvent) => boolean
     domEvents?: Record<string, (editor: CanvasEditor, event: Event) => boolean>
 }
 
@@ -286,6 +313,9 @@ const SR_ONLY: Partial<CSSStyleDeclaration> = {
     overflow: 'hidden', clip: 'rect(0 0 0 0)', clipPath: 'inset(50%)',
     whiteSpace: 'nowrap',
 }
+
+/** Travel before a press on a node becomes a drag rather than a click. */
+const DRAG_THRESHOLD_PX = 6
 
 /** Horizontal indent added per list nesting level. */
 const LIST_INDENT = 26
@@ -490,6 +520,7 @@ export class CanvasEditor {
   private readonly placeholder: string;
   private readonly placeholderColor: string;
   private readonly ruleColor: string;
+  private readonly dropIndicatorColor: string;
   private readonly maxHeight: number | null;
   private readonly caretWidth = 2;
   private readonly caretBlinkMs = 530;
@@ -625,6 +656,20 @@ export class CanvasEditor {
   private touchSelection = false;
   private selHandles: { from: HTMLElement; to: HTMLElement } | null = null;
   private draggingHandle: "from" | "to" | null = null;
+  // ─── Drag & drop ───────────────────────────────────────────────────
+  private readonly dragDrop: boolean;
+  // An in-flight node drag. It stays inert until the pointer passes the
+  // threshold, so a press that never moves is still just a click/selection.
+  private nodeDrag: {
+    pointerId: number;
+    from: number;
+    startX: number;
+    startY: number;
+    active: boolean;
+  } | null = null;
+  // What the next paint marks as the drop target: the seam between two blocks
+  // (a node move) or a text position (an external drop). Null when idle.
+  private dropTarget: { pos: number; seam: boolean } | null = null;
   // Read-only mode drops document-changing transactions (see dispatch).
   private isEditable = true;
   private readonly autofocus: boolean = true;
@@ -670,6 +715,7 @@ export class CanvasEditor {
     this.placeholder = options.placeholder ?? "";
     this.placeholderColor = options.placeholderColor ?? "#5a5a64";
     this.ruleColor = options.ruleColor ?? "#3a3a42";
+    this.dropIndicatorColor = options.dropIndicatorColor ?? this.caretColor;
     this.maxHeight = options.maxHeight ?? null;
     this.onRender = options.onRender;
 
@@ -740,6 +786,7 @@ export class CanvasEditor {
     this.nodeViews = options.nodeViews ?? {};
     this.decorationsFor = options.decorations ?? null;
     this.handlers = options.handlers ?? {};
+    this.dragDrop = options.dragDrop !== false;
 
     // Build DOM
     const stack = document.createElement("div");
@@ -1062,6 +1109,61 @@ export class CanvasEditor {
     this.floats = floats;
     this.layoutDirty = true; // float geometry changes line widths document-wide
     this.scheduleRender();
+  }
+
+  /**
+   * Move the block node at `from` (the position *before* it) so it sits at the
+   * insertion position `to`. One transaction, so it's a single undo step, and
+   * the moved node ends up selected. Returns false when the node can't live
+   * there, or when `to` is inside the node / already its slot.
+   *
+   * Public because reordering shouldn't require a pointer: this is what a
+   * keyboard "move block up/down" command, a slash menu, or a drag handle all
+   * bottom out in.
+   */
+  moveNode(from: number, to: number): boolean {
+    if (!this.isEditable) return false;
+    const node = this.state.doc.nodeAt(from);
+    if (!node || !node.isBlock) return false;
+    const end = from + node.nodeSize;
+    if (to > from && to < end) return false; // dropped on itself
+    const insertAt = this.insertPointFor(to, node.type);
+    if (insertAt === null || insertAt === from || insertAt === end) return false;
+
+    const tr = this.state.tr.delete(from, end);
+    const at = tr.mapping.map(insertAt);
+    tr.insert(at, node);
+    // `insert` fits the node into the parent, so it usually lands exactly at
+    // `at` — but not if the schema made it wrap. Only select what's really there.
+    const landed = tr.doc.nodeAt(at);
+    tr.setSelection(
+      landed && landed.type === node.type && NodeSelection.isSelectable(landed)
+        ? NodeSelection.create(tr.doc, at)
+        : Selection.near(tr.doc.resolve(at)),
+    );
+    this.dispatch(tr.scrollIntoView());
+    return true;
+  }
+
+  /**
+   * Start dragging the block node at `pos` from a pointer press — for building
+   * your own drag affordance (a Notion-style handle beside a paragraph, say).
+   * The editor takes over move/release and commits the move itself. Returns
+   * false if the node can't be dragged or a `dragStart` handler vetoed it.
+   */
+  startNodeDrag(pos: number, event: PointerEvent): boolean {
+    if (!this.isEditable) return false;
+    const node = this.state.doc.nodeAt(pos);
+    if (!node || !node.isBlock) return false;
+    if (this.handlers.dragStart?.(this, pos, event)) return false;
+    this.nodeDrag = {
+      pointerId: event.pointerId,
+      from: pos,
+      startX: event.clientX,
+      startY: event.clientY,
+      active: false,
+    };
+    return true;
   }
 
   /**
@@ -2725,6 +2827,30 @@ export class CanvasEditor {
     ctx.fillRect(coords.x, coords.y, this.caretWidth, coords.height);
   }
 
+  /**
+   * Where a drag would land: a bar across the seam for a node move (the same
+   * place, and the same look, as a gap cursor between those two blocks), or a
+   * caret for an external drop that inserts at a text position.
+   */
+  private paintDropIndicator(): void {
+    const target = this.dropTarget;
+    if (!target) return;
+    const ctx = this.canvas.getContext("2d")!;
+    ctx.fillStyle = this.dropIndicatorColor;
+    if (target.seam) {
+      ctx.fillRect(
+        0,
+        this.gapCursorY(target.pos) - 1,
+        this.containerWidth,
+        2,
+      );
+      return;
+    }
+    const coords = this.posToCoords(this.lastLayouts, target.pos);
+    if (coords)
+      ctx.fillRect(coords.x, coords.y, this.caretWidth, coords.height);
+  }
+
   // ─── Click → Doc Position ──────────────────────────────────────────
 
   /**
@@ -2982,6 +3108,7 @@ export class CanvasEditor {
       : [];
     this.paintToCanvas(layouts, totalHeight, virtualized, decorations);
     this.paintCaret(caretCoords);
+    this.paintDropIndicator();
     this.syncNodeViews(layouts);
     this.syncWidgets(layouts, decorations);
     this.syncSelectionHandles();
@@ -3062,6 +3189,12 @@ export class CanvasEditor {
     // meant for the text — or another node — behind it. Only the node view's
     // own element is interactive.
     container.style.pointerEvents = "none";
+    // Dragging the node has to win the vertical swipe on touch; with the
+    // scroller's pan gesture in play the pointer stream is cancelled instead.
+    // Set on the container rather than the view: touch-action is resolved up
+    // the DOM ancestor chain from the hit element, so this still governs
+    // touches landing on the view despite the container being unhittable.
+    if (this.dragDrop) container.style.touchAction = "none";
     const view: MountedView = {
       container,
       dom: container,
@@ -3193,6 +3326,13 @@ export class CanvasEditor {
       "keydown",
       (e) => {
         if (this.composing || e.isComposing) return;
+
+        // Escape abandons a drag in progress (the node stays put).
+        if (e.key === "Escape" && this.nodeDrag) {
+          e.preventDefault();
+          this.cancelNodeDrag();
+          return;
+        }
 
         // Consumer override: handled keys skip both keymap and built-ins.
         if (this.handlers.keyDown?.(this, e)) {
@@ -3489,6 +3629,94 @@ export class CanvasEditor {
       { signal, passive: false },
     );
 
+    // ── Drag & drop ──────────────────────────────────────────────────
+    // Moving a node runs on pointer events so mouse, touch, and pen share one
+    // path — native HTML5 drag never fires on touch. Drops *into* the editor
+    // are the other half, and those only exist as native drag events.
+    if (this.dragDrop) {
+      this.stack.addEventListener(
+        "pointerdown",
+        (e) => {
+          // A node view running its own gesture (resize, custom drag) marks
+          // the press handled; leave it alone.
+          if (e.defaultPrevented || !this.isEditable) return;
+          if (e.pointerType === "mouse" && e.button !== 0) return;
+          const block = this.atomBlockForEvent(e);
+          if (block) this.startNodeDrag(block.pmStartPos, e);
+        },
+        { signal },
+      );
+      // On window, not the stack: the pointer routinely leaves the editor
+      // mid-drag (and touch's implicit capture still bubbles here).
+      window.addEventListener(
+        "pointermove",
+        (e) => this.onNodeDragMove(e),
+        { signal },
+      );
+      window.addEventListener("pointerup", (e) => this.onNodeDragEnd(e), {
+        signal,
+      });
+      window.addEventListener("pointercancel", () => this.cancelNodeDrag(), {
+        signal,
+      });
+
+      // Browsers natively drag <img> and links, which would tear the pointer
+      // stream out from under a node drag (the primary case being an image node
+      // view). We never originate a native drag, so refuse them; a node view
+      // wanting its own can stopPropagation before this bubble-phase listener.
+      this.stack.addEventListener("dragstart", (e) => e.preventDefault(), {
+        signal,
+      });
+
+      // Claim the drag (both events, for Safari) so the browser doesn't open
+      // the dropped file in place of the page.
+      const allowDrop = (e: DragEvent) => {
+        if (!this.isEditable) return;
+        e.preventDefault();
+        if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+      };
+      this.stack.addEventListener(
+        "dragenter",
+        (e) => allowDrop(e as DragEvent),
+        { signal },
+      );
+      this.stack.addEventListener(
+        "dragover",
+        (e) => {
+          const de = e as DragEvent;
+          allowDrop(de);
+          if (!this.isEditable) return;
+          this.dropTarget = { pos: this.dropPosForEvent(de), seam: false };
+          this.scheduleRender();
+        },
+        { signal },
+      );
+      this.stack.addEventListener(
+        "dragleave",
+        (e) => {
+          // Also fires when crossing onto a child (a node view); only a real
+          // exit from the editor clears the indicator.
+          const to = (e as DragEvent).relatedTarget as Node | null;
+          if (to && this.stack.contains(to)) return;
+          this.dropTarget = null;
+          this.scheduleRender();
+        },
+        { signal },
+      );
+      this.stack.addEventListener(
+        "drop",
+        (e) => {
+          const de = e as DragEvent;
+          this.dropTarget = null;
+          this.scheduleRender();
+          if (!this.isEditable) return;
+          de.preventDefault();
+          this.handleExternalDrop(de);
+        },
+        { signal },
+      );
+    }
+
     // Keep the caret above the on-screen keyboard: when the visual viewport
     // shrinks (keyboard opens), scroll the caret-tracking textarea into view.
     if (typeof window !== "undefined" && window.visualViewport) {
@@ -3589,6 +3817,165 @@ export class CanvasEditor {
 
     // preventScroll so mounting an editor mid-page doesn't jump the viewport.
     if (this.autofocus) this.textarea.focus({ preventScroll: true });
+  }
+
+  // ─── Drag & Drop ───────────────────────────────────────────────────
+
+  /**
+   * Track a live node drag. Below the threshold the press is still a click, so
+   * nothing is disturbed until the pointer really travels; past it the drag
+   * takes over from any text-selection drag the same press started.
+   */
+  private onNodeDragMove(e: PointerEvent): void {
+    const d = this.nodeDrag;
+    if (!d || e.pointerId !== d.pointerId) return;
+    if (!d.active) {
+      if (Math.hypot(e.clientX - d.startX, e.clientY - d.startY) < DRAG_THRESHOLD_PX)
+        return;
+      d.active = true;
+      this.dragging = false;
+      this.cancelLongPress();
+      this.stack.style.cursor = "grabbing";
+    }
+    const { y } = this.eventToDocCoords(e);
+    const pos = this.seamPosAt(y);
+    this.dropTarget = pos === null ? null : { pos, seam: true };
+    this.scheduleRender();
+  }
+
+  private onNodeDragEnd(e: PointerEvent): void {
+    const d = this.nodeDrag;
+    if (!d || e.pointerId !== d.pointerId) return;
+    const target = d.active ? this.dropTarget : null;
+    this.cancelNodeDrag();
+    if (target) this.moveNode(d.from, target.pos);
+  }
+
+  private cancelNodeDrag(): void {
+    if (!this.nodeDrag) return;
+    this.nodeDrag = null;
+    this.dropTarget = null;
+    this.stack.style.cursor = "text";
+    this.scheduleRender();
+  }
+
+  /**
+   * The leaf/atom block a pointer press lands on, or null. The event target
+   * settles it whenever a node view is under the pointer (exact, and immune to
+   * a view that overflows its reserved box); canvas-drawn atoms (rules) fall
+   * back to the layout's boxes.
+   */
+  private atomBlockForEvent(e: PointerEvent): BlockLayout | null {
+    const target = e.target as Node | null;
+    if (target) {
+      for (const [node, view] of this.mountedViews) {
+        if (!view.container.contains(target)) continue;
+        return this.lastLayouts.find((b) => b.node === node) ?? null;
+      }
+    }
+    const { x, y } = this.eventToDocCoords(e);
+    for (const b of this.lastLayouts) {
+      if (!b.isAtom) continue;
+      // A float owns only part of its y-band, so it has to be hit-tested in x
+      // too — otherwise text beside it would drag the float.
+      const fr = b.floatRect;
+      if (fr) {
+        if (x >= fr.x && x <= fr.x + fr.width && y >= fr.y && y <= fr.y + fr.height)
+          return b;
+      } else if (y >= b.yOffset && y <= b.yOffset + b.height) {
+        return b;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * The seam a node dropped at document-space `y` would land in: the position
+   * before or after the nearest in-flow block, whichever edge is closer.
+   * Floated blocks are skipped — being out of the flow, their y says nothing
+   * about document order.
+   */
+  private seamPosAt(y: number): number | null {
+    const inFlow = this.lastLayouts.filter((b) => !b.floatRect);
+    const layouts = inFlow.length > 0 ? inFlow : this.lastLayouts;
+    if (layouts.length === 0) return null;
+    let best = layouts[0];
+    let bestDist = Infinity;
+    for (const b of layouts) {
+      const dist = Math.abs(y - (b.yOffset + b.height / 2));
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = b;
+      }
+    }
+    // An atom's pmStartPos is already the position before it; a textblock's is
+    // inside it (pos + 1), so step back out to the boundary.
+    const before = best.isAtom ? best.pmStartPos : best.pmStartPos - 1;
+    const after = best.isAtom ? best.pmEndPos : best.pmEndPos + 1;
+    return y < best.yOffset + best.height / 2 ? before : after;
+  }
+
+  /**
+   * The nearest position to `pos` where `type` can be inserted, climbing out of
+   * parents that reject it (a mirror of prosemirror-transform's `insertPoint`,
+   * inlined so drag & drop doesn't widen the peer-dependency surface). Null
+   * when nothing on the path can hold it.
+   */
+  private insertPointFor(pos: number, type: NodeType): number | null {
+    const $pos = this.state.doc.resolve(pos);
+    if ($pos.parent.canReplaceWith($pos.index(), $pos.index(), type)) return pos;
+    if ($pos.parentOffset === 0) {
+      for (let d = $pos.depth - 1; d >= 0; d--) {
+        const index = $pos.index(d);
+        if ($pos.node(d).canReplaceWith(index, index, type))
+          return $pos.before(d + 1);
+        if (index > 0) return null;
+      }
+    }
+    if ($pos.parentOffset === $pos.parent.content.size) {
+      for (let d = $pos.depth - 1; d >= 0; d--) {
+        const index = $pos.indexAfter(d);
+        if ($pos.node(d).canReplaceWith(index, index, type))
+          return $pos.after(d + 1);
+        if (index < $pos.node(d).childCount) return null;
+      }
+    }
+    return null;
+  }
+
+  /** The document position an external drag is hovering, in text terms. */
+  private dropPosForEvent(e: { clientX: number; clientY: number }): number {
+    const { x, y } = this.eventToDocCoords(e);
+    const hit = this.clickToPos(this.lastLayouts, x, y);
+    return hit ? hit.pos : this.state.selection.from;
+  }
+
+  /** Route a drop that came from outside: consumer handler, then files, then
+   *  the HTML/plain-text paste path — all landing where it was dropped. */
+  private handleExternalDrop(e: DragEvent): void {
+    const pos = this.dropPosForEvent(e);
+    if (this.handlers.drop?.(this, pos, e)) return;
+
+    const files = e.dataTransfer ? Array.from(e.dataTransfer.files) : [];
+    if (files.length > 0) {
+      // No fallback: making a node out of a file means uploading it.
+      this.handlers.dropFiles?.(this, pos, files, e);
+      return;
+    }
+
+    const html = e.dataTransfer?.getData("text/html");
+    const text = e.dataTransfer?.getData("text/plain");
+    if (!html && !text) return;
+    this.dispatch(
+      this.state.tr.setSelection(
+        Selection.near(
+          this.state.doc.resolve(clamp(pos, 0, this.state.doc.content.size)),
+        ),
+      ),
+    );
+    if (html) this.pasteHTML(html);
+    else this.pastePlainText(text!);
+    this.textarea.focus();
   }
 
   /** The schema's list-item node type, if it defines one. */

@@ -2504,3 +2504,346 @@ describe('touch input (mobile)', () =>
         ed.destroy()
     })
 })
+
+
+describe('drag & drop', () =>
+{
+    // doc: paragraph 'above' (0..7), widget atom (7..8), paragraph 'below' (8..15).
+    // Mock metrics (8px/char, lineHeight 26, blockGap 20, atom height 40) put the
+    // blocks at y 0..26, 46..86, and 106..132 — midpoints 13, 66, 119.
+    function dndEditor(opts: Record<string, unknown> = {})
+    {
+        const doc = schema.node('doc', null, [
+            schema.node('paragraph', null, [schema.text('above')]),
+            schema.node('widget'),
+            schema.node('paragraph', null, [schema.text('below')]),
+        ])
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        const ed = new CanvasEditor({
+            state: EditorState.create({ doc, schema, plugins: [history()] }),
+            container,
+            nodeViews: { widget: () => { const el = document.createElement('div'); el.className = 'nv'; return el } },
+            ...opts,
+        })
+        // happy-dom has no layout; pin the canvas at the origin so client
+        // coordinates are document coordinates.
+        ;(ed as any).canvas.getBoundingClientRect = () => ({ left: 0, top: 0 })
+        return { ed, container }
+    }
+
+    const pointer = (type: string, init: PointerEventInit) =>
+        new PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 1, ...init })
+
+    /** A DragEvent stand-in: happy-dom aliases DragEvent to Event. */
+    function dragEvent(type: string, x: number, y: number, data: Record<string, string> = {}, files: unknown[] = []): Event
+    {
+        const e = new Event(type, { bubbles: true, cancelable: true })
+        Object.assign(e, {
+            clientX: x, clientY: y,
+            dataTransfer: { getData: (t: string) => data[t] ?? '', files, dropEffect: 'none' },
+        })
+        return e
+    }
+
+    // ── Moving a node ────────────────────────────────────────────────
+
+    test('moveNode reorders a block and selects it where it landed', () =>
+    {
+        const { ed } = dndEditor()
+        expect(ed.moveNode(7, 0)).toBe(true) // widget → before the first paragraph
+        expect(ed.state.doc.child(0).type.name).toBe('widget')
+        expect(ed.state.doc.childCount).toBe(3)
+        expect((ed.state.selection as NodeSelection).node.type.name).toBe('widget')
+        ed.destroy()
+    })
+
+    test('a move is a single undo step', () =>
+    {
+        const { ed } = dndEditor()
+        ed.moveNode(7, 0)
+        expect(ed.state.doc.child(0).type.name).toBe('widget')
+        ed.command(undo)
+        expect(ed.state.doc.child(0).type.name).toBe('paragraph')
+        expect(ed.state.doc.child(1).type.name).toBe('widget')
+        ed.command(redo)
+        expect(ed.state.doc.child(0).type.name).toBe('widget')
+        ed.destroy()
+    })
+
+    test('moveNode works for text blocks too (drag-handle case)', () =>
+    {
+        const { ed } = dndEditor()
+        expect(ed.moveNode(8, 0)).toBe(true) // 'below' → the top
+        expect(ed.state.doc.child(0).textContent).toBe('below')
+        ed.destroy()
+    })
+
+    test('moveNode refuses a drop inside the node or onto its own slot', () =>
+    {
+        const { ed } = dndEditor()
+        expect(ed.moveNode(0, 3)).toBe(false) // inside the paragraph being moved
+        expect(ed.moveNode(7, 7)).toBe(false) // the slot it already occupies
+        expect(ed.moveNode(7, 8)).toBe(false) // …from the other side
+        expect(ed.state.doc.child(1).type.name).toBe('widget') // untouched
+        ed.destroy()
+    })
+
+    test('moveNode refuses a target no ancestor can hold the node in', () =>
+    {
+        const doc = schema.node('doc', null, [
+            schema.node('paragraph', null, [schema.text('hi')]),
+            schema.node('code_block', null, [schema.text('xy')]),
+        ])
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        const ed = new CanvasEditor({ state: EditorState.create({ doc, schema }), container })
+        // Position 6 is *between* the code block's two characters: it takes only
+        // text, and there's no block edge to climb out to.
+        expect(ed.moveNode(0, 6)).toBe(false)
+        // The block edge right before it does work — that climbs out to the doc.
+        expect(ed.moveNode(0, 5)).toBe(false) // …but that's this node's own slot
+        expect(ed.moveNode(4, 0)).toBe(true) // code block → the top
+        expect(ed.state.doc.child(0).type.name).toBe('code_block')
+        ed.destroy()
+    })
+
+    // ── Drop targets ─────────────────────────────────────────────────
+
+    test('seamPosAt picks the seam before or after the nearest block', () =>
+    {
+        const { ed } = dndEditor()
+        expect((ed as any).seamPosAt(5)).toBe(0)    // above everything
+        expect((ed as any).seamPosAt(20)).toBe(7)   // below 'above' → before the widget
+        expect((ed as any).seamPosAt(50)).toBe(7)   // top half of the widget
+        expect((ed as any).seamPosAt(80)).toBe(8)   // bottom half of the widget
+        expect((ed as any).seamPosAt(130)).toBe(15) // past the end of the doc
+        ed.destroy()
+    })
+
+    test('a floated block is not a seam candidate (it is out of the flow)', () =>
+    {
+        const { ed } = dndEditor({
+            floatRect: (n: any) => n.type.name === 'widget' ? { x: 0, y: 0, width: 100 } : null,
+        })
+        // The widget is pinned at y 0..40 beside the text now, so the paragraphs
+        // are the only blocks whose y says anything about document order:
+        // 'above' at 0..26, 'below' at 46..72.
+        expect((ed as any).lastLayouts.find((b: any) => b.floatRect)).toBeTruthy()
+        // y=30 is nearest the float's own midpoint (20) — but it must resolve to
+        // the seam after 'above' (7), not the seam after the float (8).
+        expect((ed as any).seamPosAt(30)).toBe(7)
+        ed.destroy()
+    })
+
+    // ── The pointer gesture (mouse / touch / pen alike) ───────────────
+
+    test('dragging an atom past the threshold moves it on release', async () =>
+    {
+        const { ed, container } = dndEditor()
+        const view = container.querySelector('.nv')!
+        view.dispatchEvent(pointer('pointerdown', { clientX: 10, clientY: 50 }))
+        window.dispatchEvent(pointer('pointermove', { clientX: 10, clientY: 130 }))
+        expect((ed as any).nodeDrag.active).toBe(true)
+        window.dispatchEvent(pointer('pointerup', { clientX: 10, clientY: 130 }))
+        expect(ed.state.doc.child(2).type.name).toBe('widget') // dropped at the end
+        expect((ed as any).nodeDrag).toBeNull()
+        await nextFrame()
+        ed.destroy()
+    })
+
+    test('a press that never travels stays a click, not a drag', () =>
+    {
+        const { ed, container } = dndEditor()
+        const before = ed.state.doc
+        const view = container.querySelector('.nv')!
+        view.dispatchEvent(pointer('pointerdown', { clientX: 10, clientY: 50 }))
+        window.dispatchEvent(pointer('pointermove', { clientX: 13, clientY: 52 })) // < 6px
+        expect((ed as any).nodeDrag.active).toBe(false)
+        expect((ed as any).dropTarget).toBeNull()
+        window.dispatchEvent(pointer('pointerup', { clientX: 13, clientY: 52 }))
+        expect(ed.state.doc).toBe(before)
+        ed.destroy()
+    })
+
+    test('the drop indicator marks the seam the node would land in', () =>
+    {
+        const { ed, container } = dndEditor()
+        const view = container.querySelector('.nv')!
+        view.dispatchEvent(pointer('pointerdown', { clientX: 10, clientY: 50 }))
+        window.dispatchEvent(pointer('pointermove', { clientX: 10, clientY: 20 }))
+        expect((ed as any).dropTarget).toEqual({ pos: 7, seam: true })
+        // Painted where a gap cursor in that seam would be.
+        expect((ed as any).gapCursorY(7)).toBe(36)
+        ed.destroy()
+    })
+
+    test('Escape abandons a drag in flight', () =>
+    {
+        const { ed, container } = dndEditor()
+        const before = ed.state.doc
+        const view = container.querySelector('.nv')!
+        view.dispatchEvent(pointer('pointerdown', { clientX: 10, clientY: 50 }))
+        window.dispatchEvent(pointer('pointermove', { clientX: 10, clientY: 130 }))
+        ;(ed as any).textarea.dispatchEvent(
+            new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Escape' }),
+        )
+        expect((ed as any).nodeDrag).toBeNull()
+        expect((ed as any).dropTarget).toBeNull()
+        window.dispatchEvent(pointer('pointerup', { clientX: 10, clientY: 130 }))
+        expect(ed.state.doc).toBe(before)
+        ed.destroy()
+    })
+
+    test('pointercancel (the scroller taking over) abandons the drag', () =>
+    {
+        const { ed, container } = dndEditor()
+        const view = container.querySelector('.nv')!
+        view.dispatchEvent(pointer('pointerdown', { clientX: 10, clientY: 50 }))
+        window.dispatchEvent(pointer('pointermove', { clientX: 10, clientY: 130 }))
+        window.dispatchEvent(pointer('pointercancel', { clientX: 10, clientY: 130 }))
+        expect((ed as any).nodeDrag).toBeNull()
+        ed.destroy()
+    })
+
+    test('a dragStart handler can veto the drag', () =>
+    {
+        const seen: number[] = []
+        const { ed, container } = dndEditor({
+            handlers: { dragStart: (_e: unknown, pos: number) => { seen.push(pos); return true } },
+        })
+        container.querySelector('.nv')!.dispatchEvent(pointer('pointerdown', { clientX: 10, clientY: 50 }))
+        expect(seen).toEqual([7])
+        expect((ed as any).nodeDrag).toBeNull()
+        ed.destroy()
+    })
+
+    test('a node view running its own gesture opts out via preventDefault', () =>
+    {
+        const { ed, container } = dndEditor()
+        const view = container.querySelector('.nv')!
+        view.addEventListener('pointerdown', (e) => e.preventDefault())
+        view.dispatchEvent(pointer('pointerdown', { clientX: 10, clientY: 50 }))
+        expect((ed as any).nodeDrag).toBeNull()
+        ed.destroy()
+    })
+
+    test('dragDrop: false leaves presses on a node alone', () =>
+    {
+        const { ed, container } = dndEditor({ dragDrop: false })
+        container.querySelector('.nv')!.dispatchEvent(pointer('pointerdown', { clientX: 10, clientY: 50 }))
+        expect((ed as any).nodeDrag).toBeNull()
+        // …and the container keeps the scroller's pan gesture.
+        expect((container.querySelector('.nv')!.parentElement as HTMLElement).style.touchAction).toBe('')
+        ed.destroy()
+    })
+
+    test('a node view container claims the touch gesture so a swipe can drag', () =>
+    {
+        const { ed, container } = dndEditor()
+        const wrap = container.querySelector('.nv')!.parentElement as HTMLElement
+        expect(wrap.style.touchAction).toBe('none')
+        ed.destroy()
+    })
+
+    test('a read-only editor does not start node drags or move nodes', () =>
+    {
+        const { ed, container } = dndEditor({ editable: false })
+        container.querySelector('.nv')!.dispatchEvent(pointer('pointerdown', { clientX: 10, clientY: 50 }))
+        expect((ed as any).nodeDrag).toBeNull()
+        expect(ed.moveNode(7, 0)).toBe(false)
+        ed.destroy()
+    })
+
+    test('the browser’s own image drag is refused so it cannot steal the gesture', () =>
+    {
+        const { ed, container } = dndEditor()
+        const e = new Event('dragstart', { bubbles: true, cancelable: true })
+        container.querySelector('.nv')!.dispatchEvent(e)
+        expect(e.defaultPrevented).toBe(true)
+        ed.destroy()
+    })
+
+    // ── Dropping in from outside ─────────────────────────────────────
+
+    test('dragging over the editor shows a caret at the drop position', () =>
+    {
+        const { ed } = dndEditor()
+        ;(ed as any).stack.dispatchEvent(dragEvent('dragover', 16, 13))
+        expect((ed as any).dropTarget).toEqual({ pos: 3, seam: false })
+        ;(ed as any).stack.dispatchEvent(dragEvent('dragleave', 16, 300))
+        expect((ed as any).dropTarget).toBeNull()
+        ed.destroy()
+    })
+
+    test('dropped text lands where it was dropped, not at the caret', () =>
+    {
+        const { ed } = dndEditor()
+        ;(ed as any).stack.dispatchEvent(dragEvent('drop', 16, 13, { 'text/plain': 'ZZ' }))
+        expect(ed.state.doc.child(0).textContent).toBe('abZZove')
+        expect((ed as any).dropTarget).toBeNull()
+        ed.destroy()
+    })
+
+    test('dropped HTML is parsed through the schema', () =>
+    {
+        const { ed } = dndEditor()
+        ;(ed as any).stack.dispatchEvent(
+            dragEvent('drop', 16, 13, { 'text/html': '<p><strong>bold</strong></p>' }),
+        )
+        expect(ed.state.doc.textContent).toContain('bold')
+        ed.destroy()
+    })
+
+    test('dropped files are handed to dropFiles with the drop position', () =>
+    {
+        const calls: Array<{ pos: number, names: string[] }> = []
+        const { ed } = dndEditor({
+            handlers: {
+                dropFiles: (_e: unknown, pos: number, files: Array<{ name: string }>) =>
+                {
+                    calls.push({ pos, names: files.map((f) => f.name) })
+                    return true
+                },
+            },
+        })
+        const file = { name: 'frog.png', type: 'image/png' }
+        ;(ed as any).stack.dispatchEvent(dragEvent('drop', 16, 13, {}, [file]))
+        expect(calls).toEqual([{ pos: 3, names: ['frog.png'] }])
+        ed.destroy()
+    })
+
+    test('files with no dropFiles handler are ignored (no upload story built in)', () =>
+    {
+        const { ed } = dndEditor()
+        const before = ed.state.doc
+        ;(ed as any).stack.dispatchEvent(dragEvent('drop', 16, 13, { 'text/plain': 'x' }, [{ name: 'a.png' }]))
+        expect(ed.state.doc).toBe(before)
+        ed.destroy()
+    })
+
+    test('a drop handler takes over the whole drop', () =>
+    {
+        const seen: number[] = []
+        const { ed } = dndEditor({
+            handlers: {
+                drop: (_e: unknown, pos: number) => { seen.push(pos); return true },
+                dropFiles: () => { throw new Error('drop already handled it') },
+            },
+        })
+        const before = ed.state.doc
+        ;(ed as any).stack.dispatchEvent(dragEvent('drop', 16, 13, { 'text/plain': 'ZZ' }, [{ name: 'a.png' }]))
+        expect(seen).toEqual([3])
+        expect(ed.state.doc).toBe(before)
+        ed.destroy()
+    })
+
+    test('a read-only editor ignores drops', () =>
+    {
+        const { ed } = dndEditor({ editable: false })
+        const before = ed.state.doc
+        ;(ed as any).stack.dispatchEvent(dragEvent('drop', 16, 13, { 'text/plain': 'ZZ' }))
+        expect(ed.state.doc).toBe(before)
+        ed.destroy()
+    })
+})

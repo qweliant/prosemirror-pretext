@@ -72,12 +72,14 @@ The container element should be an empty block-level element. The editor creates
 | `placeholder` | `''` | Prompt drawn when the document is empty |
 | `placeholderColor` | `'#5a5a64'` | Placeholder text color |
 | `ruleColor` | `'#3a3a42'` | Color of a `horizontal_rule` leaf |
+| `dropIndicatorColor` | `caretColor` | Color of the drop indicator drawn while dragging |
 | `ariaLabel` | `'Rich text editor'` | Accessible name (the input's `aria-label`) |
 | `a11yMirror` | `true` | Maintain a screen-reader-visible DOM mirror of the document |
 | `editable` | `true` | Start editable or read-only (read-only keeps navigation/selection/copy, drops edits); toggle with `setEditable()` |
 | `autofocus` | `true` | Focus on construction. Set `false` for embeds so mounting doesn't steal focus or scroll the page |
 | `decorations` | `undefined` | `(state) => Decoration[]` — transient overlays (search highlight, squiggles, collab cursors, inline widgets, node backgrounds); recomputed each render. See `Decoration.{inline,node,widget}` |
-| `handlers` | `{}` | Overridable event handlers (`keyDown`, `click`, `doubleClick`, `paste`, `domEvents`) — return `true` to suppress the built-in behavior (à la prosemirror-view's `handle*`) |
+| `handlers` | `{}` | Overridable event handlers (`keyDown`, `click`, `doubleClick`, `paste`, `dragStart`, `drop`, `dropFiles`, `domEvents`) — return `true` to suppress the built-in behavior (à la prosemirror-view's `handle*`) |
+| `dragDrop` | `true` | Drag atom blocks to reorder them, and accept drops from outside. See [Drag & drop](#drag--drop) |
 | `markStyles` | defaults below | Maps mark names → a style `{ fontWeight, fontStyle, fontFamily, color, background, underline, strikethrough }`, or a `(mark) => style` function to read attributes |
 | `blockStyles` | `heading` / `blockquote` / `code_block` defaults | Maps block-type names → text style `{ fontSize, fontWeight, fontStyle, fontFamily, lineHeight, color }` + box decorations `{ paddingLeft/Right/Top/Bottom, background, borderLeft }` (or a `(node) => style` fn) |
 | `keymap` | `{}` | ProseMirror key bindings, checked before built-in keys |
@@ -203,6 +205,68 @@ children should `stopPropagation()` on mousedown so clicking them doesn't select
 the node. This is the foundation for images, embeds, and runnable blocks. Scope:
 flat atom blocks (no nesting), and a changed node's view is recreated, not
 diffed.
+
+## Drag & drop
+
+**Moving nodes.** Press a leaf/atom block (an image, an embed, a rule) and drag:
+a bar marks the seam it will land in — the same place, and the same look, as a
+gap cursor between those two blocks — and releasing dispatches one transaction,
+so the move is a single undo step and the node ends up selected. `Escape`
+abandons a drag in flight. It runs on **pointer** events, not HTML5 drag, so
+mouse, touch, and pen share one path (native drag never fires on touch); node
+view containers take `touch-action: none` so a swipe on a node drags it instead
+of scrolling. On by default — pass `dragDrop: false` to turn it off.
+
+A node view that runs its own pointer gesture (a resize handle, a custom drag)
+opts out per-node by calling `preventDefault()` on `pointerdown`, the same way
+interactive children `stopPropagation()` on `mousedown` to avoid selecting the
+node.
+
+Reordering isn't only for pointers — `moveNode` is public, so a "move block up"
+keyboard command or a slash menu goes through the same path:
+
+```ts
+editor.moveNode(fromPos, toPos)      // → boolean; false if the node can't live there
+editor.startNodeDrag(pos, event)     // begin a drag from your own handle's pointerdown
+```
+
+`fromPos` is the position *before* the node (what `getPos()` returns in a node
+view); `toPos` is an insertion position between blocks. The editor climbs out of
+any parent that can't hold the node, and refuses a drop inside the node itself.
+
+**Dropping in from outside.** OS file drops and drags from other tabs surface
+through handlers — the editor deliberately has no upload story of its own:
+
+```ts
+const editor = new CanvasEditor({
+  state, container,
+  handlers: {
+    // Files: no default. Upload, then insert whatever node you like.
+    dropFiles: (editor, pos, files) => {
+      for (const file of files) {
+        if (!file.type.startsWith('image/')) continue
+        const src = URL.createObjectURL(file)
+        const node = schema.nodes.image.create({ src, alt: file.name })
+        editor.dispatch(editor.state.tr.insert(pos, node))
+      }
+      return true
+    },
+    // Optional: take over *every* drop (including files) before the above.
+    drop: (editor, pos, event) => false,
+    // Optional: veto dragging a particular node.
+    dragStart: (editor, pos, event) => false,
+  },
+})
+```
+
+Dropped `text/html` and `text/plain` insert at the drop position (through the
+same schema-aware paste path) when no handler claims them; file drops with no
+`dropFiles` handler are ignored rather than guessed at. Read-only editors reject
+both drops and node drags.
+
+Not yet: dragging content *out* of the editor into another application (that
+needs native HTML5 drag, which excludes touch), dragging a text selection, and
+auto-scrolling when a drag reaches the edge of a `maxHeight` scroller.
 
 ## Selection-anchored UI (bubble menus)
 
@@ -336,7 +400,7 @@ editor needs to implement.
 
 - [x] **Rich paste** — `text/html` parsed through the schema's `parseDOM` rules (marks/headings/blocks survive); plain text splits blank lines into paragraphs
 - [x] **Touch input (mobile)** — tap places the caret and raises the keyboard; long-press selects a word and shows draggable **selection handles** (drag to extend); swipe scrolls natively (`touch-action: pan-y`); the caret is kept above the on-screen keyboard (`visualViewport`-aware). Mouse/touch/pen are unified. Not yet: an iOS-style magnifier loupe, double/triple-tap selection
-- [ ] **Drag & drop** — move nodes, drop images
+- [x] **Drag & drop** — drag a block/atom node to a new place in the document (pointer-based, so mouse/touch/pen share one path), with a drop indicator painted in the seam it will land in; the move is one undoable transaction. Drops from outside (OS files, other tabs) arrive as `handlers.drop` / `handlers.dropFiles`; text/HTML drops insert where they land. Not yet: dragging content *out* of the editor to another app, dragging a text selection, and edge auto-scroll
 
 ## Architecture
 

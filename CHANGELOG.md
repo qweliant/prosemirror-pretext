@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### Added
+
+- **Drag & drop.**
+  - **Move a node** by dragging it: press a leaf/atom block and drag, and a
+    drop indicator marks the seam it will land in (drawn where a gap cursor
+    between those blocks would be). Releasing dispatches one transaction — a
+    single undo step — and selects the node at its new home; `Escape` abandons
+    the drag. Built on **pointer** events rather than HTML5 drag, so mouse,
+    touch, and pen share one path; node view containers claim the touch gesture
+    (`touch-action: none`) so a swipe on a node drags it instead of scrolling.
+    On by default (`dragDrop: false` opts out); a node view running its own
+    gesture opts out per-node by `preventDefault()`-ing its `pointerdown`.
+  - **Drops from outside** — OS files and drags from other tabs — surface as
+    `handlers.drop` and `handlers.dropFiles`. Files have no default: turning one
+    into a node means uploading it, which is the app's story, not the editor's.
+    Dropped `text/html` / `text/plain` insert at the drop position via the
+    existing schema-aware paste path.
+  - `moveNode(from, to)` and `startNodeDrag(pos, event)` are public, so keyboard
+    reordering commands and custom drag handles run through the same path.
+  - New: `dragDrop` and `dropIndicatorColor` options; `dragStart`, `drop`, and
+    `dropFiles` handlers.
+
+  Not yet: dragging content *out* to another application (that needs native
+  HTML5 drag, which excludes touch), dragging a text selection, and edge
+  auto-scroll inside a `maxHeight` scroller.
+
 ### Fixed
 
 - Clicking the text beside a floated node no longer puts the caret before the
