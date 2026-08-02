@@ -56,6 +56,10 @@ import {
     isRuleNode, isListNode, isOrderedList, isLeafBlock, collectBlocks, isDocEmpty,
 } from './layout/blocks'
 import { applyVirtualLayout, paintToCanvas, type PaintContext } from './paint'
+import {
+    blockHasMarks, resolveRunStyle, resolveBlockStyle, boxFields, blockBase,
+    blockContentWidth, type StyleContext,
+} from './layout/style'
 
 // The public types live in ./types but are re-exported here so `src/index.ts`
 // and existing `from './editor'` imports keep resolving unchanged.
@@ -888,151 +892,43 @@ export class CanvasEditor {
     };
   }
 
+  // Style resolution lives in ./layout/style — the half of layout tables do
+  // not change. These forward with the config it reads; `styleCx` is a getter
+  // over readonly fields, so it costs an object and nothing else.
+  private get styleCx(): StyleContext {
+    return {
+      font: this.font,
+      baseFontSize: this.baseFontSize,
+      baseFontFamily: this.baseFontFamily,
+      lineHeight: this.lineHeight,
+      containerWidth: this.containerWidth,
+      markStyles: this.markStyles,
+      blockStyles: this.blockStyles,
+    };
+  }
+
   private blockHasMarks(node: PMNode): boolean {
-    let has = false;
-    node.forEach((child) => {
-      if (child.marks.length > 0) has = true;
-    });
-    return has;
+    return blockHasMarks(node);
   }
 
-  /**
-   * Resolve a run's marks to a CSS font string + fill color, composing
-   * weight/style/family over the base font size. Color is null when no mark
-   * overrides it (so the caller can fall back to the line color / accent).
-   */
-  private resolveRunStyle(
-    marks: readonly Mark[],
-    base: ResolvedBlockStyle,
-  ): {
-    font: string;
-    color: string | null;
-    background: string | null;
-    underline: boolean;
-    strikethrough: boolean;
-    baselineShift: number;
-  } {
-    // Marks compose over the block's base style (so bold in an h1 is bold
-    // at h1 size).
-    let fontStyle = base.fontStyle;
-    let fontWeight = base.fontWeight;
-    let family = base.fontFamily;
-    let color: string | null = base.color;
-    let background: string | null = null;
-    let underline = false;
-    let strikethrough = false;
-    let verticalAlign: "super" | "sub" | null = null;
-
-    for (const mark of marks) {
-      const entry = this.markStyles[mark.type.name];
-      const ms = typeof entry === "function" ? entry(mark) : entry;
-      if (!ms) continue;
-      if (ms.fontStyle) fontStyle = ms.fontStyle;
-      if (ms.fontWeight !== undefined) fontWeight = String(ms.fontWeight);
-      if (ms.fontFamily) family = ms.fontFamily;
-      if (ms.color) color = ms.color;
-      if (ms.background) background = ms.background;
-      if (ms.underline) underline = true;
-      if (ms.strikethrough) strikethrough = true;
-      if (ms.verticalAlign) verticalAlign = ms.verticalAlign;
-    }
-
-    // Super/subscript shrink the run and shift it off the baseline.
-    const size = verticalAlign
-      ? Math.round(base.fontSize * 0.72)
-      : base.fontSize;
-    const baselineShift =
-      verticalAlign === "super"
-        ? -Math.round(base.fontSize * 0.3)
-        : verticalAlign === "sub"
-          ? Math.round(base.fontSize * 0.18)
-          : 0;
-
-    const font = `${fontStyle} ${fontWeight} ${size}px ${family}`
-      .replace(/\s+/g, " ")
-      .trim();
-    return { font, color, background, underline, strikethrough, baselineShift };
+  private resolveRunStyle(marks: readonly Mark[], base: ResolvedBlockStyle) {
+    return resolveRunStyle(this.styleCx, marks, base);
   }
 
-  /** The base text style for a block (font/line-height/color). Defaults to
-   * the editor's base; `blockStyles` overrides per node type (e.g. headings). */
   private resolveBlockStyle(node: PMNode): ResolvedBlockStyle {
-    // Per-instance text alignment from the node's `align` attribute.
-    const a = node.attrs["align"];
-    const textAlign: "left" | "center" | "right" =
-      a === "center" || a === "right" ? a : "left";
-
-    const entry = this.blockStyles[node.type.name];
-    const bs = typeof entry === "function" ? entry(node) : entry;
-    if (!bs) {
-      return {
-        font: this.font,
-        fontSize: this.baseFontSize,
-        fontFamily: this.baseFontFamily,
-        fontWeight: "",
-        fontStyle: "",
-        lineHeight: this.lineHeight,
-        color: null,
-        paddingLeft: 0,
-        paddingRight: 0,
-        paddingTop: 0,
-        paddingBottom: 0,
-        background: null,
-        borderLeft: null,
-        textAlign,
-      };
-    }
-    const fontSize = bs.fontSize ?? this.baseFontSize;
-    const fontFamily = bs.fontFamily ?? this.baseFontFamily;
-    const fontWeight = bs.fontWeight !== undefined ? String(bs.fontWeight) : "";
-    const fontStyle = bs.fontStyle ?? "";
-    const font = `${fontStyle} ${fontWeight} ${fontSize}px ${fontFamily}`
-      .replace(/\s+/g, " ")
-      .trim();
-    return {
-      font,
-      fontSize,
-      fontFamily,
-      fontWeight,
-      fontStyle,
-      lineHeight: bs.lineHeight ?? this.lineHeight,
-      color: bs.color ?? null,
-      paddingLeft: bs.paddingLeft ?? 0,
-      paddingRight: bs.paddingRight ?? 0,
-      paddingTop: bs.paddingTop ?? 0,
-      paddingBottom: bs.paddingBottom ?? 0,
-      background: bs.background ?? null,
-      borderLeft: bs.borderLeft ?? null,
-      textAlign,
-    };
+    return resolveBlockStyle(this.styleCx, node);
   }
 
-  /** The style/box fields shared by every CachedBlock, from a resolved base.
-   *  `indent` is the raw list indent already folded into base.paddingLeft. */
   private boxFields(base: ResolvedBlockStyle, indent = 0) {
-    return {
-      font: base.font,
-      fontSize: base.fontSize,
-      color: base.color,
-      paddingLeft: base.paddingLeft,
-      paddingRight: base.paddingRight,
-      paddingTop: base.paddingTop,
-      paddingBottom: base.paddingBottom,
-      background: base.background,
-      borderLeft: base.borderLeft,
-      indent,
-    };
+    return boxFields(base, indent);
   }
 
-  /** Resolve a block's base style, folding a list indent into its left pad. */
   private blockBase(node: PMNode, indent: number): ResolvedBlockStyle {
-    const rbs = this.resolveBlockStyle(node);
-    return indent ? { ...rbs, paddingLeft: rbs.paddingLeft + indent } : rbs;
+    return blockBase(this.styleCx, node, indent);
   }
 
-  /** Content width available to a block after its horizontal padding. */
   private blockContentWidth(base: ResolvedBlockStyle): number {
-    return this.containerWidth - base.paddingLeft - base.paddingRight;
+    return blockContentWidth(this.styleCx, base);
   }
 
   /**
