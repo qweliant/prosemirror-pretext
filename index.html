@@ -4,259 +4,37 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Canvas Editor — Base Three</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <title>prosemirror-pretext — demo</title>
+    <!--
+        There is exactly one demo, and it lives in site/. It is what `bun run
+        dev:site` serves and what ships to GitHub Pages, so `bun run dev` sends
+        you to the same page rather than drifting into a second, staler copy.
+    -->
+    <meta http-equiv="refresh" content="0; url=./site/" />
+    <link rel="canonical" href="./site/" />
     <style>
-        *,
-        *::before,
-        *::after {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
-
         body {
+            margin: 0;
             min-height: 100vh;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            background: #0e0e10;
-            font-family: 'Inter', sans-serif;
-            color: #a0a0a8;
+            display: grid;
+            place-items: center;
+            background: #e7faf0;
+            color: #2f6e1c;
+            font: 500 15px/1.6 system-ui, sans-serif;
         }
 
-        .editor-chrome {
-            position: relative;
-            width: 640px;
-            background: #18181b;
-            border: 1px solid #2a2a2f;
-            border-radius: 12px;
-            overflow: hidden;
-            box-shadow:
-                0 0 0 1px rgba(255, 255, 255, 0.03),
-                0 20px 60px rgba(0, 0, 0, 0.5),
-                0 4px 16px rgba(0, 0, 0, 0.3);
-        }
-
-        .editor-titlebar {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            padding: 12px 16px;
-            background: #1c1c20;
-            border-bottom: 1px solid #2a2a2f;
-            user-select: none;
-        }
-
-        .editor-titlebar .dots {
-            display: flex;
-            gap: 6px;
-        }
-
-        .editor-titlebar .dot {
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-        }
-
-        .editor-titlebar .dot:nth-child(1) {
-            background: #ff5f57;
-        }
-
-        .editor-titlebar .dot:nth-child(2) {
-            background: #febc2e;
-        }
-
-        .editor-titlebar .dot:nth-child(3) {
-            background: #28c840;
-        }
-
-        .editor-titlebar .title {
-            flex: 1;
-            text-align: center;
-            font-size: 12px;
-            font-weight: 500;
-            color: #5a5a64;
-            letter-spacing: 0.03em;
-        }
-
-        .canvas-wrap {
-            padding: 40px;
-            position: relative;
-        }
-
-        .bubble {
-            position: fixed;
-            display: none;
-            gap: 4px;
-            padding: 4px;
-            border-radius: 8px;
-            background: #1c1c20;
-            border: 1px solid #3a3a42;
-            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
-            z-index: 10;
-        }
-
-        .bubble .tb {
-            min-width: 28px;
-            height: 26px;
-        }
-
-        .run-block {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            padding: 10px 12px;
-            border-radius: 8px;
-            background: #1c1c20;
-            border: 1px solid #2a2a2f;
-            font-family: 'SF Mono', ui-monospace, monospace;
-            font-size: 13px;
-            color: #d4d4d8;
-        }
-
-        .run-block .run-btn {
-            padding: 4px 10px;
-            border-radius: 6px;
-            border: 1px solid #2f8f4f;
-            background: rgba(64, 200, 100, 0.15);
-            color: #6ee7a0;
-            font-size: 12px;
-            font-weight: 600;
-            cursor: pointer;
-        }
-
-        .run-block .run-out { color: #6ee7a0; }
-
-        .img-resize {
-            position: absolute;
-            right: -5px;
-            bottom: -5px;
-            width: 14px;
-            height: 14px;
-            border-radius: 50%;
-            background: #a5b4fc;
-            border: 2px solid #18181b;
-            cursor: nwse-resize;
-            touch-action: none;
-        }
-
-        .float-box {
-            position: absolute;
-            display: flex;
-            align-items: flex-end;
-            padding: 10px;
-            border-radius: 8px;
-            background:
-                linear-gradient(135deg, rgba(129, 140, 248, 0.45), rgba(232, 100, 130, 0.4));
-            border: 1px solid rgba(165, 180, 252, 0.5);
-            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
-            color: #e8e8ef;
-            font-family: 'Inter', sans-serif;
-            font-size: 11px;
-            font-weight: 600;
-            letter-spacing: 0.03em;
-            cursor: grab;
-            user-select: none;
-            touch-action: none;
-            z-index: 3;
-        }
-
-        .float-box:active {
-            cursor: grabbing;
-        }
-
-        .toolbar {
-            display: flex;
-            gap: 6px;
-            margin-bottom: 20px;
-        }
-
-        .toolbar .tb {
-            min-width: 32px;
-            height: 28px;
-            padding: 0 8px;
-            border: 1px solid #2a2a2f;
-            border-radius: 6px;
-            background: #1c1c20;
-            color: #a0a0a8;
-            font-family: 'Inter', sans-serif;
-            font-size: 13px;
-            font-weight: 600;
-            cursor: pointer;
-        }
-
-        .toolbar {
-            flex-wrap: wrap;
-        }
-
-        .toolbar .tb-sep {
-            width: 1px;
-            align-self: stretch;
-            background: #2a2a2f;
-            margin: 0 4px;
-        }
-
-        .toolbar .tb:nth-child(2) { font-style: italic; }
-        .toolbar .tb:nth-child(3) { font-family: monospace; }
-
-        .toolbar .tb:hover {
-            border-color: #3a3a42;
-            color: #d4d4d8;
-        }
-
-        .toolbar .tb.active {
-            background: rgba(129, 140, 248, 0.15);
-            border-color: #818cf8;
-            color: #a5b4fc;
-        }
-
-        .status-bar {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 8px 16px;
-            border-top: 1px solid #2a2a2f;
-            font-size: 11px;
-            color: #4a4a54;
-            letter-spacing: 0.02em;
-        }
-
-        .status-bar .pipeline-tag {
-            padding: 2px 8px;
-            border-radius: 4px;
-            background: rgba(99, 102, 241, 0.12);
-            color: #818cf8;
-            font-weight: 500;
+        a {
+            color: #46a8d8;
         }
     </style>
 </head>
 
 <body>
-    <div class="editor-chrome">
-        <div class="editor-titlebar">
-            <div class="dots">
-                <div class="dot"></div>
-                <div class="dot"></div>
-                <div class="dot"></div>
-            </div>
-            <div class="title">canvas-editor — base three</div>
-            <div style="width: 48px;"></div>
-        </div>
-        <div class="canvas-wrap">
-            <div id="toolbar" class="toolbar"></div>
-            <div id="editor-container"></div>
-        </div>
-        <div class="status-bar">
-            <span id="status-info">Loading...</span>
-            <span class="pipeline-tag">ProseMirror → Pretext → Canvas</span>
-        </div>
-    </div>
-
-    <script type="module" src="/demo/main.ts"></script>
+    <p>Taking you to the demo — <a href="./site/">site/index.html</a>…</p>
+    <script type="module">
+        // Belt and braces: `<meta refresh>` is disabled in some setups.
+        location.replace(new URL('./site/', location.href))
+    </script>
 </body>
 
 </html>

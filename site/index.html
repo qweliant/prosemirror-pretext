@@ -137,6 +137,20 @@
 
         .editor-card { padding: 8px 10px 12px; overflow: hidden; }
 
+        /* the run-button node view (real DOM the editor mounts over the canvas) */
+        .run-block {
+            display: flex; align-items: center; gap: 10px; padding: 9px 12px;
+            background: #f4fff0; border: 1.5px solid #d7ecc9; border-radius: 12px;
+            font: 500 13px var(--mono); color: var(--frog-dark);
+        }
+        .run-block .run-btn {
+            flex: 0 0 auto; padding: 4px 11px; border-radius: 8px; cursor: pointer;
+            border: 1.5px solid var(--frog-deep); background: var(--frog); color: #fff;
+            font: 700 12px var(--body);
+        }
+        .run-block .run-btn:hover { background: var(--frog-deep); }
+        .run-block .run-out { color: var(--pond-deep); font-weight: 700; }
+
         /* ── Under the hood (collapsible engineering proof) ──────────────── */
         .under-hood { max-width: 720px; margin: 16px auto 0; }
         .under-hood > summary {
@@ -169,6 +183,54 @@
             font: 12px/1.6 var(--mono); white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto;
         }
         .mirror-peek b { color: var(--frog); }
+
+        /* ── Scale lab (scroll virtualization) ───────────────────────────── */
+        .scale-bar {
+            display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+            padding: 9px 12px; border-bottom: 1px solid #eef5e8; background: #fbfff5;
+        }
+        .scale-bar .lbl { font: 700 12px var(--body); color: #7c9a6b; }
+        .scale-bar .mini-btn {
+            font: 700 12.5px var(--body); cursor: pointer; background: #fff; border: 1.5px solid #d7ecc9;
+            color: var(--frog-dark); border-radius: 999px; padding: 5px 12px;
+        }
+        .scale-bar .mini-btn.on { background: var(--frog); border-color: var(--frog-deep); color: #fff; }
+        .scale-bar .mini-btn:disabled { opacity: .5; cursor: progress; }
+        .scale-bar .go { margin-left: auto; background: var(--sun); border-color: #e6c84a; }
+        @media (max-width: 560px) { .scale-bar .go { margin-left: 0; } }
+
+        /* Reserve the scroller's height up front so mounting doesn't shove the
+           page around under the reader. */
+        #scale-embed { min-height: 420px; }
+        /* The editor sizes its `maxHeight` scroller to exactly the canvas width,
+           so on platforms with classic (space-taking) scrollbars the vertical
+           scrollbar eats into the content box and forces a spurious *horizontal*
+           scrollbar that clips the last few glyphs of every line. Letting the
+           scroller fill the card gives the scrollbar somewhere to live. */
+        #scale-embed > div { width: 100% !important; }
+
+        .scale-foot { max-width: 720px; margin: 12px auto 0; }
+        .scale-foot .row { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; justify-content: center; }
+        #scale-stats { font: 600 12.5px var(--mono); color: var(--frog-dark); }
+        #scale-stats .reflow { color: var(--frog-deep); }
+        #scale-empty { font: 500 13px var(--body); color: #7c9a6b; }
+
+        .scale-table-wrap { margin-top: 12px; overflow-x: auto; }
+        table.scale-table {
+            width: 100%; min-width: 420px; border-collapse: collapse; background: #fff;
+            border: 1.5px solid #e2eed7; border-radius: 14px; overflow: hidden;
+            font: 500 13px var(--mono); color: var(--ink);
+        }
+        table.scale-table th {
+            font: 700 11.5px var(--body); text-transform: uppercase; letter-spacing: .04em;
+            color: #7c9a6b; text-align: right; padding: 9px 12px; background: #fbfff5;
+            border-bottom: 1.5px solid #e2eed7; white-space: nowrap;
+        }
+        table.scale-table th:first-child, table.scale-table td:first-child { text-align: left; }
+        table.scale-table td { padding: 8px 12px; text-align: right; border-bottom: 1px solid #f1f7ea; }
+        table.scale-table tr:last-child td { border-bottom: 0; }
+        table.scale-table td b { color: var(--frog-deep); }
+        table.scale-table caption { caption-side: bottom; padding: 9px 4px 0; font: 500 12px var(--body); color: #7c9a6b; text-align: left; }
 
         /* ── Cards / unique ──────────────────────────────────────────────── */
         .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
@@ -227,6 +289,7 @@
             <span class="chip pink">no contenteditable</span>
             <span class="chip blue">a11y mirror</span>
             <span class="chip">0 reflows</span>
+            <span class="chip pink">virtualized</span>
         </div>
         <h1 class="title">prosemirror<span class="pretext">-pretext</span></h1>
         <p class="tagline">A ProseMirror view rendered to <b>&lt;canvas&gt;</b> — no contenteditable, no DOM text
@@ -235,6 +298,7 @@
         <div class="cta">
             <a class="btn" href="#try">🪷 try it live</a>
             <a class="btn coral" href="https://github.com/qweliant/prosemirror-pretext">★ github</a>
+            <a class="btn ghost" href="#scale">⚡ see it scale</a>
             <a class="btn ghost" href="#start">⌨ quick start</a>
         </div>
     </header>
@@ -263,6 +327,7 @@
                         <input id="search" class="search" placeholder="find &amp; highlight text…" />
                         <button id="collab-toggle" class="mini-btn">👥 collaborator</button>
                         <button id="readonly-toggle" class="mini-btn">🔒 read-only</button>
+                        <button id="placeholder-toggle" class="mini-btn">🧹 empty the doc</button>
                         <button id="mirror-toggle" class="mini-btn">🦻 screen-reader view</button>
                     </div>
                     <pre id="mirror-peek" class="mirror-peek" hidden></pre>
@@ -271,7 +336,56 @@
 
             <p class="sub" style="margin-top:16px">Headings · <b>bold</b>/<i>italic</i>/<code
                     class="inline">code</code>/links/<u>underline</u>/strike/color/highlight · lists · blockquote · code
-                block · alignment · images that float · rich paste · undo/redo — and it all works on touch.</p>
+                block · alignment · images that float · interactive node views · rich paste · undo/redo — and it all
+                works on touch.</p>
+        </div>
+    </section>
+
+    <!-- ── Scale lab: scroll virtualization + per-keystroke cost ─────────── -->
+    <section id="scale">
+        <div class="wrap">
+            <h2 class="sec">does it hold at scale?<span class="dot"> ⚡</span></h2>
+            <p class="sub">a second editor, mounted with <code class="inline">maxHeight</code> — the content scrolls and
+                only the blocks intersecting the viewport are laid out and painted</p>
+
+            <div class="editor-shell">
+                <div class="brow">
+                    <span class="live-dot"></span> virtualized editor
+                    <span class="hint">maxHeight: 420px · scroll it, type in it</span>
+                </div>
+                <div class="scale-bar">
+                    <span class="lbl">blocks:</span>
+                    <span id="scale-sizes" style="display:contents"></span>
+                    <button id="scale-measure" class="mini-btn go" disabled>⏱ measure 150 keystrokes</button>
+                </div>
+                <div class="editor-card">
+                    <div id="scale-embed"></div>
+                </div>
+            </div>
+
+            <div class="scale-foot">
+                <div class="row">
+                    <span id="scale-empty">scroll here and a 2,000-block document mounts itself…</span>
+                    <span id="scale-stats"></span>
+                </div>
+                <div id="scale-table" class="scale-table-wrap" hidden>
+                    <table class="scale-table">
+                        <caption>ms per keystroke — insert a character mid-document, then read the caret's pixel
+                            position (the read-after-write every bubble menu pays). Run it at each size: the numbers
+                            shouldn't move.</caption>
+                        <thead>
+                            <tr>
+                                <th scope="col">layout blocks</th>
+                                <th scope="col">lines</th>
+                                <th scope="col">p50</th>
+                                <th scope="col">p95</th>
+                                <th scope="col">max</th>
+                            </tr>
+                        </thead>
+                        <tbody id="scale-rows"></tbody>
+                    </table>
+                </div>
+            </div>
         </div>
     </section>
 
@@ -306,7 +420,8 @@
                         <span class="reflow">“0 reflows”</span> under the editor isn't marketing; it's the architecture.
                     </p>
                     <p class="vs">DOM editors pay a read-after-write reflow that scales with the page — ~11× slower
-                        at 8k blocks. <a href="https://github.com/qweliant/prosemirror-pretext/tree/main/bench">see the benchmark →</a></p>
+                        at 8k blocks. <a href="#scale">measure it yourself ↓</a> ·
+                        <a href="https://github.com/qweliant/prosemirror-pretext/tree/main/bench">see the benchmark →</a></p>
                 </div>
             </div>
         </div>
@@ -339,14 +454,21 @@
                         familiar <code class="inline">prosemirror-view</code>-shaped API.</p>
                 </div>
                 <div class="card b3"><span class="ico">🔒</span>
-                    <h3>Read-only mode</h3>
+                    <h3>Read-only &amp; placeholder</h3>
                     <p>Toggle <code class="inline">editable</code> — navigation, selection, and copy keep working while
-                        edits are dropped. (Try the button above.)</p>
+                        edits are dropped. Empty the doc and the <code class="inline">placeholder</code> shows. (Both
+                        live under <b>“under the hood”</b> above.)</p>
                 </div>
                 <div class="card"><span class="ico">🧩</span>
-                    <h3>Bring your schema</h3>
-                    <p>Peer-deps the ProseMirror stack; you define the schema, marks, and node views. Float-wrap and
-                        styling are opt-in per node.</p>
+                    <h3>Node views</h3>
+                    <p>Mount real interactive DOM for any atom block — the editor reserves its measured height in the
+                        canvas layout and keeps it positioned. The <b>▶ Run</b> strip above is one.</p>
+                </div>
+                <div class="card b2"><span class="ico">📜</span>
+                    <h3>Scroll virtualization</h3>
+                    <p>Set <code class="inline">maxHeight</code> and the content scrolls: the scrollbar spans the whole
+                        document while the canvas only ever covers one viewport. <a href="#scale">Try 8,000 blocks ↑</a>
+                    </p>
                 </div>
             </div>
         </div>
@@ -404,7 +526,9 @@
         <p class="note">Keroppi-coded color &amp; vibes only — no Sanrio assets are bundled. 🐸💕</p>
     </footer>
 
-    <script type="module" src="/site.ts"></script>
+    <!-- Relative, so this page works both as the vite root (`bun run dev:site`,
+         `build:site`) and when served at /site/ from the repo root (`bun run dev`). -->
+    <script type="module" src="./site.ts"></script>
 </body>
 
 </html>
