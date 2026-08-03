@@ -21,6 +21,7 @@ import type {
 import type { BlockLayout, LineFragment, LineLayout, TableChrome } from './types'
 import { TABLE_BORDER } from './constants'
 import { isRuleNode, isDocEmpty } from './layout/blocks'
+import { CellSelection } from './table-selection'
 
 /**
  * Everything painting needs from the editor. Passed explicitly rather than
@@ -213,7 +214,21 @@ export function paintToCanvas(
     }
 
     const sel = cx.selection
-    if (!sel.empty)
+    if (sel instanceof CellSelection)
+    {
+        // A cell selection is a shape, not a range: fill each selected cell's
+        // whole box rather than tracing line rects through structural tokens.
+        const selected = new Set(sel.cells.map((c) => c.pos))
+        ctx.fillStyle = cx.selectionColor
+        for (const t of tables)
+        {
+            for (const c of t.cells)
+            {
+                if (selected.has(c.pos)) ctx.fillRect(c.x, c.y, c.width, c.height)
+            }
+        }
+    }
+    else if (!sel.empty)
     {
         ctx.fillStyle = cx.selectionColor
         paintSelectionRects(cx, ctx, layouts, sel.from, sel.to)

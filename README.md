@@ -378,7 +378,7 @@ editor needs to implement.
 - [x] **Horizontal rule** — canvas-drawn leaf block (`horizontal_rule` / `hr`), selectable like an atom (`ruleColor`)
 - [x] **Lists** (bullet / ordered) — recursive tree walk → per-level indent + bullet/number markers in the gutter; Enter splits an item, Tab/Shift-Tab nest/lift (via `prosemirror-schema-list`)
 - [x] **Text alignment** — `left | center | right` via a block's `align` attribute (caret/click/selection all follow the shift). `justify` not yet (needs inter-word distribution)
-- [x] **Tables** — grid layout with per-cell text flow. Columns share the content width (or honor `colwidth`); a row is as tall as its tallest cell. A cell is an ordinary block laid out into its own `LayoutFrame`, so marks, styles, caret, and editing work inside cells unchanged. `colspan` is honored for width. Not yet: `rowspan`, non-textblock cell content, cross-cell selection, and row/column commands
+- [x] **Tables** — grid layout with per-cell text flow, `colspan` + `rowspan`, cross-cell selection, and row/column commands. A cell is an ordinary flow of blocks laid out into its own `LayoutFrame`, so marks, styles, lists, nested tables, caret, and editing all work inside cells unchanged. `CellSelection` is a real ProseMirror `Selection`, so it maps through transactions and undo. Commands (`addRowAfter`, `deleteColumn`, `goToNextCell`, …) are plain `Command`s. Built without `prosemirror-tables` (its entry point imports `prosemirror-view`), but attribute-compatible with it. Not yet: merge/split cells, column resize handles
 
 ### Media & embeds
 

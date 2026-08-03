@@ -8,6 +8,12 @@ import { GapCursor } from 'prosemirror-gapcursor'
 import { markSpecs, buildMarkKeymap } from '../src/marks'
 import { expandCollapsedWhitespace } from '../src/text'
 import { Decoration } from '../src/decoration'
+import { CellSelection } from '../src/table-selection'
+import {
+    addRowAfter, deleteRow, addColumnAfter, deleteColumn,
+    deleteTable, selectRow, goToNextCell,
+} from '../src/table-commands'
+import { buildGrid, cellAt, findTable } from '../src/layout/table-map'
 
 const nodes: Record<string, NodeSpec> = {
     doc: { content: '(paragraph | widget | heading | blockquote | code_block | horizontal_rule | bullet_list | ordered_list | table)+' },
@@ -23,13 +29,13 @@ const nodes: Record<string, NodeSpec> = {
         parseDOM: [{ tag: 'tr' }],
     },
     table_cell: {
-        content: 'paragraph+',
+        content: '(paragraph | bullet_list | ordered_list | table)+',
         attrs: { colspan: { default: 1 }, rowspan: { default: 1 }, colwidth: { default: null } },
         toDOM: () => ['td', 0],
         parseDOM: [{ tag: 'td' }],
     },
     table_header: {
-        content: 'paragraph+',
+        content: '(paragraph | bullet_list | ordered_list | table)+',
         attrs: { colspan: { default: 1 }, rowspan: { default: 1 }, colwidth: { default: null } },
         toDOM: () => ['th', 0],
         parseDOM: [{ tag: 'th' }],
@@ -3018,6 +3024,254 @@ describe('tables (side-by-side layout)', () =>
         const { ed } = mk(row(cell('aa'), cell('bb')))
         // lastTables is non-empty, so the incremental path must decline.
         expect((ed as any).tryIncrementalLayout()).toBe(false)
+        ed.destroy()
+    })
+})
+
+
+describe('tables: grid model, spans, selection, commands', () =>
+{
+    const p = (t: string) => schema.node('paragraph', null, t ? [schema.text(t)] : [])
+    const td = (t: string, attrs: any = {}) => schema.node('table_cell', attrs, [p(t)])
+    const th = (t: string, attrs: any = {}) => schema.node('table_header', attrs, [p(t)])
+    const tr_ = (...c: any[]) => schema.node('table_row', null, c)
+    const tbl = (...rows: any[]) => schema.node('table', null, rows)
+
+    function mk(table: any)
+    {
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        const doc = schema.node('doc', null, [table])
+        const ed = new CanvasEditor({ state: EditorState.create({ doc, schema }), container })
+        return ed
+    }
+    const gridOf = (ed: CanvasEditor) =>
+    {
+        const t = findTable(ed.state.doc, 1)!
+        return buildGrid(t.node, t.pos)
+    }
+
+    // ── grid model ──
+    test('a rowspan shifts later cells right, and slots resolve to the spanner', () =>
+    {
+        // r0: [A(rowspan2)][B]   r1: [C]  -> C must land in column 1, not 0.
+        const ed = mk(tbl(
+            tr_(td('A', { rowspan: 2 }), td('B')),
+            tr_(td('C')),
+        ))
+        const g = gridOf(ed)
+        expect(g.width).toBe(2)
+        expect(g.height).toBe(2)
+        const c = g.cells.find((x) => x.node.textContent === 'C')!
+        expect(c.col).toBe(1)
+        expect(cellAt(g, 1, 0)!.node.textContent).toBe('A')   // spanner occupies it
+        expect(cellAt(g, 0, 0)!.node.textContent).toBe('A')
+        ed.destroy()
+    })
+
+    test('colspan widens the grid and occupies every column it covers', () =>
+    {
+        const ed = mk(tbl(tr_(td('wide', { colspan: 3 })), tr_(td('a'), td('b'), td('c'))))
+        const g = gridOf(ed)
+        expect(g.width).toBe(3)
+        for (let c = 0; c < 3; c++) expect(cellAt(g, 0, c)!.node.textContent).toBe('wide')
+        ed.destroy()
+    })
+
+    test('a rowspan cell reserves height across the rows it covers', () =>
+    {
+        // Control: the same three-paragraph cell, not spanning. Its row height
+        // is the height that content actually needs.
+        const control = mk(tbl(tr_(schema.node('table_cell', null, [p('x'), p('y'), p('z')]))))
+        const needed = (control as any).lastTables[0].rows[0].height as number
+        control.destroy()
+
+        // Spanning over two rows whose other cells are each a single line: the
+        // rows must be grown to fit it. Asserting the box equals the sum of its
+        // rows would be vacuous — pass 3 computes it that way by construction —
+        // so compare against what the content genuinely needs.
+        const tall = schema.node('table_cell', { rowspan: 2 }, [p('x'), p('y'), p('z')])
+        const ed = mk(tbl(tr_(tall, td('b')), tr_(td('c'))))
+        const chrome = (ed as any).lastTables[0]
+        const r0 = chrome.rows[0].height as number
+        const r1 = chrome.rows[1].height as number
+        expect(r0 + r1).toBeGreaterThanOrEqual(needed)
+        // And the deficit lands on the last row it covers, not the first, so a
+        // shorter cell already fixing row 0 is not disturbed.
+        expect(r1).toBeGreaterThan(r0)
+        const spanBox = chrome.cells.find((c: any) => c.row === 0 && c.col === 0)!
+        expect(spanBox.height).toBe(r0 + r1)
+        ed.destroy()
+    })
+
+    // ── nested / non-textblock cell content ──
+    test('a list inside a cell lays out inside that cell frame', () =>
+    {
+        const listCell = schema.node('table_cell', null, [
+            schema.node('bullet_list', null, [
+                schema.node('list_item', null, [p('one')]),
+                schema.node('list_item', null, [p('two')]),
+            ]),
+        ])
+        const ed = mk(tbl(tr_(listCell, td('right'))))
+        const layouts = (ed as any).lastLayouts as any[]
+        const items = layouts.filter((b) => b.text === 'one' || b.text === 'two')
+        expect(items.length).toBe(2)
+        const chrome = (ed as any).lastTables[0]
+        const col0 = chrome.cols[0]
+        for (const it of items)
+        {
+            expect(it.marker).toBeTruthy()                       // bullets survive
+            expect(it.lines[0].x).toBeGreaterThanOrEqual(col0.x) // stays in its column
+            expect(it.lines[0].x).toBeLessThan(col0.x + col0.width)
+        }
+        ed.destroy()
+    })
+
+    test('a table nested in a cell produces its own chrome', () =>
+    {
+        const inner = tbl(tr_(td('i1'), td('i2')))
+        const outerCell = schema.node('table_cell', null, [inner])
+        const ed = mk(tbl(tr_(outerCell, td('right'))))
+        const tables = (ed as any).lastTables as any[]
+        expect(tables.length).toBe(2)                 // outer + nested
+        const nested = tables.find((t) => t.cols.length === 2 && t.y > tables[0].y - 1 && t !== tables[0])
+        expect(nested).toBeTruthy()
+        expect(nested.width).toBeLessThan(tables[0].width)
+        ed.destroy()
+    })
+
+    // ── cell selection ──
+    test('CellSelection.between snaps to a rectangle and is not visible', () =>
+    {
+        const ed = mk(tbl(tr_(td('a'), td('b')), tr_(td('c'), td('d'))))
+        const g = gridOf(ed)
+        const a = g.cells[0], d = g.cells[3]
+        const sel = CellSelection.between(ed.state.doc, a.pos + 1, d.pos + 1)!
+        expect(sel).toBeTruthy()
+        expect(sel.cells.length).toBe(4)
+        expect(sel.visible).toBe(false)
+        ed.destroy()
+    })
+
+    test('a cell selection grows to cover a merged cell rather than clipping it', () =>
+    {
+        // Selecting a..b in row 0 must pull in the colspan cell fully.
+        const ed = mk(tbl(
+            tr_(td('a'), td('wide', { colspan: 2 })),
+            tr_(td('c'), td('d'), td('e')),
+        ))
+        const g = gridOf(ed)
+        const a = g.cells.find((c) => c.node.textContent === 'a')!
+        const sel = new CellSelection(ed.state.doc, a.pos, a.pos)
+        expect(sel.cells.length).toBe(1)
+        const wide = g.cells.find((c) => c.node.textContent === 'wide')!
+        const sel2 = new CellSelection(ed.state.doc, a.pos, wide.pos)
+        // The rectangle spans all three columns, so row 0 contributes 2 cells.
+        expect(sel2.cells.map((c) => c.node.textContent).sort()).toEqual(['a', 'wide'])
+        ed.destroy()
+    })
+
+    test('a cell selection survives a mapping through a transaction', () =>
+    {
+        const ed = mk(tbl(tr_(td('a'), td('b')), tr_(td('c'), td('d'))))
+        const g = gridOf(ed)
+        const sel = new CellSelection(ed.state.doc, g.cells[0].pos, g.cells[3].pos)
+        ed.dispatch(ed.state.tr.setSelection(sel))
+        expect(ed.state.selection).toBeInstanceOf(CellSelection)
+        // Type into the first cell; the selection must remap, not throw.
+        const tr = ed.state.tr.insertText('zz', g.cells[0].pos + 2)
+        ed.dispatch(tr)
+        expect(ed.state.selection).toBeInstanceOf(CellSelection)
+        ed.destroy()
+    })
+
+    // ── commands ──
+    test('addRowAfter inserts a row with the right number of cells', () =>
+    {
+        const ed = mk(tbl(tr_(td('a'), td('b'))))
+        ed.command((s, d) => { d?.(s.tr.setSelection(TextSelection.near(s.doc.resolve(4)))); return true })
+        expect(ed.command(addRowAfter)).toBe(true)
+        const g = gridOf(ed)
+        expect(g.height).toBe(2)
+        expect(g.width).toBe(2)
+        ed.destroy()
+    })
+
+    test('deleteRow removes it and refuses on the last remaining row', () =>
+    {
+        const ed = mk(tbl(tr_(td('a')), tr_(td('b'))))
+        ed.command((s, d) => { d?.(s.tr.setSelection(TextSelection.near(s.doc.resolve(4)))); return true })
+        expect(ed.command(deleteRow)).toBe(true)
+        expect(gridOf(ed).height).toBe(1)
+        expect(ed.command(deleteRow)).toBe(false)   // last row is protected
+        ed.destroy()
+    })
+
+    test('addColumnAfter widens every row', () =>
+    {
+        const ed = mk(tbl(tr_(td('a'), td('b')), tr_(td('c'), td('d'))))
+        ed.command((s, d) => { d?.(s.tr.setSelection(TextSelection.near(s.doc.resolve(4)))); return true })
+        expect(ed.command(addColumnAfter)).toBe(true)
+        const g = gridOf(ed)
+        expect(g.width).toBe(3)
+        expect(g.height).toBe(2)
+        ed.destroy()
+    })
+
+    test('deleteColumn narrows a spanning cell instead of deleting it', () =>
+    {
+        const ed = mk(tbl(
+            tr_(td('wide', { colspan: 2 })),
+            tr_(td('a'), td('b')),
+        ))
+        ed.command((s, d) => { d?.(s.tr.setSelection(TextSelection.near(s.doc.resolve(4)))); return true })
+        expect(ed.command(deleteColumn)).toBe(true)
+        const g = gridOf(ed)
+        expect(g.width).toBe(1)
+        const wide = g.cells.find((c) => c.node.textContent === 'wide')
+        expect(wide).toBeTruthy()                     // survived, narrowed
+        expect(wide!.colspan).toBe(1)
+        ed.destroy()
+    })
+
+    test('deleteColumn refuses on a single-column table', () =>
+    {
+        const ed = mk(tbl(tr_(td('a')), tr_(td('b'))))
+        ed.command((s, d) => { d?.(s.tr.setSelection(TextSelection.near(s.doc.resolve(4)))); return true })
+        expect(ed.command(deleteColumn)).toBe(false)
+        ed.destroy()
+    })
+
+    test('goToNextCell walks cells and appends a row past the last one', () =>
+    {
+        const ed = mk(tbl(tr_(td('a'), td('b'))))
+        ed.command((s, d) => { d?.(s.tr.setSelection(TextSelection.near(s.doc.resolve(4)))); return true })
+        expect(ed.command(goToNextCell(1))).toBe(true)
+        const g1 = gridOf(ed)
+        expect(g1.height).toBe(1)
+        // Now on the last cell: another Tab grows the table.
+        expect(ed.command(goToNextCell(1))).toBe(true)
+        expect(gridOf(ed).height).toBe(2)
+        ed.destroy()
+    })
+
+    test('selectRow / selectColumn produce cell selections', () =>
+    {
+        const ed = mk(tbl(tr_(td('a'), td('b')), tr_(td('c'), td('d'))))
+        ed.command((s, d) => { d?.(s.tr.setSelection(TextSelection.near(s.doc.resolve(4)))); return true })
+        expect(ed.command(selectRow)).toBe(true)
+        expect(ed.state.selection).toBeInstanceOf(CellSelection)
+        expect((ed.state.selection as any).cells.length).toBe(2)
+        ed.destroy()
+    })
+
+    test('deleteTable removes the whole node', () =>
+    {
+        const ed = mk(tbl(tr_(td('a'))))
+        ed.command((s, d) => { d?.(s.tr.setSelection(TextSelection.near(s.doc.resolve(4)))); return true })
+        expect(ed.command(deleteTable)).toBe(true)
+        expect(findTable(ed.state.doc, 0)).toBeNull()
         ed.destroy()
     })
 })

@@ -56,12 +56,12 @@ const nodes: Record<string, NodeSpec> = {
     table: { content: 'table_row+', group: 'block', toDOM: () => ['table', ['tbody', 0]], parseDOM: [{ tag: 'table' }] },
     table_row: { content: '(table_cell | table_header)+', toDOM: () => ['tr', 0], parseDOM: [{ tag: 'tr' }] },
     table_cell: {
-        content: 'paragraph+',
+        content: '(paragraph | bullet_list | ordered_list | table)+',
         attrs: { colspan: { default: 1 }, rowspan: { default: 1 }, colwidth: { default: null } },
         toDOM: () => ['td', 0], parseDOM: [{ tag: 'td' }],
     },
     table_header: {
-        content: 'paragraph+',
+        content: '(paragraph | bullet_list | ordered_list | table)+',
         attrs: { colspan: { default: 1 }, rowspan: { default: 1 }, colwidth: { default: null } },
         toDOM: () => ['th', 0], parseDOM: [{ tag: 'th' }],
     },
@@ -141,6 +141,7 @@ const doc = schema.node('doc', null, [
             tr(th('feature'), th('canvas'), th('notes')),
             tr(td('text layout'), td('Pretext'), td('per-block cache')),
             tr(td('tables'), td('frames'), td('cells are blocks')),
+            tr(schema.node('table_cell', { colspan: 2 }, [p('a colspan cell')]), td('spans work')),
         ])
     })(),
     schema.node('bullet_list', null, [

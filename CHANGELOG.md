@@ -22,12 +22,44 @@
 
   New `tableBorderColor` and `tableHeaderBackground` options.
 
-  Not yet: `rowspan` (a spanning cell is laid out in its first row and reserves
-  no height below), non-textblock cell content (nested lists or tables),
-  selection spanning multiple cells, and table editing commands (add/remove
-  row and column). Typing in a table falls back to full layout — a cell edit
-  only moves later rows when that cell is its row's tallest, which the
-  incremental path's "shift everything below by dy" cannot express.
+  **Spans.** Geometry runs off a resolved grid (`buildGrid`), so a cell's
+  column is a function of what is above it rather than its index in its row.
+  `colspan` widens a cell across the columns it covers; `rowspan` reserves
+  height across its rows, with any shortfall given to the last row it covers so
+  a shorter cell that already fixed an earlier row isn't disturbed.
+
+  **Cell content is the document's own flow.** `layoutFlow` lays a container's
+  children out down any frame, so a cell gets paragraphs, headings, lists (with
+  markers and indent), leaf nodes, and *nested tables* without the table layout
+  knowing what any of them are.
+
+  **Cross-cell selection.** `CellSelection` is a real `Selection` subclass, so
+  it maps through transactions, survives undo, and exposes the selected cells
+  as ranges to ordinary commands. Dragging out of the cell it started in stops
+  being a text range and becomes a rectangle — a text selection across a cell
+  boundary would span the structural tokens between cells and read as
+  gibberish. The rectangle snaps outward so a merged cell is never half
+  selected. Selected cells are painted as filled boxes rather than line rects.
+
+  **Commands**, all plain ProseMirror `Command`s so they bind through `keymap`
+  and land as single undo steps: `addRowBefore`/`addRowAfter`/`deleteRow`,
+  `addColumnBefore`/`addColumnAfter`/`deleteColumn`, `deleteTable`,
+  `selectRow`/`selectColumn`, `goToNextCell(dir)` (Tab past the last cell adds
+  a row), and `tableKeymap()`. They are span-aware: deleting a column narrows a
+  cell that reaches beyond it instead of removing it, and inserting a row grows
+  a cell that straddles the boundary rather than splitting it.
+
+  Built without `prosemirror-tables`, whose only entry point imports
+  `prosemirror-view` at module scope — that would make the DOM view a runtime
+  dependency of an editor whose whole point is not having one. Attribute names
+  (`colspan`, `rowspan`, `colwidth`) and the selection's JSON id (`"cell"`)
+  match it, so a prosemirror-tables schema drops straight in.
+
+  Not yet: merging and splitting cells, column resize handles, and copy/paste
+  of a cell rectangle into another table. Typing in a table still falls back to
+  full layout — a cell edit only moves later rows when that cell is its row's
+  tallest, which the incremental path's "shift everything below by dy" cannot
+  express.
 
 - **Drag & drop.**
   - **Move a node** by dragging it: press a leaf/atom block and drag, and a

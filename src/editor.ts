@@ -57,6 +57,7 @@ import {
     isTableNode,
 } from './layout/blocks'
 import { layoutTable, type TableLayoutContext } from './layout/table'
+import { CellSelection } from './table-selection'
 import { applyVirtualLayout, paintToCanvas, type PaintContext } from './paint'
 import {
     blockHasMarks, resolveRunStyle, resolveBlockStyle, boxFields, blockBase,
@@ -932,8 +933,96 @@ export class CanvasEditor {
   private get tableCx(): TableLayoutContext {
     return {
       blockGap: this.blockGap,
-      layoutBlock: (node, pos, cursorY, frame) =>
-        this.assembleTextBlock(node, 0, cursorY, null, pos - 1, false, frame),
+      layoutFlow: (parent, contentStart, originY, frame) =>
+        this.layoutFlow(parent, contentStart, originY, frame),
+    };
+  }
+
+  /**
+   * Lay a container's block children out down a frame, starting at `originY`.
+   *
+   * This is the document's own flow, reachable for any sub-frame — which is how
+   * a table cell gets paragraphs, headings, lists, leaf nodes, and nested
+   * tables without the table layout knowing what any of those are. Floats are
+   * deliberately absent: they are a document-level concept, and a float rect is
+   * in document space, so they do not apply inside a cell.
+   */
+  private layoutFlow(
+    parent: PMNode,
+    contentStart: number,
+    originY: number,
+    frame: LayoutFrame,
+  ): { blocks: BlockLayout[]; tables: TableChrome[]; height: number } {
+    const descs: BlockDesc[] = [];
+    collectBlocks(parent, contentStart, 0, null, descs, this.hasNodeView);
+
+    const blocks: BlockLayout[] = [];
+    const tables: TableChrome[] = [];
+    let y = originY;
+
+    for (const { node, pos, indent, marker, leaf, table } of descs) {
+      if (table) {
+        const sub = layoutTable(this.tableCx, node, pos, y, {
+          x: frame.x + indent,
+          width: Math.max(1, frame.width - indent),
+        });
+        blocks.push(...sub.blocks);
+        tables.push(sub.chrome, ...sub.nested);
+        y += sub.height + this.blockGap;
+        continue;
+      }
+      if (leaf) {
+        const h = this.isRuleNode(node)
+          ? this.lineHeight
+          : (this.nodeViewHeights.get(node) ?? this.defaultAtomHeight);
+        blocks.push(
+          this.atomLayout(node, pos, y, h, marker, this.lineHeight),
+        );
+        y += h + this.blockGap;
+        continue;
+      }
+      // A list indent narrows the frame rather than only padding the text, so
+      // a nested list inside a narrow cell still wraps inside the cell.
+      const bl = this.assembleTextBlock(node, indent, y, marker, pos, false, {
+        x: frame.x,
+        width: frame.width,
+      });
+      blocks.push(bl);
+      y += bl.height + this.blockGap;
+    }
+
+    const height = blocks.length > 0 ? y - originY - this.blockGap : 0;
+    return { blocks, tables, height };
+  }
+
+  /** The BlockLayout for a leaf/atom block occupying reserved height. */
+  private atomLayout(
+    node: PMNode,
+    pos: number,
+    yOffset: number,
+    height: number,
+    marker: BlockDesc["marker"],
+    lineHeight: number,
+  ): BlockLayout {
+    return {
+      type: node.type.name,
+      node,
+      text: "",
+      yOffset,
+      height,
+      lines: [],
+      pmStartPos: pos,
+      pmEndPos: pos + node.nodeSize,
+      isAtom: true,
+      lineHeight,
+      font: this.font,
+      fontSize: this.baseFontSize,
+      color: null,
+      paddingTop: 0,
+      paddingBottom: 0,
+      background: null,
+      borderLeft: null,
+      marker,
     };
   }
 
@@ -1621,7 +1710,7 @@ export class CanvasEditor {
       // Its cell blocks come back already positioned, in document order, so
       // the rest of the pipeline sees them as ordinary blocks.
       if (table) {
-        const { blocks, chrome, height } = layoutTable(
+        const { blocks, chrome, height, nested } = layoutTable(
           this.tableCx,
           node,
           pos,
@@ -1629,7 +1718,7 @@ export class CanvasEditor {
           { x: indent, width: this.containerWidth - indent },
         );
         result.push(...blocks);
-        tables.push(chrome);
+        tables.push(chrome, ...nested);
         this.cacheMisses++;
         cursorY += height + this.blockGap;
         continue;
@@ -3552,11 +3641,16 @@ export class CanvasEditor {
     const size = this.state.doc.content.size;
     const $head = this.state.doc.resolve(clamp(newHead, 0, size));
     if (extend) {
-      const $anchor = this.state.doc.resolve(
-        clamp(this.state.selection.anchor, 0, size),
-      );
+      const anchor = clamp(this.state.selection.anchor, 0, size);
+      const $anchor = this.state.doc.resolve(anchor);
+      // Extending out of the cell it started in stops being a text range and
+      // becomes a rectangle of cells — a text selection across a cell boundary
+      // would span the structural tokens between them and read as gibberish.
+      const cells = CellSelection.between(this.state.doc, anchor, $head.pos);
       this.dispatch(
-        this.state.tr.setSelection(TextSelection.between($anchor, $head, bias)),
+        this.state.tr.setSelection(
+          cells ?? TextSelection.between($anchor, $head, bias),
+        ),
       );
     } else {
       this.dispatch(

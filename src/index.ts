@@ -22,3 +22,13 @@ export type {
     InlineDecorationStyle,
     NodeDecorationStyle,
 } from './decoration'
+
+// ─── Tables ────────────────────────────────────────────────────────────────
+export { CellSelection, selectCells } from './table-selection'
+export {
+    addRowBefore, addRowAfter, deleteRow,
+    addColumnBefore, addColumnAfter, deleteColumn,
+    deleteTable, selectRow, selectColumn, goToNextCell, tableKeymap,
+} from './table-commands'
+export { buildGrid, cellAt, cellAtPos, cellsInRect, rectBetween, findTable } from './layout/table-map'
+export type { TableGrid, GridCell } from './layout/table-map'
