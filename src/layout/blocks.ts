@@ -44,6 +44,30 @@ export function isLeafBlock(node: PMNode, hasNodeView: HasNodeView): boolean
     return !node.isTextblock && (hasNodeView(node.type.name) || isRuleNode(node))
 }
 
+export function isTableNode(node: PMNode): boolean
+{
+    return node.type.name === 'table'
+}
+
+export function isTableRow(node: PMNode): boolean
+{
+    const n = node.type.name
+    return n === 'table_row' || n === 'tableRow'
+}
+
+export function isTableCell(node: PMNode): boolean
+{
+    const n = node.type.name
+    return n === 'table_cell' || n === 'tableCell'
+        || n === 'table_header' || n === 'tableHeader'
+}
+
+export function isHeaderCell(node: PMNode): boolean
+{
+    const n = node.type.name
+    return n === 'table_header' || n === 'tableHeader'
+}
+
 /**
  * Flatten the document tree into block descriptors in document order. Lists
  * recurse: each item's blocks carry a per-level indent, and the item's first
@@ -82,6 +106,17 @@ export function collectBlocks(
         else if (child.isTextblock)
         {
             out.push({ node: child, pos, indent: depth * LIST_INDENT, marker: pending, leaf: false })
+            pending = null
+        }
+        else if (isTableNode(child))
+        {
+            // Emitted whole. Descending would flatten every cell's paragraphs
+            // into the single column, which is exactly the assumption a table
+            // breaks — computeLayout hands this subtree to the table layout.
+            out.push({
+                node: child, pos, indent: depth * LIST_INDENT,
+                marker: pending, leaf: false, table: true,
+            })
             pending = null
         }
         else if (isLeafBlock(child, hasNodeView))

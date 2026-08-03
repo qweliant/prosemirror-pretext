@@ -10,7 +10,30 @@ import { expandCollapsedWhitespace } from '../src/text'
 import { Decoration } from '../src/decoration'
 
 const nodes: Record<string, NodeSpec> = {
-    doc: { content: '(paragraph | widget | heading | blockquote | code_block | horizontal_rule | bullet_list | ordered_list)+' },
+    doc: { content: '(paragraph | widget | heading | blockquote | code_block | horizontal_rule | bullet_list | ordered_list | table)+' },
+    table: {
+        content: 'table_row+',
+        group: 'block',
+        toDOM: () => ['table', ['tbody', 0]],
+        parseDOM: [{ tag: 'table' }],
+    },
+    table_row: {
+        content: '(table_cell | table_header)+',
+        toDOM: () => ['tr', 0],
+        parseDOM: [{ tag: 'tr' }],
+    },
+    table_cell: {
+        content: 'paragraph+',
+        attrs: { colspan: { default: 1 }, rowspan: { default: 1 }, colwidth: { default: null } },
+        toDOM: () => ['td', 0],
+        parseDOM: [{ tag: 'td' }],
+    },
+    table_header: {
+        content: 'paragraph+',
+        attrs: { colspan: { default: 1 }, rowspan: { default: 1 }, colwidth: { default: null } },
+        toDOM: () => ['th', 0],
+        parseDOM: [{ tag: 'th' }],
+    },
     paragraph: {
         content: 'text*',
         attrs: { align: { default: null } },
@@ -2844,6 +2867,157 @@ describe('drag & drop', () =>
         const before = ed.state.doc
         ;(ed as any).stack.dispatchEvent(dragEvent('drop', 16, 13, { 'text/plain': 'ZZ' }))
         expect(ed.state.doc).toBe(before)
+        ed.destroy()
+    })
+})
+
+
+describe('tables (side-by-side layout)', () =>
+{
+    // Mock: 8px/char, container 460. Cell inset per side is TABLE_BORDER(1) +
+    // CELL_PAD_X(8) = 9, so a cell's content frame is its column minus 18.
+    const cell = (text: string, attrs: any = {}) =>
+        schema.node('table_cell', attrs, [schema.node('paragraph', null, [schema.text(text)])])
+    const header = (text: string) =>
+        schema.node('table_header', null, [schema.node('paragraph', null, [schema.text(text)])])
+    const row = (...cells: any[]) => schema.node('table_row', null, cells)
+
+    function mk(...rows: any[])
+    {
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        const doc = schema.node('doc', null, [schema.node('table', null, rows)])
+        const ed = new CanvasEditor({ state: EditorState.create({ doc, schema }), container })
+        return { ed, layouts: (ed as any).lastLayouts as any[], tables: (ed as any).lastTables as any[] }
+    }
+
+    test('cells in a row share a vertical band and differ only in x', () =>
+    {
+        const { ed, layouts } = mk(row(cell('aa'), cell('bb'), cell('cc')))
+        expect(layouts.length).toBe(3)
+        const ys = layouts.map((b) => b.lines[0].y)
+        expect(new Set(ys).size).toBe(1)          // same band
+        const xs = layouts.map((b) => b.lines[0].x)
+        expect(xs[0]).toBeLessThan(xs[1])          // laid left to right
+        expect(xs[1]).toBeLessThan(xs[2])
+        ed.destroy()
+    })
+
+    test('columns divide the content width and the last absorbs rounding', () =>
+    {
+        const { ed, tables } = mk(row(cell('a'), cell('b'), cell('c')))
+        const cols = tables[0].cols
+        expect(cols.length).toBe(3)
+        // 460 / 3 does not divide evenly; the table must still end exactly at 460.
+        expect(cols.reduce((s: number, c: any) => s + c.width, 0)).toBe(460)
+        expect(cols[0].x).toBe(0)
+        expect(cols[2].x + cols[2].width).toBe(460)
+        ed.destroy()
+    })
+
+    test('an explicit colwidth is honored and the rest share what is left', () =>
+    {
+        const { ed, tables } = mk(row(cell('a', { colwidth: [200] }), cell('b'), cell('c')))
+        const cols = tables[0].cols
+        expect(cols[0].width).toBe(200)
+        expect(cols[1].width).toBe(cols[2].width)
+        expect(cols.reduce((s: number, c: any) => s + c.width, 0)).toBe(460)
+        ed.destroy()
+    })
+
+    test('row height is the tallest cell, and every box in the row matches it', () =>
+    {
+        // The mock puts one line per '\n' segment, so a two-line cell is taller.
+        const tall = schema.node('table_cell', null, [
+            schema.node('paragraph', null, [schema.text('one')]),
+            schema.node('paragraph', null, [schema.text('two')]),
+        ])
+        const { ed, tables } = mk(row(cell('short'), tall))
+        const boxes = tables[0].cells
+        expect(boxes.length).toBe(2)
+        expect(boxes[0].height).toBe(boxes[1].height)
+        // Two stacked paragraphs must make the row taller than a single one.
+        const { ed: ed2, tables: t2 } = mk(row(cell('short'), cell('also short')))
+        expect(boxes[0].height).toBeGreaterThan(t2[0].cells[0].height)
+        ed.destroy(); ed2.destroy()
+    })
+
+    test('a cell block carries its frame, and it matches the column', () =>
+    {
+        const { ed, layouts, tables } = mk(row(cell('aa'), cell('bb')))
+        const cols = tables[0].cols
+        for (let i = 0; i < 2; i++)
+        {
+            const f = layouts[i].frame
+            expect(f).toBeTruthy()
+            expect(f.x).toBe(cols[i].x + 9)         // border + pad
+            expect(f.width).toBe(cols[i].width - 18)
+        }
+        ed.destroy()
+    })
+
+    test('clicking in a cell resolves into that cell, not its neighbour', () =>
+    {
+        const { ed, layouts, tables } = mk(row(cell('aa'), cell('bb'), cell('cc')))
+        const cols = tables[0].cols
+        for (let i = 0; i < 3; i++)
+        {
+            const midX = cols[i].x + cols[i].width / 2
+            const y = layouts[i].lines[0].y + 1
+            const hit = (ed as any).clickToPos(layouts, midX, y)
+            // Each cell's block owns [pmStartPos, pmEndPos]; the hit must land there.
+            expect(hit.pos).toBeGreaterThanOrEqual(layouts[i].pmStartPos)
+            expect(hit.pos).toBeLessThanOrEqual(layouts[i].pmEndPos)
+        }
+        ed.destroy()
+    })
+
+    test('header cells are flagged for the chrome to fill', () =>
+    {
+        const { ed, tables } = mk(row(header('h1'), header('h2')), row(cell('a'), cell('b')))
+        const boxes = tables[0].cells
+        expect(boxes.filter((c: any) => c.header).length).toBe(2)
+        expect(boxes.filter((c: any) => !c.header).length).toBe(2)
+        expect(boxes.filter((c: any) => c.row === 0).every((c: any) => c.header)).toBe(true)
+        ed.destroy()
+    })
+
+    test('colspan widens a cell across the columns it covers', () =>
+    {
+        const { ed, tables } = mk(
+            row(cell('wide', { colspan: 2 })),
+            row(cell('a'), cell('b')),
+        )
+        const cols = tables[0].cols
+        expect(cols.length).toBe(2)
+        const spanning = tables[0].cells.find((c: any) => c.row === 0)
+        expect(spanning.width).toBe(cols[0].width + cols[1].width)
+        ed.destroy()
+    })
+
+    test('rows stack, and the table advances the document cursor', () =>
+    {
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        const doc = schema.node('doc', null, [
+            schema.node('table', null, [row(cell('a')), row(cell('b'))]),
+            schema.node('paragraph', null, [schema.text('after')]),
+        ])
+        const ed = new CanvasEditor({ state: EditorState.create({ doc, schema }), container })
+        const tables = (ed as any).lastTables as any[]
+        const layouts = (ed as any).lastLayouts as any[]
+        expect(tables[0].rows.length).toBe(2)
+        expect(tables[0].rows[1].y).toBe(tables[0].rows[0].y + tables[0].rows[0].height)
+        const after = layouts.find((b) => b.text === 'after')
+        expect(after.yOffset).toBeGreaterThanOrEqual(tables[0].y + tables[0].height)
+        ed.destroy()
+    })
+
+    test('typing in a cell falls back to full layout (row height can change)', () =>
+    {
+        const { ed } = mk(row(cell('aa'), cell('bb')))
+        // lastTables is non-empty, so the incremental path must decline.
+        expect((ed as any).tryIncrementalLayout()).toBe(false)
         ed.destroy()
     })
 })

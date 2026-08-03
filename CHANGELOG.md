@@ -4,6 +4,31 @@
 
 ### Added
 
+- **Tables** (layout + paint). A `table` / `table_row` / `table_cell` /
+  `table_header` subtree lays out as a grid: columns share the content width
+  (honoring an explicit `colwidth`), and each row is as tall as its tallest
+  cell. Cells are top-aligned.
+
+  The design point: a cell is not a new kind of thing. It is an ordinary block
+  laid out into its own `LayoutFrame` — a new concept threaded through block
+  layout, being the first time anything needed a horizontal box narrower than
+  the content column. Cell contents come back as normal `BlockLayout`s with
+  absolute coordinates, so painting, caret mapping, and text editing work
+  inside a cell with no special cases. Only the grid chrome (rules, header
+  fills) is new geometry, exposed as `TableChrome`.
+
+  Hit-testing narrows by x for cell blocks, reusing the predicate floats
+  already needed: blocks that share a vertical band are told apart by x.
+
+  New `tableBorderColor` and `tableHeaderBackground` options.
+
+  Not yet: `rowspan` (a spanning cell is laid out in its first row and reserves
+  no height below), non-textblock cell content (nested lists or tables),
+  selection spanning multiple cells, and table editing commands (add/remove
+  row and column). Typing in a table falls back to full layout — a cell edit
+  only moves later rows when that cell is its row's tallest, which the
+  incremental path's "shift everything below by dy" cannot express.
+
 - **Drag & drop.**
   - **Move a node** by dragging it: press a leaf/atom block and drag, and a
     drop indicator marks the seam it will land in (drawn where a gap cursor

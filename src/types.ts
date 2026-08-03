@@ -51,6 +51,11 @@ export interface CanvasEditorOptions
     placeholderColor?: string
     /** Color of a horizontal-rule leaf node. Default: '#3a3a42'. */
     ruleColor?: string
+    /** Rules drawn between and around table cells. Default: `ruleColor`. */
+    tableBorderColor?: string
+    /** Fill painted behind header cells. Default: a 10% neutral wash, which
+     *  reads on both light and dark surfaces. */
+    tableHeaderBackground?: string
     /** Color of the drop indicator drawn while dragging. Default: `caretColor`. */
     dropIndicatorColor?: string
     /** If set, the content area scrolls when it exceeds this height in px. */
@@ -303,6 +308,11 @@ export interface BlockLayout {
   /** Set when the block is a floating node: its content-space rect (text wraps
    *  around it; the node view is positioned here rather than full-width). */
   floatRect?: { x: number; y: number; width: number; height: number };
+  /** Set when the block was laid out into a narrower frame than the content
+   *  column — currently, when it is inside a table cell. Hit-testing needs it
+   *  for the same reason floats do: blocks in one row share a vertical band
+   *  and are told apart only by x. */
+  frame?: LayoutFrame;
   /** Resolved block base style (per-block headings etc.; editor base by default). */
   lineHeight: number;
   font: string;
@@ -317,6 +327,56 @@ export interface BlockLayout {
   marker: { text: string; x: number } | null;
   /** List indent (px) this layout was assembled at — used to validate reuse. */
   indent?: number;
+}
+
+
+/**
+ * The horizontal box a block lays out into: where its left edge sits and how
+ * much width it may wrap within.
+ *
+ * Until tables, every block shared one implicit frame — the full content column
+ * — so width was read straight off the editor and `x` was always 0. A table
+ * cell is the first thing that needs its own, and threading this through is
+ * what makes layout two-dimensional. A frame is *not* a float slot: floats
+ * carve a band out of one column, while a frame is a column of its own.
+ */
+export interface LayoutFrame
+{
+    x: number
+    width: number
+}
+
+/**
+ * The painted grid of a table: the geometry text does not carry. Cell contents
+ * are ordinary `BlockLayout`s (positioned into cell frames), so this only
+ * describes the chrome — rules, header fills, the outer box.
+ */
+export interface TableChrome
+{
+    x: number
+    y: number
+    width: number
+    height: number
+    /** Document position of the table node, so hit-testing can resolve into it. */
+    pos: number
+    rows: { y: number, height: number }[]
+    cols: { x: number, width: number }[]
+    cells: TableCellBox[]
+}
+
+export interface TableCellBox
+{
+    x: number
+    y: number
+    width: number
+    height: number
+    /** Grid coordinates, for column/row ops later. */
+    row: number
+    col: number
+    /** A header cell (`table_header`), painted with a fill. */
+    header: boolean
+    /** Document position of the cell node. */
+    pos: number
 }
 
 
@@ -350,6 +410,12 @@ export interface BlockDesc
     indent: number
     marker: { text: string, x: number } | null
     leaf: boolean
+    /**
+     * A table node. Not flattened like other containers: its cells are separate
+     * layout frames, so `computeLayout` hands the whole subtree to the table
+     * layout rather than walking into it.
+     */
+    table?: boolean
 }
 
 export interface CachedFragment

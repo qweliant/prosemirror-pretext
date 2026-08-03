@@ -378,7 +378,7 @@ editor needs to implement.
 - [x] **Horizontal rule** — canvas-drawn leaf block (`horizontal_rule` / `hr`), selectable like an atom (`ruleColor`)
 - [x] **Lists** (bullet / ordered) — recursive tree walk → per-level indent + bullet/number markers in the gutter; Enter splits an item, Tab/Shift-Tab nest/lift (via `prosemirror-schema-list`)
 - [x] **Text alignment** — `left | center | right` via a block's `align` attribute (caret/click/selection all follow the shift). `justify` not yet (needs inter-word distribution)
-- [ ] **Tables** — grid layout with per-cell text flow
+- [x] **Tables** — grid layout with per-cell text flow. Columns share the content width (or honor `colwidth`); a row is as tall as its tallest cell. A cell is an ordinary block laid out into its own `LayoutFrame`, so marks, styles, caret, and editing work inside cells unchanged. `colspan` is honored for width. Not yet: `rowspan`, non-textblock cell content, cross-cell selection, and row/column commands
 
 ### Media & embeds
 

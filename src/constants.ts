@@ -36,6 +36,17 @@ export const LIST_INDENT = 26
 export const MARKER_PAD = 4
 
 
+// ─── Table geometry ────────────────────────────────────────────────────────
+
+/** Padding inside each cell, between its border and its content. */
+export const CELL_PAD_X = 8
+export const CELL_PAD_Y = 6
+/** Width of the rules drawn between cells and around the table. */
+export const TABLE_BORDER = 1
+/** Narrowest a column may be squeezed to when widths are shared out. */
+export const MIN_COL_WIDTH = 32
+
+
 // ─── Accessibility ─────────────────────────────────────────────────────────
 
 /** Elements that make a node view interactive (so it must stay in the a11y tree). */

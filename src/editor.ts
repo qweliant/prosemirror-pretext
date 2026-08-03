@@ -46,7 +46,7 @@ import type {
     MarkStyle, MarkStyleResolver, BlockStyle, BlockStyleResolver,
     RenderStats, LineFragment, LineLayout, BlockLayout,
     ResolvedBlockStyle, BlockDesc, CachedFragment, CachedLine, CachedBlock,
-    MountedView, MarkedLineCtx, MarkedSegment,
+    MountedView, MarkedLineCtx, MarkedSegment, LayoutFrame, TableChrome,
 } from './types'
 import {
     HEADING_SCALE, DEFAULT_MARK_STYLES, LIST_INDENT, MARKER_PAD,
@@ -54,7 +54,9 @@ import {
 } from './constants'
 import {
     isRuleNode, isListNode, isOrderedList, isLeafBlock, collectBlocks, isDocEmpty,
+    isTableNode,
 } from './layout/blocks'
+import { layoutTable, type TableLayoutContext } from './layout/table'
 import { applyVirtualLayout, paintToCanvas, type PaintContext } from './paint'
 import {
     blockHasMarks, resolveRunStyle, resolveBlockStyle, boxFields, blockBase,
@@ -67,6 +69,7 @@ export type {
     CanvasEditorOptions, NodeViewFn, EditorHandlers, FloatRect,
     MarkStyle, MarkStyleResolver, BlockStyle, BlockStyleResolver,
     RenderStats, LineFragment, LineLayout, BlockLayout,
+    LayoutFrame, TableChrome, TableCellBox,
 } from './types'
 
 /** Horizontal offset to add to a line's left edge for the block's alignment. */
@@ -100,6 +103,8 @@ export class CanvasEditor {
   private readonly placeholder: string;
   private readonly placeholderColor: string;
   private readonly ruleColor: string;
+  private readonly tableBorderColor: string;
+  private readonly tableHeaderBackground: string;
   private readonly dropIndicatorColor: string;
   private readonly maxHeight: number | null;
   private readonly caretWidth = 2;
@@ -207,6 +212,7 @@ export class CanvasEditor {
   // caret read right after a keystroke is both fresh and paint-free.
   private layoutDirty = true;
   private lastTotalHeight = 0;
+  private lastTables: TableChrome[] = [];
   // The document `lastLayouts` was built from, so the incremental layout path
   // can diff against it to find the single block that changed.
   private prevDoc: PMNode | null = null;
@@ -300,6 +306,9 @@ export class CanvasEditor {
     this.placeholder = options.placeholder ?? "";
     this.placeholderColor = options.placeholderColor ?? "#5a5a64";
     this.ruleColor = options.ruleColor ?? "#3a3a42";
+    this.tableBorderColor = options.tableBorderColor ?? this.ruleColor;
+    this.tableHeaderBackground =
+      options.tableHeaderBackground ?? "rgba(127,127,127,0.10)";
     this.dropIndicatorColor = options.dropIndicatorColor ?? this.caretColor;
     this.maxHeight = options.maxHeight ?? null;
     this.onRender = options.onRender;
@@ -837,13 +846,19 @@ export class CanvasEditor {
   }
 
   /** Lay out one block, choosing the single-font fast path or the marked path. */
-  private layoutBlock(node: PMNode, indent = 0): CachedBlock {
+  private layoutBlock(
+    node: PMNode,
+    indent = 0,
+    frame?: LayoutFrame,
+  ): CachedBlock {
     const base = this.blockBase(node, indent);
+    const frameX = frame?.x ?? 0;
+    const frameW = frame?.width ?? this.containerWidth;
     const text = node.textContent;
     if (text.length === 0) {
       return {
         prepared: null,
-        width: this.containerWidth,
+        width: frameW,
         lineHeight: base.lineHeight,
         lines: [],
         height: 0,
@@ -852,14 +867,14 @@ export class CanvasEditor {
     }
 
     if (this.blockHasMarks(node)) {
-      return this.layoutMarkedBlock(node, indent);
+      return this.layoutMarkedBlock(node, indent, frame);
     }
 
     // Fast path: a single font for the whole block. 'pre-wrap' keeps every
     // space as a real character (default 'normal' collapses runs of
     // whitespace), so line text stays in lockstep with PM offsets and the
     // caret doesn't drift when you type consecutive spaces.
-    const availW = this.blockContentWidth(base);
+    const availW = frameW - base.paddingLeft - base.paddingRight;
     const prepared = prepareWithSegments(text, base.font, {
       whiteSpace: "pre-wrap",
     });
@@ -874,7 +889,8 @@ export class CanvasEditor {
         text: l.text,
         width: l.width,
         pmStart: acc,
-        x: base.paddingLeft + alignOffset(availW, l.width, base.textAlign),
+        x: frameX + base.paddingLeft
+          + alignOffset(availW, l.width, base.textAlign),
       };
       acc += l.text.length;
       // 'pre-wrap' breaks on a hard newline but drops it from the line
@@ -884,7 +900,7 @@ export class CanvasEditor {
     });
     return {
       prepared,
-      width: this.containerWidth,
+      width: frameW,
       lineHeight: base.lineHeight,
       lines: cachedLines,
       height,
@@ -909,6 +925,16 @@ export class CanvasEditor {
 
   private blockHasMarks(node: PMNode): boolean {
     return blockHasMarks(node);
+  }
+
+  /** What ./layout/table needs: the block gap, and a way to lay a cell's
+   *  block out through the ordinary pipeline at a given frame. */
+  private get tableCx(): TableLayoutContext {
+    return {
+      blockGap: this.blockGap,
+      layoutBlock: (node, pos, cursorY, frame) =>
+        this.assembleTextBlock(node, 0, cursorY, null, pos - 1, false, frame),
+    };
   }
 
   private resolveRunStyle(marks: readonly Mark[], base: ResolvedBlockStyle) {
@@ -1025,8 +1051,14 @@ export class CanvasEditor {
     return { segments, blockText };
   }
 
-  private layoutMarkedBlock(node: PMNode, indent = 0): CachedBlock {
+  private layoutMarkedBlock(
+    node: PMNode,
+    indent = 0,
+    frame?: LayoutFrame,
+  ): CachedBlock {
     const base = this.blockBase(node, indent);
+    const frameX = frame?.x ?? 0;
+    const frameW = frame?.width ?? this.containerWidth;
     const { segments, blockText } = this.prepareMarkedSegments(node, base);
     const lines: CachedLine[] = [];
     const ctx: MarkedLineCtx = {
@@ -1035,7 +1067,7 @@ export class CanvasEditor {
       consumed: [],
       prevLineEnd: 0,
     };
-    const width = this.blockContentWidth(base);
+    const width = frameW - base.paddingLeft - base.paddingRight;
 
     for (const seg of segments) {
       // A segment's first line owns the preceding '\n' offset (startOffset-1)
@@ -1047,7 +1079,7 @@ export class CanvasEditor {
           text: "",
           width: 0,
           pmStart: segPmStart,
-          x: base.paddingLeft,
+          x: frameX + base.paddingLeft,
           fragments: [],
         });
         ctx.prevLineEnd = segPmStart;
@@ -1067,8 +1099,8 @@ export class CanvasEditor {
           ctx,
           lines.length === 0,
         );
-        line.x =
-          base.paddingLeft + alignOffset(width, line.width, base.textAlign);
+        line.x = frameX + base.paddingLeft
+          + alignOffset(width, line.width, base.textAlign);
         lines.push(line);
       });
       if (segLineStart > 0 && lines.length > segLineStart) {
@@ -1078,7 +1110,7 @@ export class CanvasEditor {
 
     return {
       prepared: null,
-      width: this.containerWidth,
+      width: frameW,
       lineHeight: base.lineHeight,
       lines,
       height: lines.length * base.lineHeight,
@@ -1364,8 +1396,10 @@ export class CanvasEditor {
     marker: BlockDesc["marker"],
     pos: number,
     floating: boolean,
+    frame?: LayoutFrame,
   ): BlockLayout {
     let cached: CachedBlock;
+    const frameW = frame?.width ?? this.containerWidth;
     if (floating) {
       // Float-aware layout depends on the block's Y (relative to the floats),
       // so it can't use the Y-independent cache.
@@ -1374,11 +1408,11 @@ export class CanvasEditor {
     } else {
       // Node identity + indent are sufficient (width/font are fixed).
       const hit = this.layoutCache.get(node);
-      if (hit && hit.indent === indent) {
+      if (hit && hit.indent === indent && hit.width === frameW) {
         cached = hit;
         this.cacheHits++;
       } else {
-        cached = this.layoutBlock(node, indent);
+        cached = this.layoutBlock(node, indent, frame);
         this.layoutCache.set(node, cached);
         this.cacheMisses++;
       }
@@ -1426,8 +1460,11 @@ export class CanvasEditor {
       borderLeft: cached.borderLeft,
       marker,
       indent,
+      ...(frame ? { frame } : {}),
     };
-    if (!floating) this.positionedCache.set(node, layout);
+    // A cell block's position depends on its table's layout, not on the
+    // document cursor, so it must not seed the positional-reuse cache.
+    if (!floating && !frame) this.positionedCache.set(node, layout);
     return layout;
   }
 
@@ -1447,6 +1484,12 @@ export class CanvasEditor {
     // also bails the frame right after floats clear (stale widths below).
     if (this.floats.length > 0 || this.floatRectFor || this.hadFloats)
       return false;
+    // Tables, for a different reason than floats: the incremental path shifts
+    // every later block by the edited block's height delta, but a cell only
+    // moves the rows below it when it is the tallest cell in its row. Checking
+    // the last frame's chrome keeps this O(1) — a table appearing or vanishing
+    // is structural and fails the single-textblock test below anyway.
+    if (this.lastTables.length > 0) return false;
 
     const prev = prevDoc.content;
     const cur = this.state.doc.content;
@@ -1526,11 +1569,16 @@ export class CanvasEditor {
     return true;
   }
 
-  private computeLayout(): { layouts: BlockLayout[]; totalHeight: number } {
+  private computeLayout(): {
+    layouts: BlockLayout[];
+    totalHeight: number;
+    tables: TableChrome[];
+  } {
     this.cacheHits = 0;
     this.cacheMisses = 0;
 
     const result: BlockLayout[] = [];
+    const tables: TableChrome[] = [];
     let cursorY = 0;
 
     const descs: BlockDesc[] = [];
@@ -1568,7 +1616,25 @@ export class CanvasEditor {
     if (floatRegimeChanged) this.positionedCache = new WeakMap();
     const canReuse = !floating && !floatRegimeChanged;
 
-    for (const { node, pos, indent, marker, leaf } of descs) {
+    for (const { node, pos, indent, marker, leaf, table } of descs) {
+      // A table lays its own cells out side by side and reports one height.
+      // Its cell blocks come back already positioned, in document order, so
+      // the rest of the pipeline sees them as ordinary blocks.
+      if (table) {
+        const { blocks, chrome, height } = layoutTable(
+          this.tableCx,
+          node,
+          pos,
+          cursorY,
+          { x: indent, width: this.containerWidth - indent },
+        );
+        result.push(...blocks);
+        tables.push(chrome);
+        this.cacheMisses++;
+        cursorY += height + this.blockGap;
+        continue;
+      }
+
       // Leaf/atom block (node view or canvas-drawn rule): reserve height.
       if (leaf) {
         const fr = floatRects.get(node);
@@ -1666,7 +1732,7 @@ export class CanvasEditor {
 
     const totalHeight = Math.max(this.lineHeight, cursorY - this.blockGap);
     this.hadFloats = floating;
-    return { layouts: result, totalHeight };
+    return { layouts: result, totalHeight, tables };
   }
 
   // ─── Painting ──────────────────────────────────────────────────────
@@ -1686,6 +1752,8 @@ export class CanvasEditor {
       firstLineColor: this.firstLineColor,
       selectionColor: this.selectionColor,
       ruleColor: this.ruleColor,
+      tableBorderColor: this.tableBorderColor,
+      tableHeaderBackground: this.tableHeaderBackground,
       placeholder: this.placeholder,
       placeholderColor: this.placeholderColor,
       doc: this.state.doc,
@@ -1705,7 +1773,14 @@ export class CanvasEditor {
     virtualized: boolean,
     decorations: Decoration[] = [],
   ): void {
-    paintToCanvas(this.paintCx, layouts, totalHeight, virtualized, decorations);
+    paintToCanvas(
+      this.paintCx,
+      layouts,
+      totalHeight,
+      virtualized,
+      decorations,
+      this.lastTables,
+    );
   }
 
   /** Mount/position/remove widget-decoration DOM at their document positions
@@ -1969,8 +2044,13 @@ export class CanvasEditor {
    */
   private claimsX(b: BlockLayout, canvasX: number): boolean {
     const fr = b.floatRect;
-    if (!fr) return true;
-    return canvasX >= fr.x && canvasX < fr.x + fr.width;
+    if (fr) return canvasX >= fr.x && canvasX < fr.x + fr.width;
+    // A table cell's block owns only its column of the row's band. Same
+    // reasoning as a float, arrived at from the other direction: blocks that
+    // share a vertical band must be told apart by x.
+    const f = b.frame;
+    if (f) return canvasX >= f.x && canvasX < f.x + f.width;
+    return true;
   }
 
   private clickToPos(
@@ -2160,9 +2240,10 @@ export class CanvasEditor {
     // Try the cheap incremental path (single-block edit); fall back to a full
     // pass for anything structural.
     if (!this.tryIncrementalLayout()) {
-      const { layouts, totalHeight } = this.computeLayout();
+      const { layouts, totalHeight, tables } = this.computeLayout();
       this.lastLayouts = layouts;
       this.lastTotalHeight = totalHeight;
+      this.lastTables = tables;
     }
     this.prevDoc = this.state.doc;
     this.layoutDirty = false;

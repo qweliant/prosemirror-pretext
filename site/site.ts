@@ -52,7 +52,19 @@ const icon = (name: string) => `<svg viewBox="0 0 24 24" aria-hidden="true">${IC
 
 // ── Schema (the full set of node types the editor supports) ──────────────────
 const nodes: Record<string, NodeSpec> = {
-    doc: { content: '(heading | paragraph | blockquote | code_block | horizontal_rule | bullet_list | ordered_list | image | run_button)+' },
+    doc: { content: '(heading | paragraph | blockquote | code_block | horizontal_rule | bullet_list | ordered_list | image | run_button | table)+' },
+    table: { content: 'table_row+', group: 'block', toDOM: () => ['table', ['tbody', 0]], parseDOM: [{ tag: 'table' }] },
+    table_row: { content: '(table_cell | table_header)+', toDOM: () => ['tr', 0], parseDOM: [{ tag: 'tr' }] },
+    table_cell: {
+        content: 'paragraph+',
+        attrs: { colspan: { default: 1 }, rowspan: { default: 1 }, colwidth: { default: null } },
+        toDOM: () => ['td', 0], parseDOM: [{ tag: 'td' }],
+    },
+    table_header: {
+        content: 'paragraph+',
+        attrs: { colspan: { default: 1 }, rowspan: { default: 1 }, colwidth: { default: null } },
+        toDOM: () => ['th', 0], parseDOM: [{ tag: 'th' }],
+    },
     paragraph: {
         content: 'text*', attrs: { align: { default: null } },
         toDOM: (n) => ['p', n.attrs['align'] ? { style: `text-align:${n.attrs['align']}` } : {}, 0],
@@ -118,6 +130,19 @@ const doc = schema.node('doc', null, [
         m('. Arrow into it to select it, Backspace to delete it.'),
     ]),
     schema.node('horizontal_rule'),
+    // A table: cells are ordinary blocks laid out into their own frames, so
+    // everything that works in a paragraph works in a cell.
+    (() => {
+        const p = (t: string) => schema.node('paragraph', null, t ? [schema.text(t)] : [])
+        const th = (t: string) => schema.node('table_header', null, [p(t)])
+        const td = (t: string) => schema.node('table_cell', null, [p(t)])
+        const tr = (...c: any[]) => schema.node('table_row', null, c)
+        return schema.node('table', null, [
+            tr(th('feature'), th('canvas'), th('notes')),
+            tr(td('text layout'), td('Pretext'), td('per-block cache')),
+            tr(td('tables'), td('frames'), td('cells are blocks')),
+        ])
+    })(),
     schema.node('bullet_list', null, [
         li(m('Nested lists with markers + indent')),
         liNest('Press Tab to nest, Shift-Tab to lift', schema.node('bullet_list', null, [

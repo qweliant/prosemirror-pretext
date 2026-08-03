@@ -18,7 +18,8 @@ import type { Selection } from 'prosemirror-state'
 import type {
     Decoration, InlineDecoration, NodeDecoration,
 } from './decoration'
-import type { BlockLayout, LineFragment, LineLayout } from './types'
+import type { BlockLayout, LineFragment, LineLayout, TableChrome } from './types'
+import { TABLE_BORDER } from './constants'
 import { isRuleNode, isDocEmpty } from './layout/blocks'
 
 /**
@@ -38,6 +39,10 @@ export interface PaintContext
     firstLineColor: string
     selectionColor: string
     ruleColor: string
+    /** Rules between and around table cells. Defaults to `ruleColor`. */
+    tableBorderColor: string
+    /** Fill behind header cells. */
+    tableHeaderBackground: string
     placeholder: string
     placeholderColor: string
     /** Read only to decide whether the placeholder shows. */
@@ -88,6 +93,7 @@ export function paintToCanvas(
     totalHeight: number,
     virtualized: boolean,
     decorations: Decoration[] = [],
+    tables: TableChrome[] = [],
 ): void
 {
     const inlineDecos = decorations.filter((d): d is InlineDecoration => d.kind === 'inline')
@@ -125,6 +131,15 @@ export function paintToCanvas(
     const isVisible = (block: BlockLayout) =>
         !virtualized
         || (block.yOffset + block.height >= viewTop && block.yOffset <= viewBottom)
+
+    // Table chrome underlies everything: header fills, then rules. Drawn
+    // before block boxes so a cell's own background still paints over its fill.
+    for (const t of tables)
+    {
+        if (t.height === 0) continue
+        if (t.y + t.height < viewTop || t.y > viewBottom) continue
+        paintTableChrome(cx, ctx, t)
+    }
 
     // Block box decorations (code-block panel, blockquote bar) paint first,
     // beneath highlights, selection, and text.
@@ -429,5 +444,35 @@ function paintSelectionRects(
                 ctx.fillRect(x1, line.y, x2 - x1, block.lineHeight)
             }
         }
+    }
+}
+
+/**
+ * The grid: header fills, then one rule per cell edge. Cells are adjacent, so
+ * neighbouring rules land on identical coordinates and coincide rather than
+ * doubling — which is what makes this read as collapsed borders without any
+ * edge bookkeeping.
+ */
+function paintTableChrome(
+    cx: PaintContext,
+    ctx: CanvasRenderingContext2D,
+    t: TableChrome,
+): void
+{
+    for (const c of t.cells)
+    {
+        if (!c.header) continue
+        ctx.fillStyle = cx.tableHeaderBackground
+        ctx.fillRect(c.x, c.y, c.width, c.height)
+    }
+
+    ctx.fillStyle = cx.tableBorderColor
+    const b = TABLE_BORDER
+    for (const c of t.cells)
+    {
+        ctx.fillRect(c.x, c.y, c.width, b)                 // top
+        ctx.fillRect(c.x, c.y + c.height - b, c.width, b)  // bottom
+        ctx.fillRect(c.x, c.y, b, c.height)                // left
+        ctx.fillRect(c.x + c.width - b, c.y, b, c.height)  // right
     }
 }
