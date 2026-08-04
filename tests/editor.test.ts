@@ -8,6 +8,7 @@ import { GapCursor } from 'prosemirror-gapcursor'
 import { markSpecs, buildMarkKeymap } from '../src/marks'
 import { expandCollapsedWhitespace } from '../src/text'
 import { Decoration } from '../src/decoration'
+import { visibleRange } from '../src/paint'
 import { CellSelection } from '../src/table-selection'
 import {
     addRowAfter, deleteRow, addColumnAfter, deleteColumn,
@@ -3019,10 +3020,15 @@ describe('tables (side-by-side layout)', () =>
         ed.destroy()
     })
 
-    test('typing in a cell falls back to full layout (row height can change)', () =>
+    test('an edit inside a cell declines the incremental path', () =>
     {
         const { ed } = mk(row(cell('aa'), cell('bb')))
-        // lastTables is non-empty, so the incremental path must decline.
+        const cellBlock = ((ed as any).lastLayouts as any[])[0]
+        expect(cellBlock.frame).toBeTruthy()
+        ;(ed as any).dispatch((ed as any).state.tr.insertText('X', cellBlock.pmStartPos))
+        ;(ed as any).prevDoc = (ed as any).prevDoc // no-op, keep prevDoc as-is
+        // A cell's height change only moves rows below when it is its row's
+        // tallest, which the incremental shift cannot express.
         expect((ed as any).tryIncrementalLayout()).toBe(false)
         ed.destroy()
     })
@@ -3272,6 +3278,209 @@ describe('tables: grid model, spans, selection, commands', () =>
         ed.command((s, d) => { d?.(s.tr.setSelection(TextSelection.near(s.doc.resolve(4)))); return true })
         expect(ed.command(deleteTable)).toBe(true)
         expect(findTable(ed.state.doc, 0)).toBeNull()
+        ed.destroy()
+    })
+})
+
+
+describe('incremental layout with tables present', () =>
+{
+    // The regression guard that matters: after any edit, the incrementally
+    // maintained layout must be indistinguishable from a from-scratch one —
+    // block coordinates *and* table chrome, which carries its own absolute
+    // coordinates and so can silently drift out of step with the cells.
+    const p = (t: string) => schema.node('paragraph', null, [schema.text(t)])
+    const td = (t: string) => schema.node('table_cell', null, [p(t)])
+    const tr_ = (...c: any[]) => schema.node('table_row', null, c)
+
+    function build(docNode: any)
+    {
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        return new CanvasEditor({ state: EditorState.create({ doc: docNode, schema }), container })
+    }
+    const fresh = (ed: CanvasEditor) => build((ed as any).state.doc)
+
+    const snapshot = (ed: CanvasEditor) =>
+    {
+        const size = (ed as any).state.doc.content.size as number
+        const coords: string[] = []
+        for (let i = 0; i <= size; i++)
+        {
+            const c = (ed as any).coordsAtPos(i)
+            coords.push(c ? `${c.x.toFixed(2)},${c.y.toFixed(2)}` : 'null')
+        }
+        const chrome = ((ed as any).lastTables as any[]).map((t) => ({
+            y: t.y, h: t.height,
+            rows: t.rows.map((r: any) => r.y),
+            cells: t.cells.map((c: any) => `${c.x},${c.y},${c.width},${c.height}`),
+        }))
+        return { coords, chrome, total: (ed as any).lastTotalHeight }
+    }
+
+    const docWithTable = () => schema.node('doc', null, [
+        p('before the table'),
+        schema.node('table', null, [tr_(td('a'), td('b')), tr_(td('c'), td('d'))]),
+        p('after the table'),
+    ])
+
+    test('typing before a table stays incremental and keeps chrome aligned', () =>
+    {
+        const ed = build(docWithTable())
+        const before = ((ed as any).lastTables as any[])[0].y as number
+        ;(ed as any).dispatch((ed as any).state.tr.insertText('XYZ', 3))
+        expect((ed as any).tryIncrementalLayout()).toBe(true)   // no full pass
+        ;(ed as any).coordsAtPos(0)
+        const f = fresh(ed)
+        expect(snapshot(ed)).toEqual(snapshot(f))
+        // Sanity: the table did not move, because the edit did not change height.
+        expect(((ed as any).lastTables as any[])[0].y).toBe(before)
+        ed.destroy(); f.destroy()
+    })
+
+    test('an edit before a table that changes height moves the chrome with it', () =>
+    {
+        // A long insert wraps the first paragraph onto another line, growing it.
+        const ed = build(docWithTable())
+        const before = ((ed as any).lastTables as any[])[0].y as number
+        ;(ed as any).dispatch((ed as any).state.tr.insertText('\n', 3))
+        ;(ed as any).coordsAtPos(0)
+        const after = ((ed as any).lastTables as any[])[0].y as number
+        expect(after).toBeGreaterThan(before)      // chrome followed the text
+        const f = fresh(ed)
+        expect(snapshot(ed)).toEqual(snapshot(f))  // and matches a full pass
+        ed.destroy(); f.destroy()
+    })
+
+    test('typing after a table stays incremental and matches a full pass', () =>
+    {
+        const ed = build(docWithTable())
+        const size = (ed as any).state.doc.content.size as number
+        ;(ed as any).dispatch((ed as any).state.tr.insertText('Q', size - 1))
+        expect((ed as any).tryIncrementalLayout()).toBe(true)
+        ;(ed as any).coordsAtPos(0)
+        const f = fresh(ed)
+        expect(snapshot(ed)).toEqual(snapshot(f))
+        ed.destroy(); f.destroy()
+    })
+
+    test('typing inside a cell falls back, and still matches a full pass', () =>
+    {
+        const ed = build(docWithTable())
+        const cellBlock = ((ed as any).lastLayouts as any[]).find((b: any) => b.text === 'a')
+        expect(cellBlock.frame).toBeTruthy()
+        ;(ed as any).dispatch((ed as any).state.tr.insertText('ZZ', cellBlock.pmStartPos))
+        expect((ed as any).tryIncrementalLayout()).toBe(false)
+        ;(ed as any).coordsAtPos(0)
+        const f = fresh(ed)
+        expect(snapshot(ed)).toEqual(snapshot(f))
+        ed.destroy(); f.destroy()
+    })
+
+    test('a run of mixed edits around a table converges on the full-pass layout', () =>
+    {
+        const ed = build(docWithTable())
+        const edits: Array<[number, string]> = [[3, 'a'], [5, 'bb'], [2, 'c']]
+        for (const [at, t] of edits)
+        {
+            ;(ed as any).dispatch((ed as any).state.tr.insertText(t, at))
+            ;(ed as any).coordsAtPos(0)
+        }
+        const f = fresh(ed)
+        expect(snapshot(ed)).toEqual(snapshot(f))
+        ed.destroy(); f.destroy()
+    })
+})
+
+
+describe('visible-range culling (frame cost)', () =>
+{
+    // A wrong window drops blocks from the frame, and the test canvas is a stub
+    // so nothing downstream would notice. These compare the window against a
+    // brute-force filter instead of trusting it.
+    const mkLayouts = (spec: Array<[number, number]>) =>
+        spec.map(([y, h], i) => ({
+            type: 'paragraph', node: null as any, text: `b${i}`,
+            yOffset: y, height: h, lines: [], pmStartPos: i, pmEndPos: i,
+            lineHeight: 26, font: '', fontSize: 16, color: null,
+            paddingTop: 0, paddingBottom: 0, background: null, borderLeft: null,
+            marker: null,
+        })) as any[]
+
+    const brute = (ls: any[], top: number, bottom: number) =>
+        ls.filter((b) => b.yOffset + b.height >= top && b.yOffset <= bottom).map((b) => b.text)
+
+    const windowed = (ls: any[], top: number, bottom: number, sorted: boolean) =>
+    {
+        const [lo, hi] = visibleRange(ls, top, bottom, sorted)
+        return ls.slice(lo, hi)
+            .filter((b) => b.yOffset + b.height >= top && b.yOffset <= bottom)
+            .map((b) => b.text)
+    }
+
+    test('the window matches a brute-force filter across many viewports', () =>
+    {
+        const ls = mkLayouts(Array.from({ length: 200 }, (_, i) => [i * 30, 26]))
+        for (let top = -50; top < 6200; top += 37)
+        {
+            const bottom = top + 400
+            expect(windowed(ls, top, bottom, true)).toEqual(brute(ls, top, bottom))
+        }
+    })
+
+    test('a tall block straddling the viewport top is not missed', () =>
+    {
+        // Block 1 is very tall and starts well above the viewport; a naive
+        // lower bound on yOffset alone would skip it.
+        const ls = mkLayouts([[0, 20], [20, 900], [920, 20], [940, 20]])
+        expect(windowed(ls, 500, 700, true)).toEqual(brute(ls, 500, 700))
+        expect(windowed(ls, 500, 700, true)).toContain('b1')
+    })
+
+    test('unsorted layouts return the whole array rather than narrowing', () =>
+    {
+        // The table shape: blocks in one row share a band, so a later block can
+        // sit *above* an earlier one. Chosen so narrowing would genuinely lose
+        // b2 — a viewport where everything is visible would pass either way.
+        const ls = mkLayouts([[0, 20], [1000, 20], [10, 20]])
+        expect(visibleRange(ls, 0, 30, false)).toEqual([0, 3])
+        expect(windowed(ls, 0, 30, false)).toEqual(brute(ls, 0, 30))
+        expect(windowed(ls, 0, 30, false)).toEqual(['b0', 'b2'])
+        // And narrowing this input really would drop it — the guard is earning
+        // its keep, not decorating a case that works anyway.
+        const [lo, hi] = visibleRange(ls, 0, 30, true)
+        expect(ls.slice(lo, hi).map((b: any) => b.text)).not.toContain('b2')
+    })
+
+    test('empty and fully-out-of-view inputs behave', () =>
+    {
+        expect(visibleRange([], 0, 100, true)).toEqual([0, 0])
+        const ls = mkLayouts([[0, 10], [10, 10]])
+        expect(windowed(ls, 5000, 5400, true)).toEqual([])
+    })
+
+    test('the editor refuses to claim sorted order when a table is present', () =>
+    {
+        // This is the guard that keeps the binary search safe. A table makes
+        // position order stop implying vertical order.
+        const p = (t: string) => schema.node('paragraph', null, [schema.text(t)])
+        const cellA = schema.node('table_cell', null, [p('a1'), p('a2')])
+        const cellB = schema.node('table_cell', null, [p('b1')])
+        const doc = schema.node('doc', null, [
+            schema.node('table', null, [schema.node('table_row', null, [cellA, cellB])]),
+        ])
+        const c = document.createElement('div'); document.body.appendChild(c)
+        const ed = new CanvasEditor({ state: EditorState.create({ doc, schema }), container: c })
+        const ys = ((ed as any).lastLayouts as any[]).map((b) => b.yOffset)
+        expect(ys.some((y, i) => i > 0 && y < ys[i - 1])).toBe(true)   // genuinely unsorted
+        expect((ed as any).layoutsSortedByY).toBe(false)               // and known to be
+        ed.destroy()
+    })
+
+    test('a plain document does claim sorted order (so the fast path is live)', () =>
+    {
+        const { ed } = makeEditor(['one', 'two', 'three'])
+        expect((ed as any).layoutsSortedByY).toBe(true)
         ed.destroy()
     })
 })

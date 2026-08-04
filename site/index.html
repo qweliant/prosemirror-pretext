@@ -202,12 +202,6 @@
         /* Reserve the scroller's height up front so mounting doesn't shove the
            page around under the reader. */
         #scale-embed { min-height: 420px; }
-        /* The editor sizes its `maxHeight` scroller to exactly the canvas width,
-           so on platforms with classic (space-taking) scrollbars the vertical
-           scrollbar eats into the content box and forces a spurious *horizontal*
-           scrollbar that clips the last few glyphs of every line. Letting the
-           scroller fill the card gives the scrollbar somewhere to live. */
-        #scale-embed > div { width: 100% !important; }
 
         .scale-foot { max-width: 720px; margin: 12px auto 0; }
         .scale-foot .row { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; justify-content: center; }

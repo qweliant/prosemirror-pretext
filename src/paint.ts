@@ -95,6 +95,7 @@ export function paintToCanvas(
     virtualized: boolean,
     decorations: Decoration[] = [],
     tables: TableChrome[] = [],
+    sortedByY = false,
 ): void
 {
     const inlineDecos = decorations.filter((d): d is InlineDecoration => d.kind === 'inline')
@@ -133,6 +134,12 @@ export function paintToCanvas(
         !virtualized
         || (block.yOffset + block.height >= viewTop && block.yOffset <= viewBottom)
 
+    // The slice of `layouts` worth walking at all. Pure and exported so the
+    // window can be tested against a brute-force filter — a wrong window drops
+    // blocks from the frame, which a stubbed test canvas cannot observe.
+    const [lo, hi] = visibleRange(layouts, viewTop, viewBottom, virtualized && sortedByY)
+    const visible = lo === 0 && hi === layouts.length ? layouts : layouts.slice(lo, hi)
+
     // Table chrome underlies everything: header fills, then rules. Drawn
     // before block boxes so a cell's own background still paints over its fill.
     for (const t of tables)
@@ -144,7 +151,7 @@ export function paintToCanvas(
 
     // Block box decorations (code-block panel, blockquote bar) paint first,
     // beneath highlights, selection, and text.
-    for (const block of layouts)
+    for (const block of visible)
     {
         if (!isVisible(block)) continue
         if (block.isAtom && isRuleNode(block.node))
@@ -187,7 +194,7 @@ export function paintToCanvas(
 
     // Highlight backgrounds paint under everything (before the selection
     // overlay, so selecting highlighted text still shows the selection).
-    for (const block of layouts)
+    for (const block of visible)
     {
         if (!isVisible(block)) continue
         for (const line of block.lines)
@@ -237,7 +244,7 @@ export function paintToCanvas(
     ctx.font = cx.font
     ctx.textBaseline = 'top'
 
-    for (const block of layouts)
+    for (const block of visible)
     {
         // Cull blocks fully outside the viewport — the per-block yOffsets
         // are the spatial index.
@@ -490,4 +497,53 @@ function paintTableChrome(
         ctx.fillRect(c.x, c.y, b, c.height)                // left
         ctx.fillRect(c.x + c.width - b, c.y, b, c.height)  // right
     }
+}
+
+
+/**
+ * The half-open index range of `layouts` that can intersect [viewTop,
+ * viewBottom].
+ *
+ * Culling per block still costs a pass over every block in the document, which
+ * is what made frame time grow with document size even though a keystroke did
+ * not. When layouts are sorted by y the window is a binary search instead,
+ * making a frame O(visible + log n).
+ *
+ * `sorted` must be false whenever a float or a table is in play: position order
+ * is then not vertical order (two cells in a row share a band, so a multi-block
+ * cell yields y values like 7, 53, 7), and narrowing would drop blocks. The
+ * whole array is returned in that case, which is what the code did before.
+ */
+export function visibleRange(
+    layouts: BlockLayout[],
+    viewTop: number,
+    viewBottom: number,
+    sorted: boolean,
+): [number, number]
+{
+    if (!sorted || layouts.length === 0) return [0, layouts.length]
+
+    // First block whose bottom reaches the viewport. Heights vary, so search on
+    // `yOffset` then widen left while a taller predecessor still overlaps.
+    let a = 0
+    let b = layouts.length
+    while (a < b)
+    {
+        const mid = (a + b) >> 1
+        if (layouts[mid].yOffset < viewTop) a = mid + 1
+        else b = mid
+    }
+    let lo = a
+    while (lo > 0 && layouts[lo - 1].yOffset + layouts[lo - 1].height >= viewTop) lo--
+
+    // First block starting past the viewport.
+    a = lo
+    b = layouts.length
+    while (a < b)
+    {
+        const mid = (a + b) >> 1
+        if (layouts[mid].yOffset <= viewBottom) a = mid + 1
+        else b = mid
+    }
+    return [lo, a]
 }

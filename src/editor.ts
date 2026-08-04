@@ -73,6 +73,36 @@ export type {
     LayoutFrame, TableChrome, TableCellBox,
 } from './types'
 
+/**
+ * Width a classic scrollbar takes out of a scroll container's content box.
+ * Zero for overlay scrollbars. Measured once with a throwaway probe — reading
+ * it off the live scroller would need content that already overflows, which is
+ * not true when the editor mounts.
+ */
+let cachedScrollbarWidth: number | null = null
+function scrollbarWidth(): number
+{
+    if (cachedScrollbarWidth !== null) return cachedScrollbarWidth
+    const probe = document.createElement('div')
+    probe.style.cssText =
+        'position:absolute;top:-9999px;width:100px;height:100px;overflow:scroll'
+    document.body.appendChild(probe)
+    cachedScrollbarWidth = probe.offsetWidth - probe.clientWidth
+    probe.remove()
+    return cachedScrollbarWidth
+}
+
+/** Whether block layouts are non-decreasing in `yOffset`. See
+ *  `CanvasEditor.layoutsSortedByY`. */
+function isSortedByY(layouts: BlockLayout[]): boolean
+{
+    for (let i = 1; i < layouts.length; i++)
+    {
+        if (layouts[i].yOffset < layouts[i - 1].yOffset) return false
+    }
+    return true
+}
+
 /** Horizontal offset to add to a line's left edge for the block's alignment. */
 function alignOffset(availWidth: number, lineWidth: number, align: 'left' | 'center' | 'right'): number
 {
@@ -214,6 +244,17 @@ export class CanvasEditor {
   private layoutDirty = true;
   private lastTotalHeight = 0;
   private lastTables: TableChrome[] = [];
+  /**
+   * Whether `lastLayouts` is non-decreasing in `yOffset`, which lets painting
+   * binary-search the visible window instead of walking the whole document.
+   *
+   * Position order usually implies vertical order, but not always: a float sits
+   * at an arbitrary `y`, and two cells in one table row share a band, so a
+   * multi-block cell yields y values like 7, 53, 7. Painting only the
+   * binary-searched slice in that case would silently drop blocks, so the flag
+   * is set per pass and the walk falls back when it is false.
+   */
+  private layoutsSortedByY = true;
   // The document `lastLayouts` was built from, so the incremental layout path
   // can diff against it to find the single block that changed.
   private prevDoc: PMNode | null = null;
@@ -479,7 +520,21 @@ export class CanvasEditor {
       this.scroller = document.createElement("div");
       this.scroller.style.maxHeight = `${this.maxHeight}px`;
       this.scroller.style.overflowY = "auto";
-      this.scroller.style.width = `${this.containerWidth}px`;
+      // A classic, space-taking scrollbar (Windows; macOS set to "always show")
+      // is carved out of the content box. Sizing the scroller to exactly
+      // `containerWidth` therefore leaves the canvas — which is exactly that
+      // wide — overflowing by the scrollbar's width, producing a spurious
+      // horizontal scrollbar that clips the end of every line.
+      //
+      // So widen the scroller by the scrollbar and always reserve the gutter:
+      // content then measures `containerWidth` whether or not it happens to be
+      // scrolling, instead of the width changing as the document grows past a
+      // viewport. Overlay scrollbars (modern macOS default) measure 0 and this
+      // is a no-op.
+      const gutter = scrollbarWidth();
+      this.scroller.style.width = `${this.containerWidth + gutter}px`;
+      this.scroller.style.boxSizing = "border-box";
+      if (gutter > 0) this.scroller.style.scrollbarGutter = "stable";
       this.scroller.appendChild(stack);
       this.container.appendChild(this.scroller);
     } else {
@@ -1573,12 +1628,6 @@ export class CanvasEditor {
     // also bails the frame right after floats clear (stale widths below).
     if (this.floats.length > 0 || this.floatRectFor || this.hadFloats)
       return false;
-    // Tables, for a different reason than floats: the incremental path shifts
-    // every later block by the edited block's height delta, but a cell only
-    // moves the rows below it when it is the tallest cell in its row. Checking
-    // the last frame's chrome keeps this O(1) — a table appearing or vanishing
-    // is structural and fails the single-textblock test below anyway.
-    if (this.lastTables.length > 0) return false;
 
     const prev = prevDoc.content;
     const cur = this.state.doc.content;
@@ -1614,6 +1663,12 @@ export class CanvasEditor {
     if (k < 0) return false;
     const blk = layouts[k];
     if (blk.isAtom) return false;
+    // Inside a table cell: a cell's height change only moves the rows below it
+    // when that cell is the tallest in its row, which "shift everything after
+    // by dy" cannot express. Typing *outside* a table is still incremental,
+    // even when the document contains one — that is the common case, and the
+    // table simply shifts with everything else below the edit.
+    if (blk.frame) return false;
 
     // The whole changed range (prev side [ds, de.a]) must stay inside this one
     // block; otherwise the edit crossed a boundary (split/join) → full rebuild.
@@ -1642,6 +1697,18 @@ export class CanvasEditor {
     layouts[k] = rebuilt;
 
     const dy = rebuilt.height - blk.height;
+    // Table chrome carries absolute coordinates of its own, so it has to move
+    // with the cell blocks it frames — otherwise the rules detach from the text
+    // by exactly the height the edit added.
+    if (dy !== 0) {
+      const editedTop = blk.yOffset;
+      for (const t of this.lastTables) {
+        if (t.y <= editedTop) continue;
+        t.y += dy;
+        for (const r of t.rows) r.y += dy;
+        for (const c of t.cells) c.y += dy;
+      }
+    }
     for (let i = k + 1; i < layouts.length; i++) {
       const L = layouts[i];
       L.pmStartPos += delta;
@@ -1821,6 +1888,10 @@ export class CanvasEditor {
 
     const totalHeight = Math.max(this.lineHeight, cursorY - this.blockGap);
     this.hadFloats = floating;
+    // Cheap to verify directly rather than inferred from "no floats and no
+    // tables" — one pass over data already in cache, and it cannot drift out
+    // of step with whatever the layout actually produced.
+    this.layoutsSortedByY = isSortedByY(result);
     return { layouts: result, totalHeight, tables };
   }
 
@@ -1869,6 +1940,7 @@ export class CanvasEditor {
       virtualized,
       decorations,
       this.lastTables,
+      this.layoutsSortedByY,
     );
   }
 

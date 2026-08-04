@@ -87,6 +87,36 @@
 
 ### Fixed
 
+- **Frame cost no longer grows with document size.** Painting culled blocks one
+  at a time, so every frame still walked the whole document even though a
+  keystroke did not — the "flat as the document grows" claim held for typing but
+  not for frames. The visible window is now found by binary search
+  (`visibleRange`), making a frame O(visible + log n): a 400px viewport walks 9
+  blocks whether the document has 500 or 8,000.
+
+  The subtlety is that position order stops implying vertical order once a float
+  or a table exists — two cells in a row share a band, so a multi-block cell
+  yields y offsets like 7, 53, 7, and narrowing would silently drop blocks.
+  Layout now checks directly whether its output is sorted and painting falls
+  back to the full walk when it is not.
+
+- **Typing outside a table is incremental again.** The first table release made
+  the incremental path decline whenever the document contained one, so a
+  keystroke in any paragraph of such a document paid a full layout pass. Only
+  edits *inside a cell* need that — a cell's height change moves later rows only
+  when it is its row's tallest, which the incremental shift cannot express.
+  Edits elsewhere are incremental as before, with table chrome now shifted
+  alongside the blocks it frames (it carries absolute coordinates of its own and
+  would otherwise detach from the text by exactly the height the edit added).
+
+- **The `maxHeight` scroller no longer clips the end of every line** on platforms
+  with classic, space-taking scrollbars (Windows; macOS set to "always show").
+  The scroller was sized to exactly the canvas width, so the vertical scrollbar
+  was carved out of the content box and forced a spurious *horizontal* scrollbar
+  over the canvas. It is now widened by the measured scrollbar width with the
+  gutter reserved, so the content box measures `width` whether or not it happens
+  to be scrolling. Overlay scrollbars measure 0 and are unaffected.
+
 - Clicking the text beside a floated node no longer puts the caret before the
   float. Hit-testing matched a block on its vertical band alone, and a float
   owns a band but only part of the width — so every click on the text flowing
