@@ -12,15 +12,18 @@ export type {
     FloatRect,
     NodeViewFn,
     EditorHandlers,
+    CanvasGeometry,
 } from './editor'
 export { markSpecs, buildMarkKeymap } from './marks'
-export { Decoration } from './decoration'
+export { Decoration, remoteSelection, withAlpha } from './decoration'
 export type {
     InlineDecoration,
     NodeDecoration,
     WidgetDecoration,
+    CursorDecoration,
     InlineDecorationStyle,
     NodeDecorationStyle,
+    RemoteSelection,
 } from './decoration'
 
 // ─── Tables ────────────────────────────────────────────────────────────────

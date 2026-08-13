@@ -7,8 +7,9 @@ import { CanvasEditor, type RenderStats } from '../src/editor'
 import { GapCursor } from 'prosemirror-gapcursor'
 import { markSpecs, buildMarkKeymap } from '../src/marks'
 import { expandCollapsedWhitespace } from '../src/text'
-import { Decoration } from '../src/decoration'
+import { Decoration, remoteSelection, withAlpha } from '../src/decoration'
 import { visibleRange } from '../src/paint'
+import { TEXT_BLEED } from '../src/constants'
 import { CellSelection } from '../src/table-selection'
 import {
     addRowAfter, deleteRow, addColumnAfter, deleteColumn,
@@ -1706,6 +1707,490 @@ describe('decorations (inline / node / widget)', () =>
         expect((e as any).mountedWidgets.has('k')).toBe(false)
         expect(el.isConnected).toBe(false)
         e.destroy()
+    })
+})
+
+
+/**
+ * A 2D context that records the drawing calls, not just the rects: a colour
+ * decoration's whole observable effect is *which* string was filled at which x
+ * in which colour, so `fillText` has to be captured to test it at all.
+ */
+interface PaintedText { fill: string, font: string, text: string, x: number, y: number }
+interface PaintedRect { fill: string, x: number, y: number, w: number, h: number }
+
+function recordPaint(e: CanvasEditor): { text: PaintedText[], rects: PaintedRect[] }
+{
+    const text: PaintedText[] = []
+    const rects: PaintedRect[] = []
+    let fill = ''
+    let font = ''
+    const ctx: any = {
+        setTransform() {}, clearRect() {}, save() {}, restore() {},
+        beginPath() {}, moveTo() {}, lineTo() {}, stroke() {},
+        measureText: (s: string) => ({ width: s.length * 8 }),
+        fillText: (t: string, x: number, y: number) => text.push({ fill, font, text: t, x, y }),
+        fillRect: (x: number, y: number, w: number, h: number) => rects.push({ fill, x, y, w, h }),
+        set fillStyle(v: string) { fill = v }, get fillStyle() { return fill },
+        set font(v: string) { font = v }, get font() { return font },
+        set textBaseline(_v: string) {}, set strokeStyle(_v: string) {}, set lineWidth(_v: number) {},
+    }
+    ;(e as any).canvas.getContext = () => ctx
+    ;(e as any).render()
+    return { text, rects }
+}
+
+function paragraphEditor(inline: any[], opts: any = {}): CanvasEditor
+{
+    const doc = schema.node('doc', null, [schema.node('paragraph', null, inline)])
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    return new CanvasEditor({ state: EditorState.create({ doc, schema }), container, ...opts })
+}
+
+
+describe('inline color decorations (run splitting)', () =>
+{
+    const RED = '#ff0000'
+
+    test('splits a plain line at the decorated range', () =>
+    {
+        // "hel" is doc [1,4) — block offsets 0..3, so x 0..24 in the mock.
+        const e = paragraphEditor(
+            [schema.text('hello')],
+            { decorations: () => [Decoration.inline(1, 4, { color: RED })] },
+        )
+        const { text } = recordPaint(e)
+        expect(text.map((t) => t.text)).toEqual(['hel', 'lo'])
+        expect(text[0]).toMatchObject({ text: 'hel', x: 0, fill: RED })
+        expect(text[1].x).toBe(24)
+        expect(text[1].fill).not.toBe(RED)
+        e.destroy()
+    })
+
+    test('a range covering a whole run recolors it without splitting', () =>
+    {
+        const e = paragraphEditor(
+            [schema.text('hello')],
+            { decorations: () => [Decoration.inline(1, 6, { color: RED })] },
+        )
+        const { text } = recordPaint(e)
+        expect(text).toHaveLength(1)
+        expect(text[0]).toMatchObject({ text: 'hello', x: 0, fill: RED })
+        e.destroy()
+    })
+
+    test('an undecorated line is still one fillText', () =>
+    {
+        const e = paragraphEditor([schema.text('hello')], { decorations: () => [] })
+        const { text } = recordPaint(e)
+        expect(text).toHaveLength(1)
+        expect(text[0].text).toBe('hello')
+        e.destroy()
+    })
+
+    test('overrides a mark color mid-run, keeping the mark font', () =>
+    {
+        const green = schema.marks['textColor'].create({ color: '#00ff00' })
+        const e = paragraphEditor(
+            [schema.text('abcdef', [green])],
+            { decorations: () => [Decoration.inline(3, 5, { color: RED })] },
+        )
+        const { text } = recordPaint(e)
+        expect(text.map((t) => [t.text, t.fill])).toEqual([
+            ['ab', '#00ff00'],
+            ['cd', RED],
+            ['ef', '#00ff00'],
+        ])
+        // The cut is a colour change only — every piece keeps the run's font.
+        expect(new Set(text.map((t) => t.font)).size).toBe(1)
+        expect(text.map((t) => t.x)).toEqual([0, 16, 32])
+        e.destroy()
+    })
+
+    test('later decorations win where two overlap', () =>
+    {
+        const e = paragraphEditor([schema.text('hello')], {
+            decorations: () => [
+                Decoration.inline(1, 4, { color: RED }),
+                Decoration.inline(2, 4, { color: '#0000ff' }),
+            ],
+        })
+        const { text } = recordPaint(e)
+        expect(text.map((t) => [t.text, t.fill])).toEqual([
+            ['h', RED],
+            ['el', '#0000ff'],
+            ['lo', text[2].fill],
+        ])
+        expect(text[2].fill).not.toBe(RED)
+        e.destroy()
+    })
+
+    test('recolored text lands on the same span as a background over the range', () =>
+    {
+        const e = paragraphEditor([schema.text('hello')], {
+            decorations: () => [
+                Decoration.inline(1, 4, { color: RED, background: '#ffee00' }),
+            ],
+        })
+        const { text, rects } = recordPaint(e)
+        const band = rects.find((r) => r.fill === '#ffee00')!
+        const piece = text.find((t) => t.fill === RED)!
+        expect(band.x).toBe(piece.x)
+        expect(band.w).toBe(24)
+        e.destroy()
+    })
+
+    test('clips to line boundaries across a hard break', () =>
+    {
+        // 'ab\ncd' lays out as two lines; doc [2,6) spans the newline.
+        const e = paragraphEditor(
+            [schema.text('ab\ncd')],
+            { decorations: () => [Decoration.inline(2, 6, { color: RED })] },
+        )
+        const { text } = recordPaint(e)
+        expect(text.map((t) => [t.text, t.fill, t.x])).toEqual([
+            ['a', text[0].fill, 0],
+            ['b', RED, 8],
+            ['cd', RED, 0],
+        ])
+        expect(text[0].fill).not.toBe(RED)
+        // Two lines, so the second pair sits a lineHeight lower.
+        expect(text[2].y - text[0].y).toBe(26)
+        e.destroy()
+    })
+
+    test('leaves atom blocks alone', () =>
+    {
+        const doc = schema.node('doc', null, [
+            schema.node('widget'),
+            schema.node('paragraph', null, [schema.text('hi')]),
+        ])
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        const e = new CanvasEditor({
+            state: EditorState.create({ doc, schema }),
+            container,
+            nodeViews: { widget: () => document.createElement('div') },
+            decorations: () => [Decoration.inline(0, 3, { color: RED })],
+        })
+        expect(() => recordPaint(e)).not.toThrow()
+        e.destroy()
+    })
+})
+
+
+describe('collaborative cursors (remote carets)', () =>
+{
+    const BLUE = '#3b82f6'
+
+    test('paints a caret bar at the position', () =>
+    {
+        // pos 3 → block offset 2 → x 16; the caret is the local caret's width.
+        const e = paragraphEditor(
+            [schema.text('hello')],
+            { decorations: () => [Decoration.cursor(3, BLUE)] },
+        )
+        const { rects } = recordPaint(e)
+        expect(rects.some((r) => r.fill === BLUE && r.x === 16 && r.w === 2 && r.h === 26))
+            .toBe(true)
+        e.destroy()
+    })
+
+    test('a labelled caret draws a name flag', () =>
+    {
+        const e = paragraphEditor(
+            [schema.text('hello')],
+            { decorations: () => [Decoration.cursor(3, BLUE, { label: 'Ada' })] },
+        )
+        const { text, rects } = recordPaint(e)
+        // 'Ada' = 24px in the mock, + 5px padding either side.
+        const flag = rects.find((r) => r.fill === BLUE && r.w === 34 && r.h === 15)!
+        expect(flag).toBeDefined()
+        const name = text.find((t) => t.text === 'Ada')!
+        expect(name.fill).toBe('#ffffff')
+        expect(name.x).toBe(flag.x + 5)
+        e.destroy()
+    })
+
+    test('the flag drops below a caret on the first line rather than clipping', () =>
+    {
+        const e = paragraphEditor(
+            [schema.text('hello')],
+            { decorations: () => [Decoration.cursor(3, BLUE, { label: 'Ada' })] },
+        )
+        const { rects } = recordPaint(e)
+        const flag = rects.find((r) => r.fill === BLUE && r.h === 15)!
+        expect(flag.y).toBe(26)
+        e.destroy()
+    })
+
+    test('the flag is pulled back inside the content column', () =>
+    {
+        const long = 'x'.repeat(56) // 448px — a flag at the end would overhang 460.
+        const e = paragraphEditor(
+            [schema.text(long)],
+            { decorations: () => [Decoration.cursor(57, BLUE, { label: 'Ada' })] },
+        )
+        const { rects } = recordPaint(e)
+        const flag = rects.find((r) => r.fill === BLUE && r.h === 15)!
+        expect(flag.x + flag.w).toBeLessThanOrEqual(460)
+        e.destroy()
+    })
+
+    test('remoteSelection bands the range and puts the caret at the head', () =>
+    {
+        const e = paragraphEditor([schema.text('hello')], {
+            decorations: () => remoteSelection({
+                from: 1, to: 4, color: BLUE, name: 'Ada',
+            }),
+        })
+        const { rects } = recordPaint(e)
+        expect(rects.some((r) => r.fill === 'rgba(59, 130, 246, 0.25)' && r.w === 24))
+            .toBe(true)
+        // Caret at `to` (offset 3 → x 24) by default.
+        expect(rects.some((r) => r.fill === BLUE && r.x === 24 && r.w === 2)).toBe(true)
+        e.destroy()
+    })
+
+    test('a backwards selection puts the caret at the anchor end', () =>
+    {
+        const e = paragraphEditor([schema.text('hello')], {
+            decorations: () => remoteSelection({ from: 1, to: 4, head: 1, color: BLUE }),
+        })
+        const { rects } = recordPaint(e)
+        expect(rects.some((r) => r.fill === BLUE && r.x === 0 && r.w === 2)).toBe(true)
+        e.destroy()
+    })
+
+    test('a collapsed remote selection is a caret with no band', () =>
+    {
+        const e = paragraphEditor([schema.text('hello')], {
+            decorations: () => remoteSelection({ from: 3, to: 3, color: BLUE }),
+        })
+        const decos = remoteSelection({ from: 3, to: 3, color: BLUE })
+        expect(decos).toHaveLength(1)
+        expect(decos[0].kind).toBe('cursor')
+        const { rects } = recordPaint(e)
+        expect(rects.some((r) => r.fill === BLUE && r.x === 16 && r.w === 2)).toBe(true)
+        e.destroy()
+    })
+
+    test('several participants paint independently', () =>
+    {
+        const e = paragraphEditor([schema.text('hello')], {
+            decorations: () => [
+                ...remoteSelection({ from: 1, to: 2, color: BLUE, name: 'Ada' }),
+                ...remoteSelection({ from: 4, to: 5, color: '#ef4444', name: 'Lin' }),
+            ],
+        })
+        const { text } = recordPaint(e)
+        expect(text.some((t) => t.text === 'Ada')).toBe(true)
+        expect(text.some((t) => t.text === 'Lin')).toBe(true)
+        e.destroy()
+    })
+
+    test('withAlpha derives a band color from hex, and passes anything else through', () =>
+    {
+        expect(withAlpha('#f00', 0.25)).toBe('rgba(255, 0, 0, 0.25)')
+        expect(withAlpha('#ff8800', 0.5)).toBe('rgba(255, 136, 0, 0.5)')
+        expect(withAlpha('rebeccapurple', 0.25)).toBe('rebeccapurple')
+        expect(withAlpha('rgb(1, 2, 3)', 0.25)).toBe('rgb(1, 2, 3)')
+    })
+})
+
+
+describe('display scale (editing under a CSS transform)', () =>
+{
+    // The canvas's own layout size. A client rect of 2x this means 2x zoom.
+    const W = 466
+    const H = 200
+
+    /** Pretend an ancestor transform has moved and scaled the canvas. */
+    function place(e: CanvasEditor, left: number, top: number, scale: number): void
+    {
+        const canvas = (e as any).canvas as HTMLCanvasElement
+        Object.defineProperty(canvas, 'offsetWidth', { value: W, configurable: true })
+        Object.defineProperty(canvas, 'offsetHeight', { value: H, configurable: true })
+        canvas.getBoundingClientRect = (() => ({
+            left, top, x: left, y: top,
+            width: W * scale, height: H * scale,
+            right: left + W * scale, bottom: top + H * scale,
+            toJSON: () => ({}),
+        })) as any
+        e.invalidateGeometry()
+    }
+
+    function ed(text: string): CanvasEditor
+    {
+        const doc = schema.node('doc', null, [
+            schema.node('paragraph', null, [schema.text(text)]),
+        ])
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        return new CanvasEditor({
+            state: EditorState.create({ doc, schema }), container, autofocus: false,
+        })
+    }
+
+    test('a click lands on the same character at 1x and at 2x', () =>
+    {
+        const e = ed('hello')
+        // Column 3 sits at layout x 24 (the mock measures 8px per character).
+        place(e, 0, 0, 1)
+        expect(e.posAtCoords({ left: 24, top: 5 })!.pos).toBe(4)
+        place(e, 0, 0, 2)
+        expect(e.posAtCoords({ left: 48, top: 10 })!.pos).toBe(4)
+        e.destroy()
+    })
+
+    test('the origin is subtracted before the scale is divided out', () =>
+    {
+        const e = ed('hello')
+        place(e, 100, 40, 2)
+        expect(e.posAtCoords({ left: 100 + 48, top: 40 + 10 })!.pos).toBe(4)
+        e.destroy()
+    })
+
+    test('coordsAtPos reports viewport pixels, so it scales too', () =>
+    {
+        const e = ed('hello')
+        place(e, 100, 40, 2)
+        expect(e.coordsAtPos(4)).toEqual({ x: 148, y: 40, height: 52 })
+        e.destroy()
+    })
+
+    test('coordsAtPos and posAtCoords stay inverses under zoom', () =>
+    {
+        const e = ed('hello world')
+        place(e, 37, 11, 2)
+        for (const pos of [1, 3, 6, 9])
+        {
+            const c = e.coordsAtPos(pos)!
+            expect(e.posAtCoords({ left: c.x, top: c.y })!.pos).toBe(pos)
+        }
+        e.destroy()
+    })
+
+    test('a transform the editor cannot see needs invalidateGeometry', () =>
+    {
+        const e = ed('hello')
+        place(e, 0, 0, 1)
+        expect(e.coordsAtPos(4)!.x).toBe(24)
+
+        // Zoom the host without saying so. A CSS transform fires no event, so
+        // the cached geometry is now a lie — which is the whole reason the
+        // invalidation hook is public.
+        const canvas = (e as any).canvas as HTMLCanvasElement
+        canvas.getBoundingClientRect = (() => ({
+            left: 0, top: 0, x: 0, y: 0, width: W * 2, height: H * 2,
+            right: W * 2, bottom: H * 2, toJSON: () => ({}),
+        })) as any
+        expect(e.coordsAtPos(4)!.x).toBe(24)
+
+        e.invalidateGeometry()
+        expect(e.coordsAtPos(4)!.x).toBe(48)
+        e.destroy()
+    })
+
+    test('pointer mapping re-measures every time, so a press is never stale', () =>
+    {
+        const e = ed('hello')
+        place(e, 0, 0, 1)
+        const canvas = (e as any).canvas as HTMLCanvasElement
+        Object.defineProperty(canvas, 'offsetWidth', { value: W, configurable: true })
+        canvas.getBoundingClientRect = (() => ({
+            left: 0, top: 0, x: 0, y: 0, width: W * 2, height: H * 2,
+            right: W * 2, bottom: H * 2, toJSON: () => ({}),
+        })) as any
+        // No invalidateGeometry() — input reads fresh regardless.
+        expect(e.posAtCoords({ left: 48, top: 10 })!.pos).toBe(4)
+        e.destroy()
+    })
+
+    test('a zero-sized canvas maps as identity rather than NaN', () =>
+    {
+        const e = ed('hello')
+        const canvas = (e as any).canvas as HTMLCanvasElement
+        Object.defineProperty(canvas, 'offsetWidth', { value: 0, configurable: true })
+        Object.defineProperty(canvas, 'offsetHeight', { value: 0, configurable: true })
+        e.invalidateGeometry()
+        const c = e.coordsAtPos(4)!
+        expect(Number.isFinite(c.x)).toBe(true)
+        expect(Number.isFinite(c.y)).toBe(true)
+        expect(Number.isFinite(c.height)).toBe(true)
+        e.destroy()
+    })
+})
+
+
+describe('canvas bleed (a hair of overrun is drawn, not clipped)', () =>
+{
+    test('the canvas is wider than the content column', () =>
+    {
+        const e = paragraphEditor([schema.text('hello')], { autofocus: false })
+        recordPaint(e)
+        expect((e as any).canvas.style.width).toBe(`${460 + TEXT_BLEED}px`)
+        e.destroy()
+    })
+
+    test('but painting still stops at the content width', () =>
+    {
+        const e = paragraphEditor([schema.text('hello')], {
+            autofocus: false,
+            decorations: () => [Decoration.node(0, { background: '#0000ff' })],
+        })
+        const { rects } = recordPaint(e)
+        expect(rects.some((r) => r.fill === '#0000ff' && r.w === 460)).toBe(true)
+        expect(rects.some((r) => r.w === 460 + TEXT_BLEED)).toBe(false)
+        e.destroy()
+    })
+
+    test('a scroller reserves the bleed alongside the scrollbar gutter', () =>
+    {
+        const e = paragraphEditor([schema.text('hello')], {
+            autofocus: false, maxHeight: 100,
+        })
+        // Overlay scrollbars measure 0 in the test DOM, so this is column+bleed.
+        expect((e as any).scroller.style.width).toBe(`${460 + TEXT_BLEED}px`)
+        e.destroy()
+    })
+})
+
+
+describe('caret follows focus', () =>
+{
+    // The default caretColor, at the default caretWidth.
+    const CARET = '#a5b4fc'
+    const isCaret = (r: { fill: string, w: number }) => r.fill === CARET && r.w === 2
+
+    test('an unfocused editor paints no caret', () =>
+    {
+        const e = paragraphEditor([schema.text('hello')], { autofocus: false })
+        expect(recordPaint(e).rects.some(isCaret)).toBe(false)
+        e.destroy()
+    })
+
+    test('a focused editor paints one', () =>
+    {
+        const e = paragraphEditor([schema.text('hello')], { autofocus: false })
+        e.focus()
+        expect(recordPaint(e).rects.some(isCaret)).toBe(true)
+        e.destroy()
+    })
+
+    test('two editors on one surface show at most one caret', () =>
+    {
+        // `autofocus` defaults on, so several editors mounted together would
+        // otherwise fight over focus — the reason it must be opted out of when
+        // more than one shares a page.
+        const a = paragraphEditor([schema.text('hello')], { autofocus: false })
+        const b = paragraphEditor([schema.text('world')], { autofocus: false })
+        b.focus()
+        expect(recordPaint(a).rects.some(isCaret)).toBe(false)
+        expect(recordPaint(b).rects.some(isCaret)).toBe(true)
+        a.destroy()
+        b.destroy()
     })
 })
 

@@ -10,7 +10,11 @@ import { EditorState, TextSelection, type Command } from 'prosemirror-state'
 import { toggleMark, setBlockType } from 'prosemirror-commands'
 import { history, undo, redo } from 'prosemirror-history'
 import { wrapInList, liftListItem } from 'prosemirror-schema-list'
-import { CanvasEditor, markSpecs, buildMarkKeymap, Decoration, type RenderStats, type Decoration as Deco } from '../src'
+import {
+    CanvasEditor, markSpecs, buildMarkKeymap, Decoration, remoteSelection,
+    type RenderStats, type Decoration as Deco,
+} from '../src'
+import { Board, type Frame, type Tool } from './board'
 
 // A clean editorial serif for the writing surface — reads like a real editor,
 // not a toy (the playful rounded fonts stay in the page chrome around it).
@@ -401,20 +405,17 @@ async function boot(): Promise<void> {
     const peek = document.getElementById('mirror-peek') as HTMLElement
 
     let collabOn = false
-    let collabPos = 6
 
-    // A simulated remote caret. In a real app the *position* would come from a
-    // collab transport (Yjs / y-prosemirror or prosemirror-collab + a socket);
-    // the *rendering* is just a widget decoration like this one.
-    function collabCursor(): HTMLElement {
-        const el = document.createElement('span')
-        el.style.cssText = 'display:inline-block;position:relative'
-        el.innerHTML = '<span style="position:absolute;width:2px;height:22px;background:#e0488a;border-radius:1px"></span>' +
-            '<span style="position:absolute;top:-18px;left:-2px;white-space:nowrap;background:#e0488a;color:#fff;font:600 11px/1.4 system-ui;padding:1px 6px;border-radius:6px">Keroppi 🐸</span>'
-        return el
-    }
+    // Two simulated participants. In a real app these ranges arrive over a
+    // collab transport (Yjs / y-prosemirror, or prosemirror-collab and a
+    // socket) — the transport is the application's problem, and everything
+    // downstream of it is one `remoteSelection()` call per person.
+    const peers = [
+        { name: 'Keroppi 🐸', color: '#e0488a', from: 6, to: 6 },
+        { name: 'Tuxedosam', color: '#46a8d8', from: 42, to: 58 },
+    ]
 
-    // Decorations = search highlights + (optionally) the collaborator's caret.
+    // Decorations = search highlights + (optionally) everyone else's carets.
     const decorationsFn = (state: EditorState): Deco[] => {
         const decos: Deco[] = []
         if (query) {
@@ -424,26 +425,59 @@ async function boot(): Promise<void> {
                 const text = node.text.toLowerCase()
                 let i = text.indexOf(q)
                 while (i !== -1) {
-                    decos.push(Decoration.inline(pos + i, pos + i + q.length, { background: '#fff06a' }))
+                    // A band *behind* the glyphs and a color *on* them. The
+                    // second one is why an inline decoration can split a run:
+                    // painting has to cut the line at the match's edges before
+                    // it can fill part of it a different color.
+                    decos.push(Decoration.inline(pos + i, pos + i + q.length, {
+                        background: '#fff06a', color: '#b3261e',
+                    }))
                     i = text.indexOf(q, i + q.length)
                 }
             })
         }
         if (collabOn) {
             const max = state.doc.content.size
-            decos.push(Decoration.widget(Math.min(collabPos, max), collabCursor(), { key: 'collab' }))
+            for (const p of peers) {
+                decos.push(...remoteSelection({
+                    from: Math.min(p.from, max), to: Math.min(p.to, max),
+                    color: p.color, name: p.name,
+                }))
+            }
         }
         return decos
     }
-    const embed = document.getElementById('editor-embed')!
-    // Fit the phone/tablet screen instead of overflowing at a fixed 600px.
+    // ── The board, and the document's frame on it ──
+    const boardEl = document.getElementById('board')!
+    const board = new Board(boardEl, {
+        onCreateNote: (f) => fillNote(f, 'a note ✍️'),
+        onChange: () => syncBoard(),
+    })
+    // The document takes the whole board apart from a strip on the right, kept
+    // clear so the notes beside it stay in view — a board whose contents exactly
+    // fill the viewport reads as a page, which is what this section is fighting.
+    //
+    // SIDE_STRIP is the only thing limiting the editor's width. There is
+    // deliberately no second `Math.min(...)` cap: one used to sit here, and
+    // since the subtraction was already the smaller of the two, raising the cap
+    // changed nothing and read as the edit not having applied.
+    const SIDE_STRIP = 300
     const editorWidth = Math.max(
         280,
-        Math.min(600, embed.clientWidth || window.innerWidth - 80),
+        (boardEl.clientWidth || window.innerWidth) - SIDE_STRIP,
     )
+    const docFrame = board.addFrame({
+        // +36 is the card's own padding: prose that runs to the border of its
+        // card reads as clipped even when every glyph is there.
+        x: 26, y: 22, w: editorWidth + 36, h: 470,
+        label: '📄 the document',
+    })
     const editor = new CanvasEditor({
         state: EditorState.create({ doc, schema, plugins: [history()] }),
-        container: embed,
+        container: docFrame.body,
+        // A frame on a board is a window onto a document, not the whole scroll
+        // of it — so the editor virtualizes inside its own card.
+        maxHeight: 420,
         width: editorWidth, font: EDITOR_FONT, ...EDITOR_THEME,
         ariaLabel: 'prosemirror-pretext live demo',
         // Painted only while the document is empty — try "empty the doc" below.
@@ -460,6 +494,118 @@ async function boot(): Promise<void> {
         },
     })
     ;(window as any).editor = editor
+    ;(window as any).board = board
+    docFrame.onGeometryChange = () => editor.invalidateGeometry()
+
+    /**
+     * Sticky notes are CanvasEditors too. That is the whole argument of the
+     * board in one function: there is exactly one kind of text surface here,
+     * and a note differs from the document only in width and font size.
+     */
+    function fillNote(frame: Frame, text: string): CanvasEditor {
+        const note = new CanvasEditor({
+            state: EditorState.create({
+                doc: schema.node('doc', null, [
+                    schema.node('paragraph', null, [schema.text(text)]),
+                ]),
+                schema,
+                plugins: [history()],
+            }),
+            container: frame.body,
+            width: frame.w - 20,
+            // Several editors on one board: only the document claims focus on
+            // arrival, or the last note mounted would steal it.
+            autofocus: false,
+            font: '13.5px Georgia, "Times New Roman", serif',
+            ...EDITOR_THEME,
+            textColor: '#5c4a12', firstLineColor: '#5c4a12', caretColor: '#a08320',
+            selectionColor: 'rgba(224, 190, 60, .35)',
+            ariaLabel: 'sticky note',
+            keymap: { ...buildMarkKeymap(schema), 'Mod-z': undo, 'Mod-y': redo, 'Shift-Mod-z': redo },
+        })
+        // Zooming or panning the board changes where this canvas sits and how
+        // large it is drawn; the editor derives the scale itself but cannot see
+        // the transform change, so it is told.
+        frame.onGeometryChange = () => note.invalidateGeometry()
+        // The note sizes itself to its text, and the board wants the height for
+        // hit-testing and `fit` — but only after layout has actually run.
+        requestAnimationFrame(() => board.remeasure())
+        return note
+    }
+
+    // ── Board chrome: tool palette, zoom readout, and a status line ──
+    // Each tool carries the sentence to show while it is armed. On a surface
+    // where the same drag pans, draws, or selects depending on what is picked,
+    // the mode has to say what it does — an unlabelled icon row is a quiz.
+    const TOOLS: { tool: Tool, glyph: string, label: string, says: string }[] = [
+        {
+            tool: 'select', glyph: '↖', label: 'Select',
+            says: 'Drag the board to pan · click a shape to select it · ⌘/ctrl-scroll to zoom',
+        },
+        {
+            tool: 'note', glyph: '🗒', label: 'Note',
+            says: 'Click anywhere to drop a sticky note — it is a CanvasEditor, so type in it',
+        },
+        { tool: 'rect', glyph: '▭', label: 'Box', says: 'Drag on the board to draw a box' },
+        { tool: 'ellipse', glyph: '◯', label: 'Circle', says: 'Drag on the board to draw an ellipse' },
+        { tool: 'arrow', glyph: '↗', label: 'Arrow', says: 'Drag from the tail to the head' },
+        { tool: 'pen', glyph: '✎', label: 'Draw', says: 'Drag to scribble — the stroke follows your pointer' },
+    ]
+    const toolBtns = TOOLS.map(({ tool, glyph, label, says }) => {
+        const b = document.createElement('button')
+        b.className = 'tl'
+        b.innerHTML = `<span class="g">${glyph}</span><span class="lbl">${label}</span>`
+        b.title = says
+        b.setAttribute('aria-label', `${label} — ${says}`)
+        b.addEventListener('click', () => board.setTool(tool))
+        document.getElementById('board-tools')!.appendChild(b)
+        return { b, tool, says }
+    })
+    const zoomLabel = document.getElementById('board-zoom')!
+    const status = document.getElementById('board-status')!
+    function syncBoard(): void {
+        let says = ''
+        for (const { b, tool, says: s } of toolBtns) {
+            const on = board.currentTool === tool
+            b.classList.toggle('active', on)
+            b.setAttribute('aria-pressed', String(on))
+            if (on) says = s
+        }
+        zoomLabel.textContent = `${Math.round(board.zoom * 100)}%`
+        // A selected shape is the only state with a destructive action attached,
+        // so it gets to say so rather than leaving Backspace to be discovered.
+        status.innerHTML = board.selectedShape
+            ? 'Shape selected — drag to move it, <b>⌫</b> or <b>clear</b> to remove it'
+            : says
+    }
+    document.getElementById('board-fit')!.addEventListener('click', () => board.fitAll())
+    document.getElementById('board-in')!.addEventListener('click', () => board.setZoom(board.zoom + 0.25))
+    document.getElementById('board-out')!.addEventListener('click', () => board.setZoom(board.zoom - 0.25))
+    document.getElementById('board-clear')!.addEventListener('click', () => {
+        if (board.selectedShape) board.deleteSelected()
+        else board.clearShapes()
+    })
+    syncBoard()
+
+    // Seed the board, so it arrives looking like a board rather than an editor
+    // wearing a hat: two notes, an arrow into the prose, and a drawn annotation.
+    const rightOf = docFrame.x + docFrame.w
+    fillNote(
+        board.addFrame({ x: rightOf + 46, y: 44, w: 212, h: 110, label: 'note', note: true }),
+        'Notes are editors too — same layout engine, smaller font. Type in one.',
+    )
+    fillNote(
+        board.addFrame({ x: rightOf + 46, y: 226, w: 212, h: 110, label: 'note', note: true }),
+        '⌘-scroll to zoom out — then keep typing. Cards edit at any scale.',
+    )
+    board.addShape({
+        kind: 'arrow', points: [rightOf + 38, 96, rightOf - 4, 140],
+        stroke: '#e0488a', fill: null, width: 2.5,
+    })
+    board.addShape({
+        kind: 'ellipse', points: [rightOf + 34, 376, rightOf + 246, 442],
+        stroke: '#46a8d8', fill: 'rgba(138,214,242,.16)', width: 2.5,
+    })
 
     // ── Toolbar (grouped icon buttons) ──
     const bar = document.getElementById('embed-toolbar')!
@@ -535,7 +681,7 @@ async function boot(): Promise<void> {
         editor.dispatch(editor.state.tr) // empty tr → re-render → decorations() reruns
     })
 
-    // ── Simulated collaborator (a widget decoration that wanders the doc) ──
+    // ── Simulated collaborators (canvas-painted carets that wander the doc) ──
     const collabBtn = document.getElementById('collab-toggle') as HTMLButtonElement
     let collabTimer: ReturnType<typeof setInterval> | null = null
     collabBtn.addEventListener('click', () => {
@@ -543,7 +689,12 @@ async function boot(): Promise<void> {
         collabBtn.classList.toggle('on', collabOn)
         if (collabOn) {
             collabTimer = setInterval(() => {
-                collabPos = 2 + Math.floor(Math.random() * Math.max(1, editor.state.doc.content.size - 4))
+                const size = Math.max(8, editor.state.doc.content.size)
+                for (const p of peers) {
+                    p.from = 2 + Math.floor(Math.random() * (size - 6))
+                    // One of them drags a selection, so the band shows too.
+                    p.to = p === peers[1] ? Math.min(size - 2, p.from + 12) : p.from
+                }
                 editor.dispatch(editor.state.tr) // refresh decorations
             }, 1400)
         } else if (collabTimer) {

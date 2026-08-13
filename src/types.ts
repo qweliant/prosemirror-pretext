@@ -248,6 +248,23 @@ export interface BlockStyle
 
 export type BlockStyleResolver = BlockStyle | ((node: PMNode) => BlockStyle | null)
 
+/**
+ * Where the canvas sits in the viewport, and the scale it is drawn at.
+ *
+ * The scale exists because a host may place the editor under a CSS transform —
+ * a zoomable board being the motivating case. `getBoundingClientRect()` reports
+ * post-transform pixels while layout is computed in untransformed ones, so
+ * every mapping across that boundary has to divide (going in) or multiply
+ * (coming out). At scale 1 both are the identity and this costs nothing.
+ */
+export interface CanvasGeometry
+{
+    left: number
+    top: number
+    scaleX: number
+    scaleY: number
+}
+
 export interface RenderStats
 {
     blockCount: number

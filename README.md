@@ -336,10 +336,57 @@ bun run dev          # → redirects to the same demo, served from the repo root
 bun run dev:site     # the kawaii docs site with the live editor (site/)
 ```
 
-There is one demo, in `site/`: the landing page, the live editor, an interactive
-node view, decorations, the screen-reader mirror, and a scroll-virtualization
-lab that mounts up to 8,000 blocks with `maxHeight` and measures the
-per-keystroke cost in-page.
+There is one demo, in `site/`: the landing page, an interactive node view,
+decorations, the screen-reader mirror, and a scroll-virtualization lab that
+mounts up to 8,000 blocks with `maxHeight` and measures the per-keystroke cost
+in-page.
+
+The editor sits on a **board** (`site/board.ts`) — a pannable, zoomable surface
+with sticky notes and drawn shapes beside the prose. It is there to make a point
+the editor alone cannot: once text layout is arithmetic rather than reflow, a
+paragraph and a rectangle stop being different kinds of thing. Both are geometry
+you compute and then fill, so both live in one coordinate space, and the notes
+beside the document are `CanvasEditor`s too.
+
+Every card is editable at every zoom — type into the document at 40% if you
+like. Pick a shape tool and the cards go inert, so a stroke begun over the
+document draws instead of selecting its text; shapes paint on an overlay canvas
+above the cards, so you can circle a paragraph and see the circle. Tools stay
+armed until you switch, `⌫` or **clear** removes a selected shape, and a status
+line under the toolbar says what the armed tool does.
+
+The board is demo code, not library API. `CanvasEditor` stays a text editor you
+can put on a board; it knows nothing about a camera. The seam between them is a
+single call — see below.
+
+Mounting more than one editor on a page: pass `autofocus: false` to all but one,
+or the last one mounted takes focus.
+
+## Zoom (editing under a CSS transform)
+
+The editor works at any display scale. Put it inside a `transform: scale(...)`
+— a zoomable board, a slide canvas, an overview — and clicks land on the
+character you aimed at, `coordsAtPos` returns real viewport pixels, and the
+caret box scales with the text.
+
+There is nothing to configure, because the scale is derived rather than
+declared. `offsetWidth` is the canvas's own layout width; `getBoundingClientRect()`
+reports that width after every transform between it and the viewport. Their
+ratio is the accumulated scale, whoever applied it and however deep. Mapping in
+divides by it, mapping out multiplies, and at 1:1 both are the identity.
+
+The one thing the editor *cannot* discover is that the transform changed — a CSS
+transform fires no event and doesn't resize the element, so `ResizeObserver`
+never speaks. Tell it:
+
+```ts
+editor.invalidateGeometry()   // after your camera moves
+```
+
+Only the cached outbound path (`coordsAtPos`, `selectionRect`) needs this;
+pointer mapping re-measures on every gesture, so a click is never stale even if
+you forget. Rotation is not supported — it turns the client rect into an
+axis-aligned bounding box, which would need a real matrix inverse.
 
 ## Docs site (GitHub Pages)
 
@@ -398,8 +445,8 @@ editor needs to implement.
 - [x] **Inline decorations** — background / underline (incl. wavy squiggle) / strikethrough over any range; powers search highlight + spellcheck (`Decoration.inline`)
 - [x] **Widget decorations** — mount DOM at a position (collab cursors, inline buttons/annotations) via `Decoration.widget`
 - [x] **Node decorations** — transient block background / left bar (`Decoration.node`)
-- [ ] **Inline text-color decorations** — needs run-splitting (current inline decos are paint overlays: bg/underline/strike)
-- [ ] **Collaborative cursors / selections** — remote carets (widget decorations are the building block; the collab transport is app-level)
+- [x] **Inline text-color decorations** — a `color` on `Decoration.inline` repaints the glyphs themselves, not just the space around them. The line's runs are split at the range's edges during painting, which is sound *there* rather than in layout because a fill color has no effect on metrics: the pieces inherit the geometry layout already computed and no cache is invalidated (decorations recompute every render, so making them dirty layout would be ruinous). Each piece is placed at the same `xForOffsetInLine` the caret uses, so a recolored span covers exactly the pixels a `background` over the same range would
+- [x] **Collaborative cursors / selections** — `Decoration.cursor(pos, color, { label })` paints a remote caret and its name flag onto the canvas rather than mounting DOM, so a room full of them is still one paint pass; the flag flips below the caret on the first line and is pulled inside the content column at the right edge. `remoteSelection({ from, to, head, color, name })` returns the band-plus-caret for one participant, with the band derived from their color. The transport stays yours (Yjs / `prosemirror-collab` / your own socket) — the editor owes you the drawing
 
 ### Input
 

@@ -16,10 +16,13 @@
 import type { Node as PMNode } from 'prosemirror-model'
 import type { Selection } from 'prosemirror-state'
 import type {
-    Decoration, InlineDecoration, NodeDecoration,
+    CursorDecoration, Decoration, InlineDecoration, NodeDecoration,
 } from './decoration'
 import type { BlockLayout, LineFragment, LineLayout, TableChrome } from './types'
-import { TABLE_BORDER } from './constants'
+import {
+    CARET_LABEL_FONT, CARET_LABEL_HEIGHT, CARET_LABEL_PAD_X, CARET_LABEL_PAD_Y,
+    REMOTE_CARET_WIDTH, TABLE_BORDER, TEXT_BLEED,
+} from './constants'
 import { isRuleNode, isDocEmpty } from './layout/blocks'
 import { CellSelection } from './table-selection'
 
@@ -56,6 +59,14 @@ export interface PaintContext
      * duplicated.
      */
     xForOffsetInLine: (block: BlockLayout, line: LineLayout, offset: number) => number
+    /**
+     * The caret box at a document position. Same reason as above: a remote
+     * caret has to land exactly where the local one would, so it asks the same
+     * question rather than reimplementing it.
+     */
+    posToCoords: (
+        layouts: BlockLayout[], pos: number,
+    ) => { x: number, y: number, height: number } | null
 }
 
 /**
@@ -100,8 +111,16 @@ export function paintToCanvas(
 {
     const inlineDecos = decorations.filter((d): d is InlineDecoration => d.kind === 'inline')
     const nodeDecos = decorations.filter((d): d is NodeDecoration => d.kind === 'node')
+    const cursorDecos = decorations.filter((d): d is CursorDecoration => d.kind === 'cursor')
+    // Kept apart from the rest: these are the only decorations the text loop
+    // has to consult, and checking for an empty list there is what keeps an
+    // undecorated document on the unsplit fast paths.
+    const colorDecos = inlineDecos.filter((d) => !!d.style.color)
     const dpr = window.devicePixelRatio || 1
-    const cssWidth = cx.containerWidth
+    // The canvas is a touch wider than the content column so a line that
+    // overruns its break width by a pixel or two is drawn rather than clipped.
+    // Everything below still measures and paints against `containerWidth`.
+    const cssWidth = cx.containerWidth + TEXT_BLEED
 
     const viewH = virtualized ? cx.scroller!.clientHeight : 0
     const scrollTop = virtualized ? cx.scroller!.scrollTop : 0
@@ -266,13 +285,27 @@ export function paintToCanvas(
         {
             const line = block.lines[i]
             const lineColor = block.color ?? (i === 0 ? cx.firstLineColor : cx.textColor)
+            const slices = colorDecos.length > 0
+                ? colorSlicesForLine(colorDecos, block, i)
+                : NO_SLICES
 
-            if (line.fragments)
+            // A line paints as runs when it carries marks, or when a color
+            // decoration cuts it into pieces — a plain line covered by neither
+            // is still a single fillText.
+            const runs = line.fragments
+                ? (slices.length > 0
+                    ? splitRunsByColor(cx, block, line, line.fragments, slices)
+                    : line.fragments)
+                : slices.length > 0
+                    ? splitRunsByColor(cx, block, line, [plainRun(block, line)], slices)
+                    : null
+
+            if (runs)
             {
                 // Marked line: paint each run with its own font/color. A
                 // null fragment color falls back to the line color so plain
                 // runs keep the first-line accent.
-                for (const frag of line.fragments)
+                for (const frag of runs)
                 {
                     ctx.font = frag.font
                     ctx.fillStyle = frag.color ?? lineColor
@@ -319,6 +352,10 @@ export function paintToCanvas(
             }
         })
     }
+
+    // Remote carets last, so a collaborator's flag is never buried under the
+    // text it points at.
+    for (const d of cursorDecos) paintCursor(cx, ctx, layouts, d, viewTop, viewBottom)
 
     // Placeholder prompt when the whole document is empty.
     if (cx.placeholder && isDocEmpty(cx.doc) && layouts.length > 0)
@@ -375,6 +412,166 @@ function paintDecoration(
     {
         ctx.fillRect(x, line.y + shift + Math.round(fontSize * 0.52), frag.width, thickness)
     }
+}
+
+/** A recolored span of one line, in block-relative offsets. */
+interface ColorSlice
+{
+    from: number
+    to: number
+    color: string
+}
+
+/** Shared empty list, so the undecorated path allocates nothing per line. */
+const NO_SLICES: ColorSlice[] = []
+
+/**
+ * The color decorations covering line `lineIndex`, clipped to it and rebased
+ * from document positions into block-relative offsets — the space fragments and
+ * `xForOffsetInLine` already speak.
+ */
+function colorSlicesForLine(
+    decos: InlineDecoration[],
+    block: BlockLayout,
+    lineIndex: number,
+): ColorSlice[]
+{
+    if (block.isAtom || block.text.length === 0) return NO_SLICES
+    const line = block.lines[lineIndex]
+    const isLast = lineIndex === block.lines.length - 1
+    const lineStart = line.pmStart
+    const lineEnd = isLast ? block.text.length : block.lines[lineIndex + 1].pmStart
+
+    let out: ColorSlice[] | null = null
+    for (const d of decos)
+    {
+        const from = Math.max(d.from - block.pmStartPos, lineStart)
+        const to = Math.min(d.to - block.pmStartPos, lineEnd)
+        if (to <= from) continue
+        ;(out ??= []).push({ from, to, color: d.style.color! })
+    }
+    return out ?? NO_SLICES
+}
+
+/** The color for a piece known to be wholly inside or outside each slice.
+ *  Later decorations win, matching the paint order everywhere else here. */
+function colorFor(slices: ColorSlice[], from: number, to: number): string | null
+{
+    let found: string | null = null
+    for (const s of slices)
+    {
+        if (s.from <= from && s.to >= to) found = s.color
+    }
+    return found
+}
+
+/** A whole plain line as a single run, so the split below has one shape to
+ *  work on whether or not the line carries marks. */
+function plainRun(block: BlockLayout, line: LineLayout): LineFragment
+{
+    return {
+        text: line.text,
+        font: block.font,
+        color: null,
+        x: 0,
+        width: line.width,
+        pmStart: line.pmStart,
+    }
+}
+
+/**
+ * Cut a line's runs at the edges of the color slices covering it, so a
+ * decoration can recolor part of a run.
+ *
+ * Every piece is placed at `xForOffsetInLine` of its first character rather
+ * than at a width accumulated here. That is the same question the caret asks,
+ * so a recolored span lands on exactly the pixels a background decoration over
+ * the same range would cover, and clicking a recolored character still puts the
+ * caret against it. The cost is that neighbouring pieces are shaped
+ * independently — kerning does not carry across a cut — which is inherent to
+ * splitting a run at all, and already true of the mark path.
+ */
+function splitRunsByColor(
+    cx: PaintContext,
+    block: BlockLayout,
+    line: LineLayout,
+    runs: LineFragment[],
+    slices: ColorSlice[],
+): LineFragment[]
+{
+    const out: LineFragment[] = []
+    for (const run of runs)
+    {
+        const runEnd = run.pmStart + run.text.length
+        const cuts: number[] = []
+        for (const s of slices)
+        {
+            if (s.to <= run.pmStart || s.from >= runEnd) continue
+            if (s.from > run.pmStart) cuts.push(s.from)
+            if (s.to < runEnd) cuts.push(s.to)
+        }
+
+        // Untouched, or covered end to end: no geometry to recompute.
+        if (cuts.length === 0)
+        {
+            const color = colorFor(slices, run.pmStart, runEnd)
+            out.push(color ? { ...run, color } : run)
+            continue
+        }
+
+        const points = [run.pmStart, ...cuts.sort((a, b) => a - b), runEnd]
+        for (let i = 0; i < points.length - 1; i++)
+        {
+            const from = points[i]
+            const to = points[i + 1]
+            if (to <= from) continue
+            const x = cx.xForOffsetInLine(block, line, from) - line.x
+            const end = cx.xForOffsetInLine(block, line, to) - line.x
+            out.push({
+                ...run,
+                text: run.text.substring(from - run.pmStart, to - run.pmStart),
+                pmStart: from,
+                x,
+                width: end - x,
+                color: colorFor(slices, from, to) ?? run.color,
+            })
+        }
+    }
+    return out
+}
+
+/** A remote participant's caret, with their name on a flag beside it. */
+function paintCursor(
+    cx: PaintContext,
+    ctx: CanvasRenderingContext2D,
+    layouts: BlockLayout[],
+    d: CursorDecoration,
+    viewTop: number,
+    viewBottom: number,
+): void
+{
+    const co = cx.posToCoords(layouts, d.pos)
+    if (!co) return
+    if (co.y + co.height < viewTop || co.y > viewBottom) return
+
+    ctx.fillStyle = d.color
+    ctx.fillRect(co.x, co.y, REMOTE_CARET_WIDTH, co.height)
+    if (!d.label) return
+
+    ctx.font = CARET_LABEL_FONT
+    const h = CARET_LABEL_HEIGHT
+    const w = ctx.measureText(d.label).width + CARET_LABEL_PAD_X * 2
+    // Above the caret by default; below it when that would clip off the top of
+    // the viewport, which is where a caret on the document's first line sits.
+    const y = co.y - h >= viewTop ? co.y - h : co.y + co.height
+    // And pulled back inside the content column when the name would overhang.
+    const x = Math.max(0, Math.min(co.x, cx.containerWidth - w))
+
+    ctx.fillStyle = d.color
+    ctx.fillRect(x, y, w, h)
+    ctx.fillStyle = d.labelColor ?? '#ffffff'
+    ctx.fillText(d.label, x + CARET_LABEL_PAD_X, y + CARET_LABEL_PAD_Y)
+    ctx.font = cx.font
 }
 
 /** Invoke `cb` with the canvas rect of each line-slice of doc range

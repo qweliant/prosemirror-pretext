@@ -103,6 +103,22 @@
             border: 1px solid #e2eed7; border-radius: 20px; overflow: hidden;
             box-shadow: 0 14px 40px rgba(47,110,28,.10), 0 2px 8px rgba(47,110,28,.06);
         }
+        /* A board is not a reading column: cards sit beside one another, so it
+           breaks out of the prose `.wrap` entirely and takes nearly the whole
+           viewport.
+           `max-width: none` is the load-bearing line. `.editor-shell` sets
+           720px and the enclosing `.wrap` caps at 1000px, so raising any single
+           width here without clearing BOTH of those does visibly nothing.
+           The negative margin is the standard full-bleed trick: `50%` resolves
+           against `.wrap`'s content box, which is centred on the viewport, so
+           this re-centres the shell on the screen instead. The px width is
+           frozen at boot — see `boot()` in site.ts for why. */
+        .editor-shell.board-shell {
+            max-width: none;
+            width: 96vw;
+            margin-left: calc(50% - 48vw);
+        }
+
         .editor-shell .brow {
             display: flex; align-items: center; gap: 9px; padding: 12px 16px;
             border-bottom: 1px solid #eef5e8; font: 700 12.5px var(--body); color: var(--frog-dark);
@@ -135,7 +151,68 @@
         #embed-toolbar .sep { flex: 0 0 auto; width: 1px; height: 20px; background: #e0ecd4; margin: 0 6px; }
         @media (max-width: 640px) { #embed-toolbar .tb { width: 40px; height: 40px; } }
 
-        .editor-card { padding: 8px 10px 12px; overflow: hidden; }
+        .editor-card { padding: 8px 10px 12px; overflow: hidden; position: relative; }
+
+        /* ── The board: a pannable surface the editor lives on ───────────── */
+        .board-bar {
+            display: flex; align-items: center; gap: 10px; padding: 7px 10px;
+            border-bottom: 1px solid #eef5e8; background: #fbfff5;
+        }
+        .board-bar .tools { display: flex; align-items: center; gap: 3px; flex-wrap: wrap; }
+        /* Labelled, not glyph-only: on a surface where the same drag pans,
+           draws, or selects depending on what is armed, an unlabelled icon row
+           is a guessing game. */
+        .board-bar .tl {
+            display: inline-flex; align-items: center; gap: 5px;
+            height: 30px; padding: 0 10px; border: 1.5px solid transparent; border-radius: 999px;
+            cursor: pointer; background: transparent; color: #3f5a30;
+            font: 700 12px var(--body); line-height: 1; white-space: nowrap;
+        }
+        .board-bar .tl .g { font-size: 13px; }
+        .board-bar .tl:hover { background: #eaf7df; border-color: #d7ecc9; }
+        .board-bar .tl.active { background: var(--frog); border-color: var(--frog-deep); color: #fff; }
+        @media (max-width: 640px) { .board-bar .tl .lbl { display: none; } .board-bar .tl { padding: 0 9px; } }
+
+        .board-status {
+            padding: 7px 12px 0; font: 500 12px var(--body); color: #7c9a6b; text-align: center;
+        }
+        .board-status b { color: var(--frog-dark); font-weight: 700; }
+        .board-bar .zoomer { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+        .board-bar .zoomer .mini-btn {
+            font: 700 12.5px var(--body); cursor: pointer; background: #fff; border: 1.5px solid #d7ecc9;
+            color: var(--frog-dark); border-radius: 999px; padding: 4px 11px; min-width: 32px;
+        }
+        .board-bar .zoomer .mini-btn:hover { background: #eaf7df; }
+        #board-zoom { font: 600 12px var(--mono); color: #7c9a6b; min-width: 42px; text-align: center; }
+
+        .board { position: relative; height: 560px; overflow: hidden; border-radius: 14px; background: #fdfffa; }
+        @media (max-width: 640px) { .board { height: 460px; } }
+        .board-canvas { position: absolute; inset: 0; touch-action: none; cursor: grab; }
+        /* The frame layer takes no hits of its own — only the frames inside it
+           do, and only at 1:1 with the select tool armed. */
+        .board-layer { position: absolute; inset: 0; pointer-events: none; }
+        /* Shapes ride above the cards so a stroke drawn across one is visible,
+           but stay transparent to pointers so .board-canvas still gets them. */
+        .board-overlay { position: absolute; inset: 0; pointer-events: none; }
+
+        .bframe {
+            position: absolute; top: 0; left: 0; transform-origin: 0 0;
+            background: #fff; border: 1px solid #e2eed7; border-radius: 16px;
+            box-shadow: 0 10px 30px rgba(47,110,28,.13), 0 2px 6px rgba(47,110,28,.07);
+            --accent: var(--frog-deep);
+        }
+        .bframe-label {
+            font: 700 11.5px var(--body); color: var(--accent); padding: 8px 14px 0;
+            display: flex; align-items: center; gap: 6px; user-select: none;
+        }
+        .bframe-body { padding: 4px 18px 14px; }
+        .bframe.note {
+            background: #fffbe2; border-color: #f0e2a8; border-radius: 6px;
+            box-shadow: 0 8px 20px rgba(120,100,20,.16);
+        }
+        .bframe.note { --accent: #a08320; }
+        .bframe.note .bframe-body { padding: 2px 8px 8px; }
+
 
         /* the run-button node view (real DOM the editor mounts over the canvas) */
         .run-block {
@@ -299,17 +376,29 @@
 
     <div class="lilies" aria-hidden="true">🪷 🐸 🪷</div>
 
-    <!-- ── Live editor (shows every feature) ───────────────────────────── -->
+    <!-- ── Live editor, on a board (shows every feature) ────────────────── -->
     <section id="try">
         <div class="wrap">
-            <div class="editor-shell">
+            <div class="editor-shell board-shell">
                 <div class="brow">
-                    <span class="live-dot"></span> live editor
-                    <span class="hint">type or tap in · long-press to select · drag a photo to float it</span>
+                    <span class="live-dot"></span> live board
+                    <span class="hint">drag to pan · ⌘/ctrl-scroll to zoom · draw beside the prose</span>
                 </div>
                 <div id="embed-toolbar"></div>
+                <div class="board-bar">
+                    <div class="tools" id="board-tools" role="toolbar" aria-label="Board tools"></div>
+                    <div class="zoomer">
+                        <button id="board-clear" class="mini-btn" title="Remove all drawn shapes">clear</button>
+                        <button id="board-fit" class="mini-btn" title="Fit everything on screen">⤢ fit</button>
+                        <button id="board-out" class="mini-btn" aria-label="Zoom out">−</button>
+                        <span id="board-zoom">100%</span>
+                        <button id="board-in" class="mini-btn" aria-label="Zoom in">+</button>
+                    </div>
+                </div>
+                <p id="board-status" class="board-status">Drag the board to pan · ⌘/ctrl-scroll to zoom · pick a shape
+                    above and drag on the board</p>
                 <div class="editor-card">
-                    <div id="editor-embed"></div>
+                    <div id="board"></div>
                 </div>
             </div>
 

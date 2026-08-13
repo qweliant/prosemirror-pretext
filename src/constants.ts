@@ -47,6 +47,38 @@ export const TABLE_BORDER = 1
 export const MIN_COL_WIDTH = 32
 
 
+// ─── Paint ─────────────────────────────────────────────────────────────────
+
+/**
+ * Canvas width beyond the content column, in px.
+ *
+ * Pretext breaks lines using its own metrics; the editor then re-measures every
+ * run with `measureText` to place it. The two agree closely but not exactly, so
+ * a line occasionally paints a few px wider than the column it was broken to. A
+ * canvas sized to exactly the column guillotines the last glyph of those lines
+ * — a visibly chopped letter, for a disagreement of about three pixels.
+ *
+ * This strip is transparent and nothing is *placed* in it: layout still wraps to
+ * the content width, and selection, decoration, and node-decoration rects all
+ * still stop there. It exists only so a hair of overrun is drawn rather than cut.
+ * It is not a fix for the underlying disagreement, which is worth chasing down
+ * to whichever measurement is wrong.
+ */
+export const TEXT_BLEED = 6
+
+
+// ─── Remote carets (collaboration) ─────────────────────────────────────────
+
+/** Width of a remote participant's caret. Matches the local caret. */
+export const REMOTE_CARET_WIDTH = 2
+/** The name flag beside a remote caret. */
+export const CARET_LABEL_FONT = '600 11px system-ui, -apple-system, sans-serif'
+export const CARET_LABEL_HEIGHT = 15
+export const CARET_LABEL_PAD_X = 5
+/** Baseline inset of the label text within its flag. */
+export const CARET_LABEL_PAD_Y = 2
+
+
 // ─── Accessibility ─────────────────────────────────────────────────────────
 
 /** Elements that make a node view interactive (so it must stay in the a11y tree). */

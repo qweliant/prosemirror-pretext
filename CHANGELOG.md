@@ -4,6 +4,62 @@
 
 ### Added
 
+- **Inline text-color decorations.** `Decoration.inline` takes a `color`, which
+  repaints the glyphs rather than the space around them. Every other property on
+  an inline decoration is an overlay — a rect behind the text, a line through it
+  — and needs nothing from layout. Color is the one that cannot be: a range
+  covering part of a run has to cut that run before it can fill half of it a
+  different color.
+
+  The cut happens during painting, not layout, and that is the whole design
+  point. A fill color has no effect on metrics, so the pieces inherit the
+  geometry already computed and no cache is touched — which matters because
+  decorations are recomputed every render, so a decoration that dirtied layout
+  would relayout the visible document on every keystroke of a search box. Each
+  piece is placed at the same `xForOffsetInLine` the caret reports, so a
+  recolored span lands on exactly the pixels a `background` over the same range
+  would cover, and clicking a recolored character still puts the caret against
+  it. Neighbouring pieces are shaped independently — kerning does not carry
+  across a cut — which is inherent to splitting a run and already true of marks.
+
+- **The editor is scale-aware, so it edits correctly under a CSS transform.**
+  Put it on a zooming surface — a board, a slide canvas, a zoomed-out overview
+  — and clicks land on the character you aimed at, `coordsAtPos` reports real
+  viewport pixels, and the caret box scales with everything else.
+
+  Nothing has to be configured, because the scale is *derived* rather than
+  declared. `offsetWidth` is the canvas's own layout width; the client rect
+  reports it after every transform between it and the viewport. Their ratio is
+  the accumulated scale, whoever applied it and however deep — so mapping in
+  divides by it, mapping out multiplies, and at 1:1 both are the identity and
+  cost nothing. A canvas measuring zero maps as identity rather than emitting
+  NaN coordinates. Rotation is the one thing this cannot see through, since it
+  turns the client rect into an axis-aligned bounding box.
+
+  The one thing the editor cannot discover is that the transform *changed*,
+  because a CSS transform fires no event and does not resize the element (so
+  `ResizeObserver` is silent). Hosts that zoom call the new
+  **`invalidateGeometry()`** afterwards. Only the cached outbound path needs it:
+  pointer mapping re-measures on every gesture, so a press is never stale even
+  if you forget.
+
+- **Collaborative cursors and selections.** `Decoration.cursor(pos, color, {
+  label })` paints a remote participant's caret, and their name on a flag beside
+  it, onto the canvas. A remote caret *could* be a widget decoration — the demo
+  used to build one that way — but a widget is an absolutely-positioned element
+  floating above the canvas, so it does not scroll, clip, or composite with the
+  text it annotates the way the local caret does. Drawing it in the same pass as
+  everything else is what makes a roomful of them cost nothing. The flag flips
+  below the caret when it would clip off the top, and is pulled back inside the
+  content column when the name would overhang the right edge.
+
+  `remoteSelection({ from, to, head, color, name })` returns the band and the
+  caret for one participant, the band derived from their color by `withAlpha`
+  and the caret at `head` so a backwards selection reads as backwards. The
+  transport is deliberately absent: whether positions arrive over Yjs,
+  `prosemirror-collab`, or a socket of your own is an application concern, and
+  what the editor owes you is the drawing.
+
 - **Tables** (layout + paint). A `table` / `table_row` / `table_cell` /
   `table_header` subtree lays out as a grid: columns share the content width
   (honoring an explicit `colwidth`), and each row is as tall as its tallest
@@ -86,6 +142,32 @@
   auto-scroll inside a `maxHeight` scroller.
 
 ### Fixed
+
+- **Lines are no longer clipped a pixel or two short of their last glyph.** The
+  canvas is now `TEXT_BLEED` (6px) wider than the content column, and a
+  `maxHeight` scroller reserves that strip alongside the scrollbar gutter.
+
+  Pretext breaks lines on its own metrics; the editor then re-measures every run
+  with `measureText` to place it. The two agree closely but not exactly, so a
+  line occasionally paints ~3px wider than the column it was broken to — and a
+  canvas sized to exactly the column guillotines the final letter of those
+  lines. In the demo document that was 2 lines in 42, on both a float slot and a
+  full-width paragraph, each visibly chopped.
+
+  This is a mitigation, not a diagnosis: the strip is transparent, layout still
+  wraps to the content width, and selection, inline-decoration, and node-
+  decoration rects all still stop there. The measurement disagreement itself is
+  still worth tracking down to whichever side is wrong.
+
+- **The caret is drawn only while the editor has focus**, and the blink timer
+  stops re-rendering a blurred editor. A stray caret in an unfocused editor
+  merely looked odd when there was one editor on a page; put several on one
+  surface — a board, a comment thread, a grid of cards — and every one of them
+  blinks at once, each costing two renders a second to do it.
+
+  Related, and worth knowing before mounting more than one: `autofocus` defaults
+  to `true`, so editors mounted together fight over focus and the last one wins.
+  Pass `autofocus: false` to all but one.
 
 - **Frame cost no longer grows with document size.** Painting culled blocks one
   at a time, so every frame still walked the whole document even though a

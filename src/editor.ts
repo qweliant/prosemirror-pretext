@@ -47,10 +47,11 @@ import type {
     RenderStats, LineFragment, LineLayout, BlockLayout,
     ResolvedBlockStyle, BlockDesc, CachedFragment, CachedLine, CachedBlock,
     MountedView, MarkedLineCtx, MarkedSegment, LayoutFrame, TableChrome,
+    CanvasGeometry,
 } from './types'
 import {
     HEADING_SCALE, DEFAULT_MARK_STYLES, LIST_INDENT, MARKER_PAD,
-    FOCUSABLE_SEL, SR_ONLY, DRAG_THRESHOLD_PX,
+    FOCUSABLE_SEL, SR_ONLY, DRAG_THRESHOLD_PX, TEXT_BLEED,
 } from './constants'
 import {
     isRuleNode, isListNode, isOrderedList, isLeafBlock, collectBlocks, isDocEmpty,
@@ -70,7 +71,7 @@ export type {
     CanvasEditorOptions, NodeViewFn, EditorHandlers, FloatRect,
     MarkStyle, MarkStyleResolver, BlockStyle, BlockStyleResolver,
     RenderStats, LineFragment, LineLayout, BlockLayout,
-    LayoutFrame, TableChrome, TableCellBox,
+    LayoutFrame, TableChrome, TableCellBox, CanvasGeometry,
 } from './types'
 
 /**
@@ -228,12 +229,15 @@ export class CanvasEditor {
   // from O(blocks) allocation into ~O(blocks that moved) for the common case
   // (plain typing that doesn't reflow line breaks).
   private positionedCache = new WeakMap<PMNode, BlockLayout>();
-  // The canvas's viewport position. Cached so `coordsAtPos` is a pure lookup —
-  // reading `getBoundingClientRect()` on every caret query would force a
-  // synchronous layout (the very read-after-write tax canvas is meant to avoid).
+  // The canvas's viewport position *and the scale it is being displayed at*.
+  // Cached so `coordsAtPos` is a pure lookup — reading
+  // `getBoundingClientRect()` on every caret query would force a synchronous
+  // layout (the very read-after-write tax canvas is meant to avoid).
   // Invalidated on scroll/resize, the only things that move the canvas's
-  // top-left; growing its height does not.
-  private canvasRectCache: { left: number; top: number } | null = null;
+  // top-left; growing its height does not. A host that puts the editor under a
+  // CSS transform must call `invalidateGeometry()` when that transform changes,
+  // since nothing about it is observable from in here.
+  private canvasRectCache: CanvasGeometry | null = null;
   // Cached scroller offset, refreshed each frame and on scroll. Reading
   // `scroller.scrollTop` directly on the coordsAtPos hot path would force a
   // synchronous layout (of the a11y mirror) when the document is dirty.
@@ -506,9 +510,14 @@ export class CanvasEditor {
     this.textarea.addEventListener("focus", () => {
       stack.style.outline = `2px solid ${this.caretColor}`;
       stack.style.outlineOffset = "2px";
+      // The caret is drawn only while focused, so gaining or losing focus is a
+      // repaint — nothing else would schedule one.
+      this.caretVisible = true;
+      this.scheduleRender();
     });
     this.textarea.addEventListener("blur", () => {
       stack.style.outline = "none";
+      this.scheduleRender();
     });
 
     stack.appendChild(this.canvas);
@@ -531,8 +540,12 @@ export class CanvasEditor {
       // scrolling, instead of the width changing as the document grows past a
       // viewport. Overlay scrollbars (modern macOS default) measure 0 and this
       // is a no-op.
+      // The canvas is TEXT_BLEED wider than the content column (see the
+      // constant), so the scroller has to be too or that strip becomes the
+      // horizontal overflow this whole calculation exists to avoid.
       const gutter = scrollbarWidth();
-      this.scroller.style.width = `${this.containerWidth + gutter}px`;
+      this.scroller.style.width =
+        `${this.containerWidth + TEXT_BLEED + gutter}px`;
       this.scroller.style.boxSizing = "border-box";
       if (gutter > 0) this.scroller.style.scrollbarGutter = "stable";
       this.scroller.appendChild(stack);
@@ -711,9 +724,10 @@ export class CanvasEditor {
     left: number;
     top: number;
   }): { pos: number; inside: number } | null {
-    const rect = this.canvas.getBoundingClientRect();
-    const x = coords.left - rect.left;
-    const y = coords.top - rect.top + (this.scroller?.scrollTop ?? 0);
+    const g = this.readGeometry();
+    const x = (coords.left - g.left) / g.scaleX;
+    const y =
+      (coords.top - g.top) / g.scaleY + (this.scroller?.scrollTop ?? 0);
     const hit = this.clickToPos(this.lastLayouts, x, y);
     if (!hit) return null;
     let inside = -1;
@@ -829,25 +843,68 @@ export class CanvasEditor {
       clamp(pos, 0, this.state.doc.content.size),
     );
     if (!coords) return null;
-    const rect = this.canvasOffset();
+    // Layout space → viewport space: offset by where the canvas sits, scaled by
+    // how large it is being drawn. The scroll offset is in layout px too, so it
+    // is subtracted before scaling, not after.
+    const g = this.canvasOffset();
     return {
-      x: rect.left + coords.x,
-      y: rect.top + coords.y - this.lastScrollTop,
-      height: coords.height,
+      x: g.left + coords.x * g.scaleX,
+      y: g.top + (coords.y - this.lastScrollTop) * g.scaleY,
+      height: coords.height * g.scaleY,
     };
   }
 
   /**
-   * The canvas's viewport-relative top-left, cached across calls. The cache is
-   * cleared on scroll/resize (see `setupInput`); height changes from a render
-   * don't move the top-left, so a repaint needn't invalidate it. Keeps
-   * `coordsAtPos` a pure cache lookup with no forced layout.
+   * The canvas's viewport-relative top-left and display scale, cached across
+   * calls. The cache is cleared on scroll/resize (see `setupInput`); height
+   * changes from a render don't move the top-left, so a repaint needn't
+   * invalidate it. Keeps `coordsAtPos` a pure cache lookup with no forced
+   * layout.
    */
-  private canvasOffset(): { left: number; top: number } {
+  private canvasOffset(): CanvasGeometry {
     if (this.canvasRectCache) return this.canvasRectCache;
-    const rect = this.canvas.getBoundingClientRect();
-    this.canvasRectCache = { left: rect.left, top: rect.top };
+    this.canvasRectCache = this.readGeometry();
     return this.canvasRectCache;
+  }
+
+  /**
+   * Measure where the canvas is and how big it is being *drawn* relative to how
+   * big it *is*.
+   *
+   * `offsetWidth` is the element's own layout width; `getBoundingClientRect()`
+   * reports it after every transform on the way up to the viewport. Their ratio
+   * is therefore the accumulated scale, whoever applied it and however deep —
+   * the editor never has to be told about a camera, and a host that zooms with
+   * a CSS transform gets correct hit-testing for free.
+   *
+   * The one thing this cannot see through is rotation, which turns the rect
+   * into an axis-aligned bounding box and makes both ratios lies. A rotated
+   * editor would need a real matrix inverse.
+   */
+  private readGeometry(): CanvasGeometry {
+    const rect = this.canvas.getBoundingClientRect();
+    const w = this.canvas.offsetWidth;
+    const h = this.canvas.offsetHeight;
+    return {
+      left: rect.left,
+      top: rect.top,
+      // A detached or display:none canvas measures 0; 1 keeps the mapping an
+      // identity rather than producing NaN coordinates.
+      scaleX: w > 0 ? rect.width / w : 1,
+      scaleY: h > 0 ? rect.height / h : 1,
+    };
+  }
+
+  /**
+   * Drop the cached canvas geometry, so the next coordinate mapping re-measures.
+   *
+   * Call this after moving or scaling the editor by means it cannot observe —
+   * a CSS transform on an ancestor, most of all. Scroll and resize already
+   * invalidate on their own; a transform fires no event, so this is the seam a
+   * zooming host reaches for.
+   */
+  invalidateGeometry(): void {
+    this.canvasRectCache = null;
   }
 
   /**
@@ -1920,6 +1977,7 @@ export class CanvasEditor {
       selection: this.state.selection,
       xForOffsetInLine: (block, line, offset) =>
         this.xForOffsetInLine(block, line, offset),
+      posToCoords: (layouts, pos) => this.posToCoords(layouts, pos),
     };
   }
 
@@ -2136,6 +2194,10 @@ export class CanvasEditor {
     coords: { x: number; y: number; height: number } | null,
   ): void {
     if (!this.caretVisible) return;
+    // An unfocused editor has no caret. With one editor on a page a stray caret
+    // merely looked odd; put several on one surface — a board, a comment
+    // thread, a grid of cards — and every one of them blinks at once.
+    if (!this.hasFocus()) return;
     const ctx = this.canvas.getContext("2d")!;
     const sel = this.state.selection;
     // Gap cursor: a horizontal bar across the seam between two blocks.
@@ -2184,15 +2246,20 @@ export class CanvasEditor {
    * Map a mouse event to document-space canvas coords. When virtualized the
    * canvas is pinned to the viewport, so its rect is viewport-relative —
    * adding scrollTop recovers the document Y. scrollTop is 0 otherwise.
+   *
+   * Measured fresh rather than read from the cache: this runs once per pointer
+   * gesture, not per keystroke, so the layout read costs nothing anyone can
+   * feel, and a press must land where the user aimed even if the editor was
+   * moved or zoomed since the last frame.
    */
   private eventToDocCoords(e: {
     clientX: number;
     clientY: number;
   }): { x: number; y: number } {
-    const rect = this.canvas.getBoundingClientRect();
+    const g = this.readGeometry();
     return {
-      x: e.clientX - rect.left,
-      y: e.clientY - rect.top + (this.scroller?.scrollTop ?? 0),
+      x: (e.clientX - g.left) / g.scaleX,
+      y: (e.clientY - g.top) / g.scaleY + (this.scroller?.scrollTop ?? 0),
     };
   }
 
@@ -2453,8 +2520,7 @@ export class CanvasEditor {
     // Refresh the cached canvas offset + scroll position once per frame (layout
     // is already being touched here), so coordsAtPos never reads layout on the
     // hot path — which would force a synchronous layout of the a11y mirror.
-    const rect = this.canvas.getBoundingClientRect();
-    this.canvasRectCache = { left: rect.left, top: rect.top };
+    this.canvasRectCache = this.readGeometry();
     if (this.scroller) this.lastScrollTop = this.scroller.scrollTop;
 
     const dt = performance.now() - t0;
@@ -4008,6 +4074,9 @@ export class CanvasEditor {
       return;
     }
     this.blinkInterval = setInterval(() => {
+      // Blurred: nothing to blink, and re-rendering twice a second for it is
+      // waste that multiplies by however many editors are on the page.
+      if (!this.hasFocus()) return;
       const sinceInput = performance.now() - this.lastInputTime;
       if (sinceInput < this.caretHoldMs) {
         if (!this.caretVisible) {
