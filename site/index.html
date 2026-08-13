@@ -185,8 +185,9 @@
         .board-bar .zoomer .mini-btn:hover { background: #eaf7df; }
         #board-zoom { font: 600 12px var(--mono); color: #7c9a6b; min-width: 42px; text-align: center; }
 
+        /* Height is a placeholder: `boot()` freezes it to a share of the window
+           before anything mounts, for the same reason it freezes the width. */
         .board { position: relative; height: 560px; overflow: hidden; border-radius: 14px; background: #fdfffa; }
-        @media (max-width: 640px) { .board { height: 460px; } }
         .board-canvas { position: absolute; inset: 0; touch-action: none; cursor: grab; }
         /* The frame layer takes no hits of its own — only the frames inside it
            do, and only at 1:1 with the select tool armed. */

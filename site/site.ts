@@ -448,7 +448,34 @@ async function boot(): Promise<void> {
         return decos
     }
     // ── The board, and the document's frame on it ──
+    // Freeze the shell's width in px before measuring anything inside it. The
+    // stylesheet declares it in vw so it fills the screen, but a CanvasEditor is
+    // sized once at construction and has no `setWidth`, so a shell that later
+    // shrank with the window would clip the canvas it contains. Frozen, the two
+    // can only ever disagree by the shell not growing — which is invisible.
+    const shell = document.querySelector('.board-shell') as HTMLElement
+    const shellW = Math.round(Math.min(1800, window.innerWidth * 0.96))
+    shell.style.width = `${shellW}px`
+    shell.style.marginLeft = `calc(50% - ${Math.round(shellW / 2)}px)`
+
     const boardEl = document.getElementById('board')!
+    // Height gets the same treatment: a board is a workspace, not a 560px strip,
+    // so it takes most of the window. Frozen for the same reason as the width —
+    // the editor's scroller is capped at construction and cannot follow.
+    //
+    // The -60 pays for the shell's own chrome (title bar, two toolbars, status
+    // line) so the whole board still lands above the fold rather than running
+    // off the bottom the moment you scroll to it. The floor keeps it from
+    // coming out *shorter* than the 560px it used to be fixed at, except on
+    // short viewports where 560 would not have fit anyway.
+    const boardH = Math.round(Math.max(
+        Math.min(560, window.innerHeight * 0.6),
+        Math.min(860, window.innerHeight * 0.78 - 60),
+    ))
+    boardEl.style.height = `${boardH}px`
+    // What is left for the document's own scroller once the card's label,
+    // padding, and top offset are taken out.
+    const docHeight = boardH - 130
     const board = new Board(boardEl, {
         onCreateNote: (f) => fillNote(f, 'a note ✍️'),
         onChange: () => syncBoard(),
@@ -469,7 +496,7 @@ async function boot(): Promise<void> {
     const docFrame = board.addFrame({
         // +36 is the card's own padding: prose that runs to the border of its
         // card reads as clipped even when every glyph is there.
-        x: 26, y: 22, w: editorWidth + 36, h: 470,
+        x: 26, y: 22, w: editorWidth + 36, h: docHeight + 60,
         label: '📄 the document',
     })
     const editor = new CanvasEditor({
@@ -477,7 +504,7 @@ async function boot(): Promise<void> {
         container: docFrame.body,
         // A frame on a board is a window onto a document, not the whole scroll
         // of it — so the editor virtualizes inside its own card.
-        maxHeight: 420,
+        maxHeight: docHeight,
         width: editorWidth, font: EDITOR_FONT, ...EDITOR_THEME,
         ariaLabel: 'prosemirror-pretext live demo',
         // Painted only while the document is empty — try "empty the doc" below.
@@ -589,13 +616,19 @@ async function boot(): Promise<void> {
 
     // Seed the board, so it arrives looking like a board rather than an editor
     // wearing a hat: two notes, an arrow into the prose, and a drawn annotation.
+    // Spread down the right-hand strip in proportion to the board, so a tall
+    // window doesn't leave everything huddled at the top.
     const rightOf = docFrame.x + docFrame.w
+    const noteX = rightOf + 46
     fillNote(
-        board.addFrame({ x: rightOf + 46, y: 44, w: 212, h: 110, label: 'note', note: true }),
+        board.addFrame({ x: noteX, y: 44, w: 212, h: 110, label: 'note', note: true }),
         'Notes are editors too — same layout engine, smaller font. Type in one.',
     )
     fillNote(
-        board.addFrame({ x: rightOf + 46, y: 226, w: 212, h: 110, label: 'note', note: true }),
+        board.addFrame({
+            x: noteX, y: Math.round(boardH * 0.38), w: 212, h: 110,
+            label: 'note', note: true,
+        }),
         '⌘-scroll to zoom out — then keep typing. Cards edit at any scale.',
     )
     board.addShape({
@@ -603,7 +636,11 @@ async function boot(): Promise<void> {
         stroke: '#e0488a', fill: null, width: 2.5,
     })
     board.addShape({
-        kind: 'ellipse', points: [rightOf + 34, 376, rightOf + 246, 442],
+        kind: 'ellipse',
+        points: [
+            rightOf + 34, Math.round(boardH * 0.68),
+            rightOf + 246, Math.round(boardH * 0.68) + 66,
+        ],
         stroke: '#46a8d8', fill: 'rgba(138,214,242,.16)', width: 2.5,
     })
 
