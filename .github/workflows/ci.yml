@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same ref makes the older run irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+
+      # Every gate `prepublishOnly` runs, plus the docs site, so a push cannot
+      # be greener than a publish would be. Each is a separate step so a red run
+      # says which one failed without anyone opening the log.
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Test
+        run: bun test
+
+      # Builds last: they are the slowest and the least likely to catch
+      # something the two above missed. `build` also emits the .d.ts bundle, so
+      # this covers the declaration build consumers actually install.
+      - name: Build library
+        run: bun run build
+
+      - name: Build docs site
+        run: bun run build:site
