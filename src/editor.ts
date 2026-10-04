@@ -285,6 +285,12 @@ export class CanvasEditor {
 
   // ─── Input ─────────────────────────────────────────────────────────
   private composing = false;
+  // The IME's in-flight string. Deliberately not in the document: an IME
+  // revises it on every keystroke, and a document that churned once per
+  // revision would fill the undo stack with text the user never committed and
+  // broadcast every intermediate guess to collaborators. It is painted
+  // instead, and only the committed result becomes a transaction.
+  private composingText = "";
   private abortController: AbortController | null = null;
   private dragging = false;
   // Touch state: distinguish a tap (caret), a long-press (word select), and a
@@ -2268,6 +2274,45 @@ export class CanvasEditor {
     }
   }
 
+  /**
+   * Draw the IME's in-flight composition at the caret, returning how wide it
+   * was so the caret — and the IME's own candidate window, which tracks the
+   * textarea — can sit after it rather than under it.
+   *
+   * The composing text is not in the layout, so this cannot reflow the line
+   * around it the way a DOM editor does. What it can do is occupy the space
+   * honestly: the page's own backdrop goes down first, so the preview occludes
+   * whatever was painted to the right of the caret instead of blending into
+   * it, and the underline marks the text as uncommitted the way every platform
+   * does. A commit replaces it with real content that lays out properly.
+   */
+  private paintComposition(
+    coords: { x: number; y: number; height: number } | null,
+  ): number {
+    if (!this.composing || !this.composingText || !coords) return 0;
+    const ctx = this.canvas.getContext("2d");
+    if (!ctx) return 0;
+
+    // The block at the caret, so a composition in a heading is drawn at the
+    // heading's size rather than the editor's base font.
+    const $head = this.state.doc.resolve(this.state.selection.head);
+    const style = this.resolveBlockStyle($head.parent);
+    const text = this.composingText;
+    const width = this.measureWidth(text, style.font);
+
+    ctx.fillStyle = this.backdropColor();
+    ctx.fillRect(coords.x, coords.y, width, coords.height);
+
+    ctx.font = style.font;
+    ctx.textBaseline = "top";
+    ctx.fillStyle = style.color ?? this.textColor;
+    ctx.fillText(text, coords.x, coords.y);
+
+    // Uncommitted-text underline, sat on the bottom of the line box.
+    ctx.fillRect(coords.x, coords.y + coords.height - 1, width, 1);
+    return width;
+  }
+
   private paintCaret(
     coords: { x: number; y: number; height: number } | null,
   ): void {
@@ -2585,14 +2630,24 @@ export class CanvasEditor {
       ? this.decorationsFor(this.state)
       : [];
     this.paintToCanvas(layouts, totalHeight, virtualized, decorations);
-    this.paintCaret(caretCoords);
+    // The composition preview sits between the text and the caret: it paints
+    // over the line, and the caret belongs after it.
+    const composingWidth = this.paintComposition(caretCoords);
+    this.paintCaret(
+      caretCoords && composingWidth
+        ? { ...caretCoords, x: caretCoords.x + composingWidth }
+        : caretCoords,
+    );
     this.paintDropIndicator();
     this.syncNodeViews(layouts);
     this.syncWidgets(layouts, decorations);
     this.syncSelectionHandles();
 
     if (caretCoords) {
-      this.textarea.style.transform = `translate(${caretCoords.x}px, ${caretCoords.y}px)`;
+      // Past the preview too, so the IME's candidate window sits under the end
+      // of what is being composed rather than under its start.
+      this.textarea.style.transform =
+        `translate(${caretCoords.x + composingWidth}px, ${caretCoords.y}px)`;
     }
 
     // Refresh the cached canvas offset + scroll position once per frame (layout
@@ -2748,6 +2803,21 @@ export class CanvasEditor {
       "compositionstart",
       () => {
         this.composing = true;
+        this.composingText = "";
+      },
+      { signal },
+    );
+
+    // Every revision of the in-flight string. Without this the canvas shows
+    // nothing at all until the composition commits: the text lives in a 1px
+    // transparent textarea, so someone composing CJK, Korean or Vietnamese
+    // would see the IME's candidate window but not a single character of what
+    // they are actually writing.
+    this.textarea.addEventListener(
+      "compositionupdate",
+      (e) => {
+        this.composingText = (e as CompositionEvent).data ?? "";
+        this.scheduleRender();
       },
       { signal },
     );
@@ -2756,8 +2826,13 @@ export class CanvasEditor {
       "compositionend",
       (e) => {
         this.composing = false;
+        this.composingText = "";
         if (e.data) this.dispatch(this.state.tr.insertText(e.data));
         this.textarea.value = "";
+        // The preview is gone and the committed text is in; if `insertText`
+        // above dispatched, that already scheduled a paint, but an empty
+        // commit (the user cancelled) still has a stale preview to clear.
+        if (!e.data) this.scheduleRender();
       },
       { signal },
     );
@@ -3347,10 +3422,15 @@ export class CanvasEditor {
     this.textarea.addEventListener(
       "copy",
       (e) => {
-        const text = this.selectionText();
-        if (text === null) return;
+        const payload = this.selectionClipboard();
+        if (!payload) return;
         e.preventDefault();
-        e.clipboardData?.setData("text/plain", text);
+        e.clipboardData?.setData("text/plain", payload.text);
+        // The same HTML a drag of this selection carries. Without it a copy is
+        // plain text, so bold survived being dragged to another app but not
+        // being copied there — and a copy/paste inside this very editor went
+        // through plain text and came back stripped of every mark.
+        if (payload.html) e.clipboardData?.setData("text/html", payload.html);
       },
       { signal },
     );
@@ -3358,10 +3438,11 @@ export class CanvasEditor {
     this.textarea.addEventListener(
       "cut",
       (e) => {
-        const text = this.selectionText();
-        if (text === null) return;
+        const payload = this.selectionClipboard();
+        if (!payload) return;
         e.preventDefault();
-        e.clipboardData?.setData("text/plain", text);
+        e.clipboardData?.setData("text/plain", payload.text);
+        if (payload.html) e.clipboardData?.setData("text/html", payload.html);
         this.dispatch(this.state.tr.deleteSelection());
       },
       { signal },
@@ -3821,10 +3902,11 @@ export class CanvasEditor {
   pasteHTML(html: string): void {
     try {
       const dom = new DOMParser().parseFromString(html, "text/html");
-      const slice = PMDOMParser.fromSchema(this.state.schema).parseSlice(
+      let slice = PMDOMParser.fromSchema(this.state.schema).parseSlice(
         dom.body,
         { preserveWhitespace: false },
       );
+      slice = this.reopenSlice(dom, slice);
       this.dispatch(this.state.tr.replaceSelection(slice));
     } catch {
       // Malformed HTML / unmapped nodes: fall back to the plain text.
@@ -3832,6 +3914,31 @@ export class CanvasEditor {
         new DOMParser().parseFromString(html, "text/html").body.textContent ??
           "",
       );
+    }
+  }
+
+  /**
+   * Restore the open depths a `data-pm-slice` records, when the HTML was
+   * written by an editor that leaves one (ours, or prosemirror-view).
+   *
+   * A parser can only infer depth from the elements it sees, and complete
+   * elements imply a closed slice — so half a paragraph arrives looking like a
+   * whole one. The attribute is the copying side telling the pasting side what
+   * the parser cannot know.
+   *
+   * Depths that the content can't actually support throw, so an attribute that
+   * disagrees with the markup beside it (hand-written HTML, a different
+   * schema, a truncated clipboard) falls back to what the parser worked out
+   * rather than failing the paste.
+   */
+  private reopenSlice(dom: Document, slice: Slice): Slice {
+    const marked = dom.body.querySelector("[data-pm-slice]");
+    const spec = marked?.getAttribute("data-pm-slice")?.match(/^(\d+) (\d+)/);
+    if (!spec) return slice;
+    try {
+      return new Slice(slice.content, Number(spec[1]), Number(spec[2]));
+    } catch {
+      return slice;
     }
   }
 
@@ -3879,11 +3986,34 @@ export class CanvasEditor {
     const text = this.selectionText();
     if (text === null) return null;
     const sel = this.state.selection;
-    const fragment = this.serializer.serializeFragment(
-      this.state.doc.slice(sel.from, sel.to).content,
-    );
+    // A cell selection serializes to bare <td>s, which nothing can place
+    // without the table around them. Table clipboard is still open on the
+    // roadmap, so a cell selection keeps the plain-text-only payload it has
+    // always had rather than shipping HTML no parser can use.
+    if (sel instanceof CellSelection) return { text, html: "" };
+
+    const slice = this.state.doc.slice(sel.from, sel.to);
     const holder = document.createElement("div");
-    holder.appendChild(fragment);
+    holder.appendChild(this.serializer.serializeFragment(slice.content));
+
+    // How deep the slice is open at each end, in ProseMirror's own
+    // `data-pm-slice` format, so a paste can put it back the way it came out.
+    // A parser only sees complete elements: without this, copying the back
+    // half of one paragraph and the front half of the next pastes as two whole
+    // new blocks instead of merging into the paragraph at the caret.
+    //
+    // Only stamped when it says something — an inline-only slice is already
+    // 0/0, which is what a parser assumes anyway, so stamping it would just
+    // leave a stray attribute on whatever element happened to come first.
+    if (slice.openStart || slice.openEnd) {
+      const first = holder.firstElementChild;
+      if (first) {
+        first.setAttribute(
+          "data-pm-slice",
+          `${slice.openStart} ${slice.openEnd} []`,
+        );
+      }
+    }
     return { text, html: holder.innerHTML };
   }
 

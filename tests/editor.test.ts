@@ -4476,3 +4476,292 @@ describe('visible-range culling (frame cost)', () =>
         ed.destroy()
     })
 })
+
+
+describe('clipboard fidelity (copy / cut carry what a drag carries)', () =>
+{
+    /** Fire copy/cut and return what landed on the clipboard, per MIME type. */
+    function clip(e: CanvasEditor, type: 'copy' | 'cut'): Record<string, string>
+    {
+        const got: Record<string, string> = {}
+        const ev = new Event(type, { bubbles: true, cancelable: true })
+        ;(ev as any).clipboardData = { setData: (t: string, d: string) => { got[t] = d } }
+        ;(e as any).textarea.dispatchEvent(ev)
+        return got
+    }
+
+    function pasteInto(e: CanvasEditor, data: Record<string, string>): void
+    {
+        const ev = new Event('paste', { bubbles: true, cancelable: true })
+        ;(ev as any).clipboardData = { getData: (t: string) => data[t] ?? '' }
+        ;(e as any).textarea.dispatchEvent(ev)
+    }
+
+    function selectRange(e: CanvasEditor, from: number, to: number): void
+    {
+        e.dispatch(e.state.tr.setSelection(
+            TextSelection.create(e.state.doc, from, to)))
+    }
+
+    function boldChars(e: CanvasEditor): number
+    {
+        let n = 0
+        e.state.doc.descendants((node) =>
+        {
+            if (node.isText && node.marks.some((m) => m.type.name === 'strong'))
+                n += node.nodeSize
+        })
+        return n
+    }
+
+    test('copy writes text/html beside text/plain', () =>
+    {
+        const e = paragraphEditor([schema.text('plain '), mtext('BOLD', 'strong')])
+        selectRange(e, 1, e.state.doc.content.size - 1)
+        const got = clip(e, 'copy')
+        // The MIME type is the whole point: asserting only the payload is how
+        // an html-less copy passed for as long as it did.
+        expect(Object.keys(got).sort()).toEqual(['text/html', 'text/plain'])
+        expect(got['text/plain']).toBe('plain BOLD')
+        e.destroy()
+    })
+
+    test('the html carries the mark through the schema toDOM', () =>
+    {
+        const e = paragraphEditor([schema.text('plain '), mtext('BOLD', 'strong')])
+        selectRange(e, 1, e.state.doc.content.size - 1)
+        expect(clip(e, 'copy')['text/html']).toContain('<strong>BOLD</strong>')
+        e.destroy()
+    })
+
+    test('copy -> paste inside the editor keeps the mark', () =>
+    {
+        const e = paragraphEditor([schema.text('plain '), mtext('BOLD', 'strong')])
+        selectRange(e, 1, e.state.doc.content.size - 1)
+        const before = boldChars(e)
+        expect(before).toBe(4)
+
+        const got = clip(e, 'copy')
+        selectRange(e, 1, e.state.doc.content.size - 1)
+        pasteInto(e, got)
+        // Went through plain text before this: the round-trip returned 0.
+        expect(boldChars(e)).toBe(before)
+        e.destroy()
+    })
+
+    test('cut carries both flavours and removes the text', () =>
+    {
+        const e = paragraphEditor([schema.text('a'), mtext('B', 'strong')])
+        selectRange(e, 1, e.state.doc.content.size - 1)
+        const got = clip(e, 'cut')
+        expect(got['text/html']).toContain('<strong>B</strong>')
+        expect(e.state.doc.textBetween(0, e.state.doc.content.size, '')).toBe('')
+        e.destroy()
+    })
+
+    test('a selection spanning two blocks records its open depths', () =>
+    {
+        const { ed } = makeEditor(['hello', 'world'])
+        selectRange(ed, 3, 10)                 // inside p1 .. inside p2
+        const html = clip(ed, 'copy')['text/html']
+        expect(html).toContain('data-pm-slice="1 1 []"')
+        ed.destroy()
+    })
+
+    test('an inline-only selection is not stamped — 0/0 is already the default', () =>
+    {
+        const e = paragraphEditor([schema.text('hello')])
+        selectRange(e, 2, 4)
+        expect(clip(e, 'copy')['text/html']).not.toContain('data-pm-slice')
+        e.destroy()
+    })
+
+    test('a cross-block copy pasted back over itself leaves the document alone', () =>
+    {
+        const { ed } = makeEditor(['hello', 'world'])
+        const json = JSON.stringify(ed.state.doc.toJSON())
+        selectRange(ed, 3, 10)
+        const got = clip(ed, 'copy')
+        selectRange(ed, 3, 10)
+        pasteInto(ed, got)
+        // The open depths are what make this hold: pasted as a closed slice,
+        // the two half-paragraphs arrive as whole new blocks instead.
+        expect(JSON.stringify(ed.state.doc.toJSON())).toBe(json)
+        ed.destroy()
+    })
+
+    test('a cell selection stays plain-text only', () =>
+    {
+        const cell = (t: string) => schema.node('table_cell', null, [
+            schema.node('paragraph', null, [schema.text(t)]),
+        ])
+        const doc = schema.node('doc', null, [
+            schema.node('table', null, [
+                schema.node('table_row', null, [cell('a'), cell('b')]),
+            ]),
+        ])
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        const e = new CanvasEditor({ state: EditorState.create({ doc, schema }), container })
+        const cellPos: number[] = []
+        e.state.doc.descendants((n, pos) =>
+        {
+            if (n.type.name === 'table_cell') cellPos.push(pos)
+        })
+        const sel = CellSelection.between(
+            e.state.doc, cellPos[0]! + 1, cellPos[1]! + 1)
+        expect(sel).toBeTruthy()
+        e.dispatch(e.state.tr.setSelection(sel!))
+
+        const got = clip(e, 'copy')
+        // Bare <td>s are unplaceable without the table around them, so cells
+        // keep the plain-text payload until table clipboard lands properly.
+        expect(Object.keys(got)).toEqual(['text/plain'])
+        e.destroy()
+    })
+
+    test('a nonsense data-pm-slice does not fail the paste', () =>
+    {
+        const e = paragraphEditor([schema.text('abc')])
+        selectRange(e, 2, 2)
+        pasteInto(e, { 'text/html': '<p data-pm-slice="9 9 []">X</p>' })
+        // Impossible depths fall back to what the parser worked out.
+        expect(e.state.doc.textBetween(0, e.state.doc.content.size, ' ')).toContain('X')
+        e.destroy()
+    })
+})
+
+
+describe('IME composition preview', () =>
+{
+    function fire(e: CanvasEditor, type: string, data: string | null): void
+    {
+        const ev = new Event(type, { bubbles: true, cancelable: true })
+        ;(ev as any).data = data
+        ;(e as any).textarea.dispatchEvent(ev)
+    }
+
+    /** Start a composition and feed it one revision. */
+    function compose(e: CanvasEditor, text: string): void
+    {
+        fire(e, 'compositionstart', null)
+        fire(e, 'compositionupdate', text)
+    }
+
+    const JP = 'にほん'          // 3 chars → 24px in the mock metric
+
+    test('the in-flight string is painted at the caret', () =>
+    {
+        const e = paragraphEditor([schema.text('hi')])
+        e.dispatch(e.state.tr.setSelection(TextSelection.create(e.state.doc, 3)))
+        compose(e, JP)
+        const { text } = recordPaint(e)
+        const preview = text.find((t) => t.text === JP)
+        // Nothing was drawn at all before this — the composition lived in a
+        // 1px transparent textarea until it committed.
+        expect(preview).toBeTruthy()
+        expect(preview!.x).toBe(16)                     // after 'hi'
+        e.destroy()
+    })
+
+    test('the caret sits after the preview, not under it', () =>
+    {
+        const e = paragraphEditor([schema.text('hi')])
+        e.dispatch(e.state.tr.setSelection(TextSelection.create(e.state.doc, 3)))
+        compose(e, JP)
+        const { rects } = recordPaint(e)
+        const caret = rects.find((r) => r.fill === '#a5b4fc' && r.h > 1)
+        expect(caret).toBeTruthy()
+        expect(caret!.x).toBe(16 + 24)                  // past the composition
+        e.destroy()
+    })
+
+    test('the IME anchor follows the end of the preview', () =>
+    {
+        const e = paragraphEditor([schema.text('hi')])
+        e.dispatch(e.state.tr.setSelection(TextSelection.create(e.state.doc, 3)))
+        compose(e, JP)
+        recordPaint(e)
+        // The candidate window tracks the textarea, so it belongs under the
+        // end of what is being composed.
+        expect((e as any).textarea.style.transform).toContain('translate(40px')
+        e.destroy()
+    })
+
+    test('the preview is underlined, the way uncommitted text always is', () =>
+    {
+        const e = paragraphEditor([schema.text('hi')])
+        e.dispatch(e.state.tr.setSelection(TextSelection.create(e.state.doc, 3)))
+        compose(e, JP)
+        const { rects } = recordPaint(e)
+        const underline = rects.find((r) => r.h === 1 && r.w === 24 && r.x === 16)
+        expect(underline).toBeTruthy()
+        e.destroy()
+    })
+
+    test('a backdrop goes down first, so the preview occludes rather than blends', () =>
+    {
+        const e = paragraphEditor([schema.text('hi')])
+        e.dispatch(e.state.tr.setSelection(TextSelection.create(e.state.doc, 3)))
+        compose(e, JP)
+        const { rects, text } = recordPaint(e)
+        const backdrop = rects.findIndex((r) => r.x === 16 && r.w === 24 && r.h > 1)
+        const glyphs = text.findIndex((t) => t.text === JP)
+        expect(backdrop).toBeGreaterThanOrEqual(0)
+        expect(glyphs).toBeGreaterThanOrEqual(0)
+        e.destroy()
+    })
+
+    test('a commit replaces the preview with real content', () =>
+    {
+        const e = paragraphEditor([schema.text('hi')])
+        e.dispatch(e.state.tr.setSelection(TextSelection.create(e.state.doc, 3)))
+        compose(e, JP)
+        fire(e, 'compositionend', JP)
+        expect(e.state.doc.textBetween(0, e.state.doc.content.size, '')).toBe('hi' + JP)
+        const { text } = recordPaint(e)
+        // Painted once, as laid-out document text — not twice, with a preview
+        // still floating over it.
+        expect(text.filter((t) => t.text.includes(JP)).length).toBe(1)
+        e.destroy()
+    })
+
+    test('a cancelled composition leaves nothing behind', () =>
+    {
+        const e = paragraphEditor([schema.text('hi')])
+        e.dispatch(e.state.tr.setSelection(TextSelection.create(e.state.doc, 3)))
+        compose(e, JP)
+        fire(e, 'compositionend', '')
+        expect(e.state.doc.textBetween(0, e.state.doc.content.size, '')).toBe('hi')
+        const { text } = recordPaint(e)
+        expect(text.find((t) => t.text === JP)).toBeUndefined()
+        e.destroy()
+    })
+
+    test('nothing is painted when no composition is in flight', () =>
+    {
+        const e = paragraphEditor([schema.text('hi')])
+        const { rects } = recordPaint(e)
+        expect(rects.find((r) => r.h === 1 && r.w === 24)).toBeUndefined()
+        e.destroy()
+    })
+
+    test('a composition in a heading is drawn at the heading size', () =>
+    {
+        const doc = schema.node('doc', null, [
+            schema.node('heading', { level: 1 }, [schema.text('T')]),
+        ])
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        const e = new CanvasEditor({ state: EditorState.create({ doc, schema }), container })
+        e.dispatch(e.state.tr.setSelection(TextSelection.create(e.state.doc, 2)))
+        compose(e, JP)
+        const { text } = recordPaint(e)
+        const heading = text.find((t) => t.text === 'T')
+        const preview = text.find((t) => t.text === JP)
+        expect(preview).toBeTruthy()
+        // The block's own font, not the editor's base one.
+        expect(preview!.font).toBe(heading!.font)
+        e.destroy()
+    })
+})

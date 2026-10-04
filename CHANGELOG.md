@@ -1,5 +1,63 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Copying carries marks and structure, not just characters.** `copy` and
+  `cut` wrote `text/plain` and nothing else, while a *drag* of the same
+  selection wrote `text/html` through the schema's own `toDOM`. So the same
+  bold sentence kept its bold when dragged to another application and lost it
+  when copied there — and worse, a copy/paste *inside this editor* round-tripped
+  through plain text and came back stripped of every mark, because the paste
+  path looks for `text/html` first and found none. Both now send the payload a
+  drag already sent.
+
+  The HTML also carries `data-pm-slice`, ProseMirror's own record of how deep
+  the slice is open at each end, and a paste honours it. A parser can only infer
+  depth from the elements it is given, and a complete `<p>` looks like a closed
+  one: without the attribute, copying the back half of one paragraph and the
+  front half of the next pasted back as two whole new blocks instead of merging
+  into the paragraph at the caret. A cross-block copy pasted over itself is now
+  a no-op, which is the test that pins it. Depths the content can't support fall
+  back to what the parser worked out rather than failing the paste.
+
+  Cell selections keep the plain-text-only payload: they serialize to bare
+  `<td>`s that nothing can place without the table around them, so table
+  clipboard stays the open roadmap item it was.
+
+  Why it went unnoticed: the copy test asserted the *data* and threw away the
+  MIME type it was handed (`setData: (_t, d) => …`). It could not see the flavour
+  that was missing. It asserts the types now.
+
+### Added
+
+- **The IME composition is visible while it is being composed.** Everything
+  about composition was handled except showing it: `compositionstart` set a
+  flag, `compositionend` inserted the result, and `insertCompositionText` was
+  explicitly ignored. Nothing painted in between. The in-flight text lives in a
+  1px transparent textarea, so anyone composing Japanese, Korean, Chinese or
+  Vietnamese saw the IME's candidate window and not one character of what they
+  were actually writing, until it committed.
+
+  `compositionupdate` now keeps the in-flight string and the canvas paints it at
+  the caret, underlined the way every platform marks uncommitted text, with the
+  caret and the textarea (which the candidate window tracks) both sitting after
+  it rather than under it. A composition in a heading is drawn at the heading's
+  size, since the block's own resolved style supplies the font.
+
+  The string is deliberately *not* put in the document. An IME revises it on
+  every keystroke, and a document that churned once per revision would fill the
+  undo stack with text the user never committed and broadcast every intermediate
+  guess to collaborators. Only the commit becomes a transaction.
+
+  The honest limit: because the preview isn't in the layout, it cannot reflow
+  the line around itself the way a DOM editor does. It lays the page's own
+  backdrop down first so it occludes the text to the right of the caret rather
+  than blending into it, and a commit replaces it with real content that lays
+  out properly. Composing mid-line therefore covers what follows until the
+  commit, rather than pushing it along.
+
 ## 0.3.0
 
 ### Added
