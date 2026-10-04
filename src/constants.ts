@@ -52,17 +52,33 @@ export const MIN_COL_WIDTH = 32
 /**
  * Canvas width beyond the content column, in px.
  *
- * Pretext breaks lines using its own metrics; the editor then re-measures every
- * run with `measureText` to place it. The two agree closely but not exactly, so
- * a line occasionally paints a few px wider than the column it was broken to. A
- * canvas sized to exactly the column guillotines the last glyph of those lines
- * — a visibly chopped letter, for a disagreement of about three pixels.
- *
+ * Marked lines can paint a little wider than the width they were broken to, and
+ * a canvas sized to exactly the column guillotines the last glyph when they do.
  * This strip is transparent and nothing is *placed* in it: layout still wraps to
- * the content width, and selection, decoration, and node-decoration rects all
- * still stop there. It exists only so a hair of overrun is drawn rather than cut.
- * It is not a fix for the underlying disagreement, which is worth chasing down
- * to whichever measurement is wrong.
+ * the content width, and selection, inline-decoration, and node-decoration rects
+ * all still stop there. It exists only so a hair of overrun is drawn, not cut.
+ *
+ * Where the overrun comes from — measured, not guessed. Pretext lays marked text
+ * out as styled runs and trims the whitespace between them into a `gapBefore` it
+ * reserves on its own terms. The editor re-expands that whitespace so every
+ * space stays an editable character, appends it to the *preceding* run, and
+ * re-measures with `measureText` in that run's font. A space in Georgia and the
+ * same space in its italic are not the same width, so each mark boundary on a
+ * line contributes a fraction of a pixel, and a line crossing several of them
+ * accumulates a few.
+ *
+ * Sweeping the demo document across 61 wrap widths (2,248 laid-out lines):
+ *
+ *   - 5 lines (0.2%) overran with real glyphs, worst case 5.1px, every one of
+ *     them a marked line crossing a mark boundary;
+ *   - 47 more "overran" by trailing whitespace only, which paints nothing;
+ *   - no single-font line ever overran.
+ *
+ * 6px covers the measured worst case with room to spare. The honest fix is for
+ * the editor to stop re-expanding whitespace into the painted text — CSS
+ * `white-space: normal` renders a double space as one and still lets the caret
+ * walk both — but that is the most caret-test-dependent code in the repo, and
+ * `prepareRichInline` has no `pre-wrap` option to hand the problem back to.
  */
 export const TEXT_BLEED = 6
 
@@ -99,3 +115,37 @@ export const SR_ONLY: Partial<CSSStyleDeclaration> = {
 
 /** Travel before a press on a node becomes a drag rather than a click. */
 export const DRAG_THRESHOLD_PX = 6
+
+/**
+ * How close to a scroller's edge a drag must come before the view starts
+ * following it, and how fast it moves at the very edge (px per frame).
+ *
+ * The band is capped at a third of the scroller so a short editor doesn't end
+ * up with overlapping top and bottom trigger zones — which would make the
+ * middle of it scroll in both directions at once.
+ */
+export const AUTOSCROLL_ZONE_PX = 40
+export const AUTOSCROLL_SPEED_PX = 14
+
+
+// ─── Touch ─────────────────────────────────────────────────────────────────
+
+/** Longest gap between taps that still counts as part of the same multi-tap. */
+export const MULTI_TAP_MS = 320
+/** How far a follow-up tap may land from the first and still count. */
+export const MULTI_TAP_SLOP_PX = 24
+
+/**
+ * The magnifier shown while a finger is placing or extending a selection.
+ *
+ * A fingertip covers the very text it is aiming at, so the loupe repeats that
+ * region above the touch — the region is copied straight off the editor's own
+ * canvas, which is the one place the rendered text already exists as pixels.
+ */
+export const LOUPE_WIDTH = 112
+export const LOUPE_HEIGHT = 56
+export const LOUPE_ZOOM = 1.5
+/** How far above the touch point the loupe floats. */
+export const LOUPE_LIFT = 76
+/** Where it goes instead when the touch is too near the top for that. */
+export const LOUPE_DROP = 30

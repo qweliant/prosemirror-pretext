@@ -52,6 +52,9 @@ import type {
 import {
     HEADING_SCALE, DEFAULT_MARK_STYLES, LIST_INDENT, MARKER_PAD,
     FOCUSABLE_SEL, SR_ONLY, DRAG_THRESHOLD_PX, TEXT_BLEED,
+    AUTOSCROLL_ZONE_PX, AUTOSCROLL_SPEED_PX,
+    MULTI_TAP_MS, MULTI_TAP_SLOP_PX,
+    LOUPE_WIDTH, LOUPE_HEIGHT, LOUPE_ZOOM, LOUPE_LIFT, LOUPE_DROP,
 } from './constants'
 import {
     isRuleNode, isListNode, isOrderedList, isLeafBlock, collectBlocks, isDocEmpty,
@@ -126,7 +129,8 @@ export class CanvasEditor {
   // ─── Config ────────────────────────────────────────────────────────
   private readonly font: string;
   private readonly lineHeight: number;
-  private readonly containerWidth: number;
+  // Not readonly: `setWidth` re-lays the document into a new column.
+  private containerWidth: number;
   private readonly blockGap: number;
   private readonly textColor: string;
   private readonly firstLineColor: string;
@@ -293,6 +297,14 @@ export class CanvasEditor {
   private touchSelection = false;
   private selHandles: { from: HTMLElement; to: HTMLElement } | null = null;
   private draggingHandle: "from" | "to" | null = null;
+  // Multi-tap: consecutive quick taps in the same spot escalate caret → word →
+  // block, the touch counterpart of double- and triple-click.
+  private tapCount = 0;
+  private lastTapTime = 0;
+  private lastTapX = 0;
+  private lastTapY = 0;
+  // The magnifier overlay, built on first use.
+  private loupe: { el: HTMLElement; canvas: HTMLCanvasElement } | null = null;
   // ─── Drag & drop ───────────────────────────────────────────────────
   private readonly dragDrop: boolean;
   // An in-flight node drag. It stays inert until the pointer passes the
@@ -307,6 +319,22 @@ export class CanvasEditor {
   // What the next paint marks as the drop target: the seam between two blocks
   // (a node move) or a text position (an external drop). Null when idle.
   private dropTarget: { pos: number; seam: boolean } | null = null;
+  // A native drag that started from this editor's own text selection. Set at
+  // dragstart, read at drop (to move rather than paste) and at dragend (to
+  // remove the source when another application took it as a move).
+  private textDrag: { from: number; to: number } | null = null;
+  // Whether the current native drag ended inside this editor, which is what
+  // decides between "we already moved it" and "someone else took it".
+  private textDragHandled = false;
+  // Set on a press that lands inside the selection: the browser may be about to
+  // start a native drag, so the caret is not moved until the press proves to be
+  // an ordinary click.
+  private pressInSelection: number | null = null;
+  // Edge auto-scroll while dragging. `dy` is px per frame, signed.
+  private autoScrollRaf = 0;
+  private autoScrollDy = 0;
+  private lastDragClientX = 0;
+  private lastDragClientY = 0;
   // Read-only mode drops document-changing transactions (see dispatch).
   private isEditable = true;
   private readonly autofocus: boolean = true;
@@ -432,6 +460,14 @@ export class CanvasEditor {
     const stack = document.createElement("div");
     stack.style.position = "relative";
     stack.style.cursor = "text";
+    // Selection here belongs to ProseMirror, never to the DOM. Mousedown used
+    // to suppress the browser's default outright, but a press that might become
+    // a drag of the selection has to be left alone (see the mousedown handler),
+    // and without this the browser would start selecting the accessibility
+    // mirror's text underneath instead. Copy still works: it is served by the
+    // textarea's own `copy` handler, not by a DOM selection.
+    stack.style.userSelect = "none";
+    (stack.style as unknown as Record<string, string>).webkitUserSelect = "none";
     this.stack = stack;
 
     this.canvas = document.createElement("canvas");
@@ -715,6 +751,47 @@ export class CanvasEditor {
     this.scheduleRender();
   }
 
+  /** The content column's width in px — what `options.width` set. */
+  get width(): number {
+    return this.containerWidth;
+  }
+
+  /**
+   * Re-lay the document into a different content width.
+   *
+   * Width was fixed at construction until now, which made the editor the one
+   * part of a responsive layout that could not respond: hosts had to freeze
+   * their own dimensions to whatever the editor was built with, or clip it.
+   *
+   * Everything downstream falls out of two caches. The per-block layout cache
+   * already records the width each block was assembled at and misses when it
+   * differs, so it needs no help. The *positional* cache does not — it reuses a
+   * block's absolute geometry by node identity, and every one of those y-offsets
+   * and x-positions is now wrong — so it is dropped wholesale.
+   */
+  setWidth(width: number): void {
+    const next = Math.max(1, Math.round(width));
+    if (next === this.containerWidth) return;
+    this.containerWidth = next;
+
+    this.positionedCache = new WeakMap();
+    // `lastLayouts` is the other half of positional reuse: the assembler checks
+    // the block at the same index there before consulting the cache, so leaving
+    // it in place would hand back the old column's geometry unchanged.
+    this.lastLayouts = [];
+    this.layoutDirty = true;
+    // The canvas is resized during paint, but the scroller is not — it was
+    // sized once in the constructor and has to be brought along by hand.
+    if (this.scroller) {
+      this.scroller.style.width =
+        `${this.containerWidth + TEXT_BLEED + scrollbarWidth()}px`;
+    }
+    // The canvas is about to change size, so any cached mapping between its
+    // pixels and the viewport is stale.
+    this.invalidateGeometry();
+    this.scheduleRender();
+  }
+
   /**
    * Map viewport coordinates to a document position (mirrors
    * `EditorView.posAtCoords`). `inside` is the position of a directly-enclosing
@@ -937,6 +1014,7 @@ export class CanvasEditor {
       this.blinkInterval = null;
     }
     this.abortController?.abort();
+    this.stopAutoScroll();
     for (const view of this.mountedViews.values())
       view.resizeObserver?.disconnect();
     this.mountedViews.clear();
@@ -2602,6 +2680,12 @@ export class CanvasEditor {
     };
     view.dom = this.nodeViews[node.type.name](node, () => view.pos);
     view.dom.style.pointerEvents = "auto";
+    // The stack turns DOM text selection off (its own selection is
+    // ProseMirror's), but a node view is the consumer's DOM and may well hold
+    // text worth selecting — a code snippet, a caption — so it opts back in.
+    view.dom.style.userSelect = "text";
+    (view.dom.style as unknown as Record<string, string>).webkitUserSelect =
+      "text";
     container.appendChild(view.dom);
     this.stack.appendChild(container);
 
@@ -2806,12 +2890,27 @@ export class CanvasEditor {
       "mousedown",
       (e) => {
         if (e.button !== 0) return;
-        e.preventDefault();
-        this.touchSelection = false; // mouse in use → hide touch handles
         const { x, y } = this.eventToDocCoords(e);
+        const gapPos = this.gapPosForClick(y);
+        const hit =
+          gapPos === null ? this.clickToPos(this.lastLayouts, x, y) : null;
+        const sel = this.state.selection;
+
+        // Whether this press could become a native drag of the selection —
+        // worked out before anything is suppressed, because `preventDefault` on
+        // mousedown also stops the browser from ever *starting* a drag, and
+        // handing content to another application is only possible through one.
+        // Modifier presses are excluded: those mean extend or follow-link.
+        const mayDragSelection =
+          this.dragDrop &&
+          !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey &&
+          !sel.empty && hit !== null &&
+          hit.pos > sel.from && hit.pos < sel.to;
+
+        if (!mayDragSelection) e.preventDefault();
+        this.touchSelection = false; // mouse in use → hide touch handles
 
         // A click in a block seam (between stacked atoms) sets a gap cursor.
-        const gapPos = this.gapPosForClick(y);
         if (gapPos !== null) {
           this.dispatch(
             this.state.tr.setSelection(
@@ -2823,7 +2922,6 @@ export class CanvasEditor {
           return;
         }
 
-        const hit = this.clickToPos(this.lastLayouts, x, y);
         if (hit === null) return;
 
         // Consumer override (e.g. open a mention, toggle a checkbox).
@@ -2841,10 +2939,38 @@ export class CanvasEditor {
           }
         }
 
+        // A press inside the selection leaves it alone: the browser may be
+        // about to start a drag of it, and the caret only moves once the press
+        // turns out to be an ordinary click (see the mouseup below).
+        if (mayDragSelection) {
+          this.pressInSelection = hit.pos;
+          this.stack.draggable = true;
+          // `preventScroll` because this is the one branch that leaves the
+          // browser's default in place: focusing the offscreen textarea while
+          // the default is still live can otherwise scroll it into view.
+          this.textarea.focus({ preventScroll: true });
+          return;
+        }
+
         this.setHead(hit.pos, e.shiftKey);
         this.caretBias = hit.bias;
         this.dragging = true;
         this.textarea.focus();
+      },
+      { signal },
+    );
+
+    // A press inside the selection that never became a drag is just a click:
+    // collapse to where it landed. `draggable` is cleared either way, so the
+    // editor doesn't stay draggable once the gesture is over.
+    window.addEventListener(
+      "mouseup",
+      () => {
+        if (this.pressInSelection === null) return;
+        const pos = this.pressInSelection;
+        this.pressInSelection = null;
+        this.stack.draggable = false;
+        if (!this.textDrag) this.setHead(pos, false);
       },
       { signal },
     );
@@ -2946,6 +3072,7 @@ export class CanvasEditor {
           this.selectWordAt(x, y);
           this.touchSelection = true;
           this.textarea.focus({ preventScroll: true });
+          this.showLoupe({ x, y });
           this.scheduleRender();
         }, LONG_PRESS_MS);
       },
@@ -2978,6 +3105,7 @@ export class CanvasEditor {
             this.caretBias = hit.bias;
             this.scheduleRender();
           }
+          this.showLoupe({ x, y });
         }
         // Otherwise it's a scroll — let the browser handle it (touch-action).
       },
@@ -2991,18 +3119,32 @@ export class CanvasEditor {
         const wasScroll = this.touchMode === "scroll" || this.touchMoved;
         this.cancelLongPress();
         this.touchMode = "idle";
+        this.showLoupe(null);
         if (wasSelect) {
           e.preventDefault(); // keep the selection + suppress synthesized click
           this.textarea.focus({ preventScroll: true });
           return;
         }
-        if (wasScroll) return; // a swipe — the browser already scrolled
-        // Quick tap → place the caret.
+        if (wasScroll) {
+          this.tapCount = 0; // a swipe breaks any multi-tap in progress
+          return; // the browser already scrolled
+        }
+        // Quick tap → place the caret, unless it's the second or third of a
+        // multi-tap, which escalate to the word and then the whole block.
         e.preventDefault();
         const { x, y } = this.eventToDocCoords({
           clientX: this.touchStartX,
           clientY: this.touchStartY,
         });
+        if (this.registerTap()) {
+          const hit = this.clickToPos(this.lastLayouts, x, y);
+          if (hit && this.selectForTapCount(hit.pos)) {
+            this.touchSelection = true;
+            this.textarea.focus({ preventScroll: true });
+            this.scheduleRender();
+            return;
+          }
+        }
         const gapPos = this.gapPosForClick(y);
         if (gapPos !== null) {
           this.dispatch(
@@ -3059,20 +3201,79 @@ export class CanvasEditor {
         signal,
       });
 
-      // Browsers natively drag <img> and links, which would tear the pointer
-      // stream out from under a node drag (the primary case being an image node
-      // view). We never originate a native drag, so refuse them; a node view
-      // wanting its own can stopPropagation before this bubble-phase listener.
-      this.stack.addEventListener("dragstart", (e) => e.preventDefault(), {
-        signal,
-      });
+      // Dragging a text selection is the one drag we *do* originate natively,
+      // because native drag is the only way content can leave for another
+      // application — a pointer-based gesture can never hand anything to
+      // Finder, a mail client, or another tab. It also gets internal moves for
+      // free, since a drop back inside is just this drag landing at home.
+      //
+      // Everything else the browser would drag natively (an <img> node view, a
+      // link) is refused, because it would tear the pointer stream out from
+      // under a node drag. A node view wanting its own can stopPropagation
+      // before this bubble-phase listener.
+      this.stack.addEventListener(
+        "dragstart",
+        (e) => {
+          const de = e as DragEvent;
+          const sel = this.state.selection;
+          if (this.pressInSelection === null || sel.empty) {
+            de.preventDefault();
+            return;
+          }
+          const payload = this.selectionClipboard();
+          if (!payload) {
+            de.preventDefault();
+            return;
+          }
+          this.textDrag = { from: sel.from, to: sel.to };
+          this.textDragHandled = false;
+          de.dataTransfer?.setData("text/plain", payload.text);
+          de.dataTransfer?.setData("text/html", payload.html);
+          // A read-only editor can still be dragged *from* — the same way it can
+          // still be copied from — but only as a copy, so nothing downstream
+          // reports back a "move" that this side would have to honour by
+          // deleting. Otherwise both are offered and the drop target picks.
+          if (de.dataTransfer) {
+            de.dataTransfer.effectAllowed = this.isEditable ? "copyMove" : "copy";
+          }
+        },
+        { signal },
+      );
+
+      this.stack.addEventListener(
+        "dragend",
+        (e) => {
+          const de = e as DragEvent;
+          const d = this.textDrag;
+          this.textDrag = null;
+          this.pressInSelection = null;
+          this.stack.draggable = false;
+          this.dropTarget = null;
+          this.stopAutoScroll();
+          this.scheduleRender();
+          // Another application took the selection as a move, so this side has
+          // to give it up. A drop back inside already moved it, and a cancelled
+          // drag reports "none".
+          if (
+            d && !this.textDragHandled && this.isEditable &&
+            de.dataTransfer?.dropEffect === "move"
+          ) {
+            this.dispatch(this.state.tr.delete(d.from, d.to));
+          }
+        },
+        { signal },
+      );
 
       // Claim the drag (both events, for Safari) so the browser doesn't open
       // the dropped file in place of the page.
       const allowDrop = (e: DragEvent) => {
         if (!this.isEditable) return;
         e.preventDefault();
-        if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+        if (!e.dataTransfer) return;
+        // Our own selection moves by default and copies with Alt, matching
+        // every other editor; anything arriving from outside is a copy.
+        e.dataTransfer.dropEffect =
+          this.textDrag && !e.altKey ? "move" : "copy";
       };
       this.stack.addEventListener(
         "dragenter",
@@ -3086,6 +3287,7 @@ export class CanvasEditor {
           allowDrop(de);
           if (!this.isEditable) return;
           this.dropTarget = { pos: this.dropPosForEvent(de), seam: false };
+          this.updateAutoScroll(de.clientX, de.clientY);
           this.scheduleRender();
         },
         { signal },
@@ -3098,6 +3300,7 @@ export class CanvasEditor {
           const to = (e as DragEvent).relatedTarget as Node | null;
           if (to && this.stack.contains(to)) return;
           this.dropTarget = null;
+          this.stopAutoScroll();
           this.scheduleRender();
         },
         { signal },
@@ -3107,9 +3310,18 @@ export class CanvasEditor {
         (e) => {
           const de = e as DragEvent;
           this.dropTarget = null;
+          this.stopAutoScroll();
           this.scheduleRender();
           if (!this.isEditable) return;
           de.preventDefault();
+          // Our own selection landing back inside is a move within the
+          // document, not a paste of its serialized form — which keeps it one
+          // undo step and preserves nodes the clipboard round-trip would flatten.
+          if (this.textDrag) {
+            this.textDragHandled = true;
+            this.moveSelectionTo(this.dropPosForEvent(de), de.altKey);
+            return;
+          }
           this.handleExternalDrop(de);
         },
         { signal },
@@ -3239,6 +3451,7 @@ export class CanvasEditor {
     const { y } = this.eventToDocCoords(e);
     const pos = this.seamPosAt(y);
     this.dropTarget = pos === null ? null : { pos, seam: true };
+    this.updateAutoScroll(e.clientX, e.clientY);
     this.scheduleRender();
   }
 
@@ -3251,10 +3464,78 @@ export class CanvasEditor {
   }
 
   private cancelNodeDrag(): void {
+    this.stopAutoScroll();
     if (!this.nodeDrag) return;
     this.nodeDrag = null;
     this.dropTarget = null;
     this.stack.style.cursor = "text";
+    this.scheduleRender();
+  }
+
+  // ─── Edge auto-scroll ──────────────────────────────────────────────
+
+  /**
+   * Follow a drag that has reached the top or bottom of a `maxHeight` scroller.
+   *
+   * Without this a drag can only reach as far as the viewport already shows,
+   * which on a virtualized document means most of it is unreachable. Speed
+   * ramps with depth into the band so a drag can creep or race, and the whole
+   * thing is inert when the editor isn't scrolling anything.
+   */
+  private updateAutoScroll(clientX: number, clientY: number): void {
+    this.lastDragClientX = clientX;
+    this.lastDragClientY = clientY;
+    const sc = this.scroller;
+    if (!sc) return;
+    const r = sc.getBoundingClientRect();
+    const zone = Math.min(AUTOSCROLL_ZONE_PX, r.height / 3);
+    let ramp = 0;
+    if (clientY < r.top + zone) ramp = -(1 - (clientY - r.top) / zone);
+    else if (clientY > r.bottom - zone) ramp = 1 - (r.bottom - clientY) / zone;
+    this.autoScrollDy = clamp(ramp, -1, 1) * AUTOSCROLL_SPEED_PX;
+    if (this.autoScrollDy !== 0) this.startAutoScroll();
+    else this.stopAutoScroll();
+  }
+
+  private startAutoScroll(): void {
+    if (this.autoScrollRaf) return;
+    const step = (): void => {
+      this.autoScrollRaf = 0;
+      const sc = this.scroller;
+      if (!sc || this.autoScrollDy === 0) return;
+      const before = sc.scrollTop;
+      sc.scrollTop = before + this.autoScrollDy;
+      // Already at an end: stop rather than spin a frame loop forever.
+      if (sc.scrollTop === before) return;
+      // The pointer hasn't moved but the document under it has, so the drop
+      // target is now somewhere else.
+      this.refreshDropTargetForAutoScroll();
+      this.autoScrollRaf = requestAnimationFrame(step);
+    };
+    this.autoScrollRaf = requestAnimationFrame(step);
+  }
+
+  private stopAutoScroll(): void {
+    if (this.autoScrollRaf) cancelAnimationFrame(this.autoScrollRaf);
+    this.autoScrollRaf = 0;
+    this.autoScrollDy = 0;
+  }
+
+  /** Recompute the drop indicator against the last pointer position after the
+   *  view scrolled under it. */
+  private refreshDropTargetForAutoScroll(): void {
+    if (!this.dropTarget) return;
+    const { x, y } = this.eventToDocCoords({
+      clientX: this.lastDragClientX,
+      clientY: this.lastDragClientY,
+    });
+    if (this.nodeDrag?.active) {
+      const pos = this.seamPosAt(y);
+      this.dropTarget = pos === null ? null : { pos, seam: true };
+    } else {
+      const hit = this.clickToPos(this.lastLayouts, x, y);
+      if (hit) this.dropTarget = { pos: hit.pos, seam: false };
+    }
     this.scheduleRender();
   }
 
@@ -3590,6 +3871,49 @@ export class CanvasEditor {
   }
 
   /**
+   * The current selection as both flavours a drop target might ask for. HTML
+   * goes through the schema's own `toDOM` rules, so marks and block structure
+   * survive into whatever receives it.
+   */
+  private selectionClipboard(): { text: string; html: string } | null {
+    const text = this.selectionText();
+    if (text === null) return null;
+    const sel = this.state.selection;
+    const fragment = this.serializer.serializeFragment(
+      this.state.doc.slice(sel.from, sel.to).content,
+    );
+    const holder = document.createElement("div");
+    holder.appendChild(fragment);
+    return { text, html: holder.innerHTML };
+  }
+
+  /**
+   * Move (or, with `copy`, duplicate) the current selection to `pos` as a
+   * single transaction, so the whole thing is one undo step.
+   */
+  private moveSelectionTo(pos: number, copy: boolean): void {
+    const d = this.textDrag;
+    if (!d) return;
+    // Dropped inside the text being dragged: there is nowhere for it to go.
+    if (pos >= d.from && pos <= d.to) return;
+
+    const slice = this.state.doc.slice(d.from, d.to);
+    const tr = this.state.tr;
+    if (!copy) tr.delete(d.from, d.to);
+    // After a delete above the drop point, the target has shifted.
+    const at = copy ? pos : tr.mapping.map(pos);
+    const before = tr.doc.content.size;
+    tr.replaceRange(at, at, slice);
+    const added = tr.doc.content.size - before;
+    // `between` tolerates endpoints that aren't valid text positions (the slice
+    // may have landed as whole blocks), unlike TextSelection.create.
+    tr.setSelection(
+      TextSelection.between(tr.doc.resolve(at), tr.doc.resolve(at + added)),
+    );
+    this.dispatch(tr.scrollIntoView());
+  }
+
+  /**
    * Cancel a pending long-press (finger moved, lifted, or a second touch).
    */
   private cancelLongPress(): void {
@@ -3636,6 +3960,161 @@ export class CanvasEditor {
     this.scheduleRender();
   }
 
+  // ─── Multi-tap (touch) ─────────────────────────────────────────────
+
+  /**
+   * Fold this tap into a run of taps at the same spot, returning whether it is
+   * a follow-up (the 2nd or later) rather than a fresh first tap.
+   *
+   * Slop matters more here than for a mouse: a finger never lands twice in
+   * exactly the same place, so requiring that would make double-tap a gesture
+   * nobody can perform on purpose.
+   */
+  private registerTap(): boolean {
+    const now = Date.now();
+    const near =
+      Math.hypot(
+        this.touchStartX - this.lastTapX,
+        this.touchStartY - this.lastTapY,
+      ) <= MULTI_TAP_SLOP_PX;
+    this.tapCount = now - this.lastTapTime <= MULTI_TAP_MS && near
+      ? this.tapCount + 1
+      : 1;
+    this.lastTapTime = now;
+    this.lastTapX = this.touchStartX;
+    this.lastTapY = this.touchStartY;
+    return this.tapCount >= 2;
+  }
+
+  /** Word for a double tap, the whole textblock for a triple. Returns whether
+   *  a selection was actually made. */
+  private selectForTapCount(pos: number): boolean {
+    const doc = this.state.doc;
+    if (this.tapCount === 2) {
+      const word = this.wordRangeAt(pos);
+      if (!word) return false;
+      this.dispatch(
+        this.state.tr.setSelection(
+          TextSelection.between(doc.resolve(word.from), doc.resolve(word.to)),
+        ),
+      );
+      return true;
+    }
+    // Three or more: the block. Beyond three there is nothing further to
+    // escalate to, so it simply stays there rather than cycling back.
+    const $pos = doc.resolve(clamp(pos, 0, doc.content.size));
+    if (!$pos.parent.isTextblock || $pos.parent.content.size === 0) return false;
+    this.dispatch(
+      this.state.tr.setSelection(
+        TextSelection.between(
+          doc.resolve($pos.start()),
+          doc.resolve($pos.end()),
+        ),
+      ),
+    );
+    return true;
+  }
+
+  // ─── Magnifier loupe (touch) ───────────────────────────────────────
+
+  /**
+   * Show the magnifier over a document-space point, or hide it when `at` is
+   * null.
+   *
+   * The magnified image is copied straight off the editor's own canvas with
+   * `drawImage`, which is the whole reason this is cheap: the text is already
+   * rendered pixels, so there is nothing to lay out or re-paint — one blit per
+   * touchmove. It also means the loupe is always in perfect agreement with what
+   * is on screen, including selection bands and decorations.
+   *
+   * Takes document coordinates rather than client ones because every caller has
+   * already paid for the conversion; asking for client coordinates here would
+   * mean a second `getBoundingClientRect` — a forced synchronous layout — on
+   * every touchmove of a drag.
+   */
+  private showLoupe(at: { x: number; y: number } | null): void {
+    if (!at) {
+      if (this.loupe) this.loupe.el.style.display = "none";
+      return;
+    }
+    const { el, canvas } = this.ensureLoupe();
+    // The canvas covers the whole document unless virtualizing, where it is a
+    // viewport onto it — so the source rect is document space less the scroll.
+    const scrollTop = this.scroller?.scrollTop ?? 0;
+    const cx = at.x;
+    const cy = at.y - scrollTop;
+
+    const dpr = window.devicePixelRatio || 1;
+    const sw = LOUPE_WIDTH / LOUPE_ZOOM;
+    const sh = LOUPE_HEIGHT / LOUPE_ZOOM;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, LOUPE_WIDTH, LOUPE_HEIGHT);
+    ctx.drawImage(
+      this.canvas,
+      (cx - sw / 2) * dpr, (cy - sh / 2) * dpr, sw * dpr, sh * dpr,
+      0, 0, LOUPE_WIDTH, LOUPE_HEIGHT,
+    );
+
+    // Positioned in stack space, which is document space.
+    const docY = at.y;
+    // Above the finger by default. On the first line or two there is no room up
+    // there, and a loupe clipped off the top of the editor is worse than none —
+    // so it drops below the touch instead, the way the remote-caret flag does.
+    const above = docY - LOUPE_LIFT;
+    const top = above >= scrollTop ? above : docY + LOUPE_DROP;
+    const left = clamp(cx, LOUPE_WIDTH / 2, this.containerWidth - LOUPE_WIDTH / 2);
+    el.style.left = `${left}px`;
+    el.style.top = `${top}px`;
+    el.style.display = "";
+  }
+
+  /** The first opaque background above the canvas — whatever the page is
+   *  actually showing behind the text. Falls back to white. */
+  private backdropColor(): string {
+    if (typeof getComputedStyle === "undefined") return "#fff";
+    let el: HTMLElement | null = this.container;
+    while (el) {
+      const bg = getComputedStyle(el).backgroundColor;
+      if (bg && bg !== "transparent" && !/rgba\(0, 0, 0, 0\)/.test(bg)) return bg;
+      el = el.parentElement;
+    }
+    return "#fff";
+  }
+
+  private ensureLoupe(): { el: HTMLElement; canvas: HTMLCanvasElement } {
+    if (this.loupe) return this.loupe;
+    const el = document.createElement("div");
+    Object.assign(el.style, {
+      position: "absolute",
+      width: `${LOUPE_WIDTH}px`,
+      height: `${LOUPE_HEIGHT}px`,
+      marginLeft: `${-LOUPE_WIDTH / 2}px`,
+      borderRadius: `${LOUPE_HEIGHT / 2}px`,
+      overflow: "hidden",
+      border: "2px solid rgba(255,255,255,0.9)",
+      boxShadow: "0 4px 14px rgba(0,0,0,0.3)",
+      pointerEvents: "none",
+      zIndex: "5",
+      display: "none",
+      // The editor's canvas is transparent wherever nothing is painted, so the
+      // loupe has to supply the backdrop the page would have shown through it.
+      background: this.backdropColor(),
+    });
+    el.setAttribute("aria-hidden", "true");
+    const canvas = document.createElement("canvas");
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.round(LOUPE_WIDTH * dpr);
+    canvas.height = Math.round(LOUPE_HEIGHT * dpr);
+    canvas.style.width = `${LOUPE_WIDTH}px`;
+    canvas.style.height = `${LOUPE_HEIGHT}px`;
+    el.appendChild(canvas);
+    this.stack.appendChild(el);
+    this.loupe = { el, canvas };
+    return this.loupe;
+  }
+
   /** Lazily build the two selection-handle overlays (touch only). */
   private ensureHandles(): { from: HTMLElement; to: HTMLElement } {
     if (this.selHandles) return this.selHandles;
@@ -3674,6 +4153,9 @@ export class CanvasEditor {
           const { x, y } = this.eventToDocCoords(t);
           const hit = this.clickToPos(this.lastLayouts, x, y);
           if (hit) this.dragSelectionEnd(which, hit.pos);
+          // The handle sits under the fingertip, so the end being dragged is
+          // exactly what's hidden — the loupe matters most here.
+          this.showLoupe({ x, y });
         },
         { signal, passive: false },
       );
@@ -3682,6 +4164,7 @@ export class CanvasEditor {
         (e) => {
           e.preventDefault();
           this.draggingHandle = null;
+          this.showLoupe(null);
           this.textarea.focus({ preventScroll: true });
         },
         { signal, passive: false },

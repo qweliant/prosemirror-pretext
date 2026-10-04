@@ -449,10 +449,11 @@ async function boot(): Promise<void> {
     }
     // ── The board, and the document's frame on it ──
     // Freeze the shell's width in px before measuring anything inside it. The
-    // stylesheet declares it in vw so it fills the screen, but a CanvasEditor is
-    // sized once at construction and has no `setWidth`, so a shell that later
-    // shrank with the window would clip the canvas it contains. Frozen, the two
-    // can only ever disagree by the shell not growing — which is invisible.
+    // stylesheet declares it in vw so it fills the screen; freezing keeps the
+    // board's seeded frame coordinates — which are laid out once, in board
+    // space — agreeing with the surface they sit on. (The editor itself could
+    // follow a live width now that `setWidth` exists; the frames are what would
+    // need re-seeding.)
     const shell = document.querySelector('.board-shell') as HTMLElement
     const shellW = Math.round(Math.min(1800, window.innerWidth * 0.96))
     shell.style.width = `${shellW}px`
@@ -460,8 +461,7 @@ async function boot(): Promise<void> {
 
     const boardEl = document.getElementById('board')!
     // Height gets the same treatment: a board is a workspace, not a 560px strip,
-    // so it takes most of the window. Frozen for the same reason as the width —
-    // the editor's scroller is capped at construction and cannot follow.
+    // so it takes most of the window, and is frozen for the same reason.
     //
     // The -60 pays for the shell's own chrome (title bar, two toolbars, status
     // line) so the whole board still lands above the fold rather than running

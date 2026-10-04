@@ -22,6 +22,53 @@
   it. Neighbouring pieces are shaped independently — kerning does not carry
   across a cut — which is inherent to splitting a run and already true of marks.
 
+- **`setWidth(px)` re-lays the document into a different content column.** Width
+  was fixed at construction, which made the editor the one part of a responsive
+  layout that couldn't respond — hosts had to freeze their own dimensions to
+  whatever the editor was built with, or clip it. The per-block layout cache
+  already recorded the width each block was assembled at, so it needed no help;
+  the *positional* cache and `lastLayouts` did, since both hand back absolute
+  geometry by node identity, and are now dropped on a resize.
+
+- **A magnifier loupe, and double/triple-tap selection, on touch.** A fingertip
+  covers the very text it is aiming at, so placing or extending a selection now
+  raises a magnifier above the touch. The magnified image is blitted straight
+  off the editor's own canvas with `drawImage` — the text is already rendered
+  pixels, so there is nothing to lay out or re-paint, one copy per touchmove,
+  and the loupe agrees with the screen exactly, selection bands and decorations
+  included. It appears for a long-press and while dragging either selection
+  handle, which is where the finger hides the thing being aimed at.
+
+  Tapping twice selects the word and three times selects the block, the touch
+  counterpart of double- and triple-click. Slop matters more than it does for a
+  mouse: a finger never lands twice in the same pixel, so taps within 24px and
+  320ms count as the same run, and a swipe in between breaks it.
+
+- **Dragging a text selection**, including out to another application. The
+  selection now starts a real HTML5 drag, which is the only mechanism that can
+  hand content to Finder, a mail client, or another tab — a pointer gesture
+  cannot. It carries both `text/plain` and `text/html` (through the schema's own
+  `toDOM`, so marks and structure survive), moves by default and copies with
+  Alt, and when another application takes it as a move the source is removed on
+  `dragend`. A drop back inside the editor is a document move rather than a
+  paste of its own serialization: one undo step, and no round-trip through HTML.
+
+  A press inside the selection no longer collapses it immediately — it may be
+  the beginning of a drag, so the caret only moves once the press turns out to
+  be an ordinary click. That press is also the one the editor no longer
+  `preventDefault`s, since suppressing the default on mousedown stops the
+  browser from ever starting a drag; the stack is `user-select: none` instead,
+  so the browser doesn't begin selecting the accessibility mirror's text
+  underneath. Copy is unaffected — it is served by the textarea's own handler,
+  never by a DOM selection.
+
+- **Edge auto-scroll while dragging.** A drag that reaches the top or bottom of
+  a `maxHeight` scroller now pulls the view along, with speed ramping by how far
+  into the band the pointer is, and the drop indicator re-resolving against the
+  document moving underneath it. Without this a drag could only reach as far as
+  the viewport already showed, which on a virtualized document is very little of
+  it. Applies to both node drags and drags arriving from outside.
+
 - **The editor is scale-aware, so it edits correctly under a CSS transform.**
   Put it on a zooming surface — a board, a slide canvas, a zoomed-out overview
   — and clicks land on the character you aimed at, `coordsAtPos` reports real
@@ -137,9 +184,11 @@
   - New: `dragDrop` and `dropIndicatorColor` options; `dragStart`, `drop`, and
     `dropFiles` handlers.
 
-  Not yet: dragging content *out* to another application (that needs native
-  HTML5 drag, which excludes touch), dragging a text selection, and edge
-  auto-scroll inside a `maxHeight` scroller.
+  All three of this entry's original gaps — dragging content *out* to another
+  application, dragging a text selection, and edge auto-scroll — landed later in
+  this same cycle, on native HTML5 drag; see the entries above. Node moves stay
+  on the pointer path, so they keep working on touch, which native drag does not
+  reach.
 
 ### Fixed
 
@@ -147,17 +196,27 @@
   canvas is now `TEXT_BLEED` (6px) wider than the content column, and a
   `maxHeight` scroller reserves that strip alongside the scrollbar gutter.
 
-  Pretext breaks lines on its own metrics; the editor then re-measures every run
-  with `measureText` to place it. The two agree closely but not exactly, so a
-  line occasionally paints ~3px wider than the column it was broken to — and a
-  canvas sized to exactly the column guillotines the final letter of those
-  lines. In the demo document that was 2 lines in 42, on both a float slot and a
-  full-width paragraph, each visibly chopped.
+  Pretext lays marked text out as styled runs and trims the whitespace between
+  them into a gap it reserves on its own terms. The editor re-expands that
+  whitespace so every space stays an editable character, appends it to the
+  preceding run, and re-measures it in *that* run's font — and a space in
+  Georgia is not the same width as the same space in its italic. Each mark
+  boundary on a line contributes a fraction of a pixel, and a line crossing
+  several of them accumulates enough to overrun the width it was broken to. A
+  canvas sized to exactly the column then guillotines the final glyph.
 
-  This is a mitigation, not a diagnosis: the strip is transparent, layout still
-  wraps to the content width, and selection, inline-decoration, and node-
-  decoration rects all still stop there. The measurement disagreement itself is
-  still worth tracking down to whichever side is wrong.
+  Swept across 61 wrap widths of the demo document (2,248 laid-out lines): 5
+  lines overran with real glyphs, worst case 5.1px, every one a marked line
+  crossing a mark boundary. 47 more overran by trailing whitespace only, which
+  paints nothing, and no single-font line ever overran. 6px covers the measured
+  worst case with room to spare.
+
+  This is a mitigation, and the strip is transparent — layout still wraps to the
+  content width, and every painted rect still stops there. The honest fix is to
+  stop re-expanding whitespace into the painted text (CSS `white-space: normal`
+  renders a double space as one and still lets the caret walk both), but that is
+  the most caret-test-dependent code in the repo and `prepareRichInline` offers
+  no `pre-wrap` option to hand the problem back to.
 
 - **The caret is drawn only while the editor has focus**, and the blink timer
   stops re-rendering a blurred editor. A stray caret in an unfocused editor

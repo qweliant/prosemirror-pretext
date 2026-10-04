@@ -264,9 +264,38 @@ same schema-aware paste path) when no handler claims them; file drops with no
 `dropFiles` handler are ignored rather than guessed at. Read-only editors reject
 both drops and node drags.
 
-Not yet: dragging content *out* of the editor into another application (that
-needs native HTML5 drag, which excludes touch), dragging a text selection, and
-auto-scrolling when a drag reaches the edge of a `maxHeight` scroller.
+**Dragging a text selection.** Press inside the selection and drag, and the
+text comes with you: it moves by default, copies with Alt, and a drop back
+inside the editor is a document *move* rather than a paste of its own
+serialization — one undo step, and no round-trip through HTML.
+
+That one gesture runs on **native HTML5 drag** rather than pointer events,
+because native drag is the only mechanism that can hand content *out* of the
+page at all — a pointer gesture can never reach Finder, a mail client, or
+another tab. It carries both `text/plain` and `text/html` (serialized through
+the schema's own `toDOM`, so marks and block structure survive), and when
+another application takes it as a move, this side removes the source on
+`dragend`. A read-only editor can still be dragged *from*, as a copy only, so
+nothing downstream can report back a move it would have to honour by deleting.
+
+The trade-off is that native drag never fires on touch, so this is the one drag
+gesture that is mouse/pen only; node moves stay on the pointer path and work
+everywhere. It also costs one suppression: `preventDefault()` on `mousedown`
+stops the browser from ever *starting* a drag, so a press inside the selection
+is the one press the editor leaves alone, and the caret only moves once that
+press turns out to be an ordinary click. The stack carries `user-select: none`
+so the browser doesn't start selecting the accessibility mirror's text
+underneath instead — copy is unaffected, being served by the hidden textarea's
+own handler and never by a DOM selection. A node view opts back in with
+`user-select: text`, since its DOM is yours and may hold a code snippet or a
+caption worth selecting.
+
+**Edge auto-scroll.** A drag that reaches the top or bottom of a `maxHeight`
+scroller pulls the view along, with speed ramping by how far into the band the
+pointer is, and the drop indicator re-resolving against the document moving
+underneath it. Without it a drag could only reach as far as the viewport
+already showed — on a virtualized document, very little of it. Node drags,
+selection drags, and drags arriving from outside all get it.
 
 ## Selection-anchored UI (bubble menus)
 
@@ -332,9 +361,12 @@ flush the hidden DOM mirror.
 
 ```bash
 bun install
-bun run dev          # → redirects to the same demo, served from the repo root
-bun run dev:site     # the kawaii docs site with the live editor (site/)
+bun run dev          # the demo, at http://localhost:5173/prosemirror-pretext/
+bun run dev:site     # the same thing — an alias kept for muscle memory
 ```
+
+Both commands are identical, and both print the URL. The base path matches the
+GitHub Pages one so the dev server and the deployed site can't drift.
 
 There is one demo, in `site/`: the landing page, an interactive node view,
 decorations, the screen-reader mirror, and a scroll-virtualization lab that
@@ -361,6 +393,20 @@ single call — see below.
 
 Mounting more than one editor on a page: pass `autofocus: false` to all but one,
 or the last one mounted takes focus.
+
+## Resizing
+
+`options.width` sets the content column at construction; `setWidth(px)` changes
+it afterwards and re-lays the document:
+
+```ts
+editor.setWidth(720)          // re-wraps into a 720px column
+editor.width                  // 720
+```
+
+Wire it to a `ResizeObserver` on your container and the editor is as responsive
+as anything else on the page. Setting the width it already has is a no-op, so
+firing it on every observer callback is fine.
 
 ## Zoom (editing under a CSS transform)
 
@@ -451,8 +497,8 @@ editor needs to implement.
 ### Input
 
 - [x] **Rich paste** — `text/html` parsed through the schema's `parseDOM` rules (marks/headings/blocks survive); plain text splits blank lines into paragraphs
-- [x] **Touch input (mobile)** — tap places the caret and raises the keyboard; long-press selects a word and shows draggable **selection handles** (drag to extend); swipe scrolls natively (`touch-action: pan-y`); the caret is kept above the on-screen keyboard (`visualViewport`-aware). Mouse/touch/pen are unified. Not yet: an iOS-style magnifier loupe, double/triple-tap selection
-- [x] **Drag & drop** — drag a block/atom node to a new place in the document (pointer-based, so mouse/touch/pen share one path), with a drop indicator painted in the seam it will land in; the move is one undoable transaction. Drops from outside (OS files, other tabs) arrive as `handlers.drop` / `handlers.dropFiles`; text/HTML drops insert where they land. Not yet: dragging content *out* of the editor to another app, dragging a text selection, and edge auto-scroll
+- [x] **Touch input (mobile)** — tap places the caret and raises the keyboard; **double-tap selects the word, triple-tap the block**; long-press selects a word and shows draggable **selection handles** (drag to extend); swipe scrolls natively (`touch-action: pan-y`); the caret is kept above the on-screen keyboard (`visualViewport`-aware). A **magnifier loupe** rises above the finger while selecting or dragging a handle, blitted straight off the editor's canvas with `drawImage` — no re-layout, and it matches the screen exactly. Mouse/touch/pen are unified
+- [x] **Drag & drop** — drag a block/atom node to a new place in the document (pointer-based, so mouse/touch/pen share one path), with a drop indicator painted in the seam it will land in; the move is one undoable transaction. **Drag a text selection** too: that one runs on native HTML5 drag, since it's the only mechanism that can hand content *out* to another application — it carries `text/plain` + `text/html` through the schema's `toDOM`, moves by default, copies with Alt, and drops back inside as a document move rather than a paste of its own serialization. Drops from outside (OS files, other tabs) arrive as `handlers.drop` / `handlers.dropFiles`. **Edge auto-scroll** pulls a `maxHeight` scroller along when a drag reaches its top or bottom, re-resolving the drop indicator as the document moves underneath
 
 ## Architecture
 

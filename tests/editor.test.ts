@@ -2000,6 +2000,111 @@ describe('collaborative cursors (remote carets)', () =>
 })
 
 
+describe('setWidth (re-laying into a new content column)', () =>
+{
+    function ed(text: string, opts: any = {}): CanvasEditor
+    {
+        const doc = schema.node('doc', null, [
+            schema.node('paragraph', null, [schema.text(text)]),
+        ])
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        return new CanvasEditor({
+            state: EditorState.create({ doc, schema }), container,
+            autofocus: false, ...opts,
+        })
+    }
+
+    test('re-lays the document at the new width', () =>
+    {
+        // A centred line sits at (column - text) / 2, so its x is a direct
+        // readout of the width layout actually used. 'hello' is 40px in the mock.
+        const doc = schema.node('doc', null, [
+            schema.node('paragraph', { align: 'center' }, [schema.text('hello')]),
+        ])
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        const e = new CanvasEditor({
+            state: EditorState.create({ doc, schema }), container,
+            autofocus: false, width: 400,
+        })
+        ;(e as any).ensureLayout()
+        expect((e as any).lastLayouts[0].lines[0].x).toBe(180)
+
+        e.setWidth(240)
+        ;(e as any).ensureLayout()
+        expect((e as any).lastLayouts[0].lines[0].x).toBe(100)
+        e.destroy()
+    })
+
+    test('the per-block cache is re-keyed to the new width', () =>
+    {
+        const e = ed('hello', { width: 400 })
+        ;(e as any).ensureLayout()
+        const node = e.state.doc.firstChild!
+        expect((e as any).layoutCache.get(node).width).toBe(400)
+        e.setWidth(240)
+        ;(e as any).ensureLayout()
+        expect((e as any).layoutCache.get(node).width).toBe(240)
+        e.destroy()
+    })
+
+    test('reports the new width, and coordinates follow it', () =>
+    {
+        const e = ed('hello', { width: 400 })
+        expect(e.width).toBe(400)
+        e.setWidth(220)
+        expect(e.width).toBe(220)
+        // Painting is sized off the new column, not the old one.
+        const { rects } = recordPaint(e)
+        expect((e as any).canvas.style.width).toBe(`${220 + TEXT_BLEED}px`)
+        expect(rects.every((r) => r.w <= 220 + TEXT_BLEED)).toBe(true)
+        e.destroy()
+    })
+
+    test('drops the positional cache, so blocks are not reused at stale x', () =>
+    {
+        const e = ed('hello', { width: 400 })
+        ;(e as any).ensureLayout()
+        const cacheBefore = (e as any).positionedCache
+        e.setWidth(300)
+        expect((e as any).positionedCache).not.toBe(cacheBefore)
+        e.destroy()
+    })
+
+    test('a scroller is re-sized along with the canvas', () =>
+    {
+        const e = ed('hello', { width: 400, maxHeight: 100 })
+        expect((e as any).scroller.style.width).toBe(`${400 + TEXT_BLEED}px`)
+        e.setWidth(250)
+        expect((e as any).scroller.style.width).toBe(`${250 + TEXT_BLEED}px`)
+        e.destroy()
+    })
+
+    test('setting the same width is a no-op', () =>
+    {
+        const e = ed('hello', { width: 400 })
+        ;(e as any).ensureLayout()
+        const cache = (e as any).positionedCache
+        e.setWidth(400)
+        expect((e as any).positionedCache).toBe(cache)
+        e.destroy()
+    })
+
+    test('the caret still maps correctly after a resize', () =>
+    {
+        const e = ed('hello world', { width: 400 })
+        e.setWidth(240)
+        ;(e as any).ensureLayout()
+        // Offset 3 is 24px in, whatever the column width, while it stays on
+        // line one — the resize must not leave a stale coordinate cache behind.
+        expect(e.coordsAtPos(4)!.x).toBe(24)
+        expect(e.posAtCoords({ left: 24, top: 5 })!.pos).toBe(4)
+        e.destroy()
+    })
+})
+
+
 describe('display scale (editing under a CSS transform)', () =>
 {
     // The canvas's own layout size. A client rect of 2x this means 2x zoom.
@@ -3018,6 +3123,117 @@ describe('touch input (mobile)', () =>
         expect(h!.from.style.display).toBe('none')
         ed.destroy()
     })
+
+    // ── Multi-tap ────────────────────────────────────────────────────
+
+    /** Register a tap at (x, y) as the touch handler would. */
+    function tapAt(ed: CanvasEditor, x: number, y: number): boolean
+    {
+        ;(ed as any).touchStartX = x
+        ;(ed as any).touchStartY = y
+        return (ed as any).registerTap()
+    }
+
+    test('a lone tap is a first tap; a quick one beside it is a follow-up', () =>
+    {
+        const { ed } = makeEditor(['hello world'])
+        expect(tapAt(ed, 18, 13)).toBe(false)
+        expect((ed as any).tapCount).toBe(1)
+        // A finger never lands twice in the same pixel, so near counts as same.
+        expect(tapAt(ed, 22, 16)).toBe(true)
+        expect((ed as any).tapCount).toBe(2)
+        expect(tapAt(ed, 20, 14)).toBe(true)
+        expect((ed as any).tapCount).toBe(3)
+        ed.destroy()
+    })
+
+    test('a tap far away starts a new run', () =>
+    {
+        const { ed } = makeEditor(['hello world'])
+        tapAt(ed, 18, 13)
+        expect(tapAt(ed, 200, 13)).toBe(false)
+        expect((ed as any).tapCount).toBe(1)
+        ed.destroy()
+    })
+
+    test('a slow second tap starts a new run', () =>
+    {
+        const { ed } = makeEditor(['hello world'])
+        tapAt(ed, 18, 13)
+        ;(ed as any).lastTapTime = Date.now() - 5000
+        expect(tapAt(ed, 18, 13)).toBe(false)
+        ed.destroy()
+    })
+
+    test('double tap selects the word, triple selects the block', () =>
+    {
+        const { ed } = makeEditor(['hello world'])
+        ;(ed as any).tapCount = 2
+        expect((ed as any).selectForTapCount(3)).toBe(true)
+        let sel = ed.state.selection
+        expect(ed.state.doc.textBetween(sel.from, sel.to)).toBe('hello')
+
+        ;(ed as any).tapCount = 3
+        expect((ed as any).selectForTapCount(3)).toBe(true)
+        sel = ed.state.selection
+        expect(ed.state.doc.textBetween(sel.from, sel.to)).toBe('hello world')
+        ed.destroy()
+    })
+
+    test('a multi-tap on an empty block selects nothing', () =>
+    {
+        const { ed } = makeEditor([''])
+        ;(ed as any).tapCount = 3
+        expect((ed as any).selectForTapCount(1)).toBe(false)
+        ed.destroy()
+    })
+
+    // ── Magnifier loupe ──────────────────────────────────────────────
+
+    test('the loupe shows over the touch, lifted clear of the fingertip', () =>
+    {
+        const { ed } = makeEditor(['hello world'])
+        ;(ed as any).showLoupe({ x: 200, y: 100 })
+        const el = (ed as any).loupe.el as HTMLElement
+        expect(el.style.display).toBe('')
+        expect(el.style.left).toBe('200px')
+        expect(el.style.top).toBe('24px') // 100 - LOUPE_LIFT
+        expect(el.style.pointerEvents).toBe('none')
+        ed.destroy()
+    })
+
+    test('near the top it drops below the touch rather than off the edge', () =>
+    {
+        const { ed } = makeEditor(['hello world'])
+        // A touch on the first line has no room for a loupe above it.
+        ;(ed as any).showLoupe({ x: 200, y: 10 })
+        const el = (ed as any).loupe.el as HTMLElement
+        expect(el.style.top).toBe('40px') // 10 + LOUPE_DROP
+        expect(parseFloat(el.style.top)).toBeGreaterThan(0)
+        ed.destroy()
+    })
+
+    test('the loupe is kept inside the content column at the edges', () =>
+    {
+        const { ed } = makeEditor(['hello world'])
+        ;(ed as any).showLoupe({ x: 4, y: 100 })
+        expect(((ed as any).loupe.el as HTMLElement).style.left).toBe('56px')
+        ;(ed as any).showLoupe({ x: 900, y: 100 })
+        expect(((ed as any).loupe.el as HTMLElement).style.left).toBe('404px')
+        ed.destroy()
+    })
+
+    test('the loupe hides again, and is built only once', () =>
+    {
+        const { ed } = makeEditor(['hello world'])
+        ;(ed as any).showLoupe({ x: 100, y: 100 })
+        const first = (ed as any).loupe.el
+        ;(ed as any).showLoupe({ x: 120, y: 100 })
+        expect((ed as any).loupe.el).toBe(first)
+        ;(ed as any).showLoupe(null)
+        expect((first as HTMLElement).style.display).toBe('none')
+        ed.destroy()
+    })
 })
 
 
@@ -3360,6 +3576,297 @@ describe('drag & drop', () =>
         ;(ed as any).stack.dispatchEvent(dragEvent('drop', 16, 13, { 'text/plain': 'ZZ' }))
         expect(ed.state.doc).toBe(before)
         ed.destroy()
+    })
+})
+
+
+describe('drag & drop: text selections, drag-out, edge auto-scroll', () =>
+{
+    function ed(text = 'hello world', opts: any = {}): CanvasEditor
+    {
+        const doc = schema.node('doc', null, [
+            schema.node('paragraph', null, [schema.text(text)]),
+        ])
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        const e = new CanvasEditor({
+            state: EditorState.create({ doc, schema, plugins: [history()] }),
+            container, autofocus: false, ...opts,
+        })
+        ;(e as any).canvas.getBoundingClientRect = () => ({ left: 0, top: 0 })
+        return e
+    }
+
+    /** A DragEvent stand-in that records what gets written to its dataTransfer. */
+    function dragEvent(type: string, x: number, y: number, opts: any = {}): any
+    {
+        const store: Record<string, string> = {}
+        const e: any = new Event(type, { bubbles: true, cancelable: true })
+        Object.assign(e, {
+            clientX: x, clientY: y, altKey: !!opts.altKey,
+            dataTransfer: {
+                setData: (t: string, v: string) => { store[t] = v },
+                getData: (t: string) => store[t] ?? '',
+                files: [],
+                dropEffect: opts.dropEffect ?? 'none',
+                effectAllowed: 'none',
+            },
+        })
+        e.written = store
+        return e
+    }
+
+    const mouse = (type: string, x: number, y: number) =>
+        new MouseEvent(type, {
+            bubbles: true, cancelable: true, button: 0, clientX: x, clientY: y,
+        })
+
+    /** Select a range and press inside it — the state every drag starts from. */
+    function pressInside(e: CanvasEditor, from: number, to: number, x = 16): void
+    {
+        e.dispatch(e.state.tr.setSelection(
+            TextSelection.create(e.state.doc, from, to),
+        ))
+        ;(e as any).canvas.dispatchEvent(mouse('mousedown', x, 5))
+    }
+
+    // ── Dragging a text selection ────────────────────────────────────
+
+    test('a press inside the selection arms a drag rather than collapsing it', () =>
+    {
+        const e = ed()
+        pressInside(e, 1, 6)
+        expect(e.state.selection.from).toBe(1)
+        expect(e.state.selection.to).toBe(6)
+        expect((e as any).stack.draggable).toBe(true)
+        e.destroy()
+    })
+
+    test('that press is left un-defaultPrevented, or no drag can ever start', () =>
+    {
+        // The regression this guards: `preventDefault()` on mousedown also stops
+        // the browser from *starting* a native drag, so suppressing it here
+        // would silently kill dragging out to another application — while every
+        // test that dispatches `dragstart` by hand still passed.
+        const e = ed()
+        e.dispatch(e.state.tr.setSelection(
+            TextSelection.create(e.state.doc, 1, 6),
+        ))
+        const inside = mouse('mousedown', 16, 5)
+        ;(e as any).canvas.dispatchEvent(inside)
+        expect(inside.defaultPrevented).toBe(false)
+
+        // Everywhere else the default is still suppressed, as it always was.
+        const outside = mouse('mousedown', 72, 5)
+        ;(e as any).canvas.dispatchEvent(outside)
+        expect(outside.defaultPrevented).toBe(true)
+        e.destroy()
+    })
+
+    test('a modifier press inside the selection is not a drag', () =>
+    {
+        // Shift extends and Cmd follows a link; both must keep working, so
+        // neither may be swallowed by the drag-arming branch.
+        const e = ed()
+        e.dispatch(e.state.tr.setSelection(
+            TextSelection.create(e.state.doc, 1, 6),
+        ))
+        const shift = new MouseEvent('mousedown', {
+            bubbles: true, cancelable: true, button: 0,
+            clientX: 16, clientY: 5, shiftKey: true,
+        })
+        ;(e as any).canvas.dispatchEvent(shift)
+        expect(shift.defaultPrevented).toBe(true)
+        expect((e as any).pressInSelection).toBeNull()
+        e.destroy()
+    })
+
+    test('DOM text selection is off, since the press is no longer suppressed', () =>
+    {
+        const e = ed()
+        expect((e as any).stack.style.userSelect).toBe('none')
+        e.destroy()
+    })
+
+    test('but a node view opts back in — its DOM is the consumer\'s', () =>
+    {
+        const doc = schema.node('doc', null, [
+            schema.node('paragraph', null, [schema.text('hi')]),
+            schema.node('widget'),
+        ])
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        const e = new CanvasEditor({
+            state: EditorState.create({ doc, schema }),
+            container, autofocus: false,
+            nodeViews: {
+                widget: () => {
+                    const el = document.createElement('div')
+                    el.textContent = 'selectable caption'
+                    return el
+                },
+            },
+        })
+        const view = [...(e as any).mountedViews.values()][0] as any
+        expect(view.dom.style.userSelect).toBe('text')
+        e.destroy()
+    })
+
+    test('a read-only editor can still be dragged from, as a copy only', () =>
+    {
+        const e = ed()
+        e.setEditable(false)
+        pressInside(e, 1, 6)
+        const ds = dragEvent('dragstart', 16, 5)
+        ;(e as any).stack.dispatchEvent(ds)
+        expect(ds.written['text/plain']).toBe('hello')
+        expect(ds.dataTransfer.effectAllowed).toBe('copy')
+        // And a "move" reported back must not delete from a read-only document.
+        ;(e as any).stack.dispatchEvent(
+            dragEvent('dragend', 0, 0, { dropEffect: 'move' }),
+        )
+        expect(e.state.doc.textContent).toBe('hello world')
+        e.destroy()
+    })
+
+    test('a press inside the selection that never drags is just a click', () =>
+    {
+        const e = ed()
+        pressInside(e, 1, 6)
+        window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
+        expect(e.state.selection.empty).toBe(true)
+        expect(e.state.selection.head).toBe(3) // x 16 → offset 2
+        expect((e as any).stack.draggable).toBe(false)
+        e.destroy()
+    })
+
+    test('a press outside the selection still moves the caret immediately', () =>
+    {
+        const e = ed()
+        e.dispatch(e.state.tr.setSelection(TextSelection.create(e.state.doc, 1, 6)))
+        ;(e as any).canvas.dispatchEvent(mouse('mousedown', 72, 5))
+        expect(e.state.selection.empty).toBe(true)
+        // Never armed at all, so the property is left untouched.
+        expect((e as any).stack.draggable).toBeFalsy()
+        e.destroy()
+    })
+
+    test('dragstart offers the selection as both text and html', () =>
+    {
+        const e = ed()
+        pressInside(e, 1, 6)
+        const ds = dragEvent('dragstart', 16, 5)
+        ;(e as any).stack.dispatchEvent(ds)
+        expect(ds.written['text/plain']).toBe('hello')
+        expect(ds.written['text/html']).toContain('hello')
+        expect(ds.dataTransfer.effectAllowed).toBe('copyMove')
+        e.destroy()
+    })
+
+    test('dropping back inside moves the text, as one undo step', () =>
+    {
+        const e = ed()
+        pressInside(e, 1, 6)
+        ;(e as any).stack.dispatchEvent(dragEvent('dragstart', 16, 5))
+        ;(e as any).stack.dispatchEvent(dragEvent('drop', 88, 5))
+        expect(e.state.doc.textContent).toBe(' worldhello')
+        e.command(undo)
+        expect(e.state.doc.textContent).toBe('hello world')
+        e.destroy()
+    })
+
+    test('dropping inside the dragged range does nothing', () =>
+    {
+        const e = ed()
+        pressInside(e, 1, 6)
+        ;(e as any).stack.dispatchEvent(dragEvent('dragstart', 16, 5))
+        ;(e as any).stack.dispatchEvent(dragEvent('drop', 24, 5))
+        expect(e.state.doc.textContent).toBe('hello world')
+        e.destroy()
+    })
+
+    test('Alt turns the move into a copy', () =>
+    {
+        const e = ed()
+        pressInside(e, 1, 6)
+        ;(e as any).stack.dispatchEvent(dragEvent('dragstart', 16, 5))
+        ;(e as any).stack.dispatchEvent(dragEvent('drop', 88, 5, { altKey: true }))
+        expect(e.state.doc.textContent).toBe('hello worldhello')
+        e.destroy()
+    })
+
+    // ── Dragging out to another application ──────────────────────────
+
+    test('another application taking it as a move removes the source', () =>
+    {
+        const e = ed()
+        pressInside(e, 1, 6)
+        ;(e as any).stack.dispatchEvent(dragEvent('dragstart', 16, 5))
+        ;(e as any).stack.dispatchEvent(dragEvent('dragend', 0, 0, { dropEffect: 'move' }))
+        expect(e.state.doc.textContent).toBe(' world')
+        e.destroy()
+    })
+
+    test('a copy elsewhere, or a cancelled drag, leaves the document alone', () =>
+    {
+        for (const dropEffect of ['copy', 'none']) {
+            const e = ed()
+            pressInside(e, 1, 6)
+            ;(e as any).stack.dispatchEvent(dragEvent('dragstart', 16, 5))
+            ;(e as any).stack.dispatchEvent(dragEvent('dragend', 0, 0, { dropEffect }))
+            expect(e.state.doc.textContent).toBe('hello world')
+            e.destroy()
+        }
+    })
+
+    test('a drop handled here is not also deleted by the dragend', () =>
+    {
+        const e = ed()
+        pressInside(e, 1, 6)
+        ;(e as any).stack.dispatchEvent(dragEvent('dragstart', 16, 5))
+        ;(e as any).stack.dispatchEvent(dragEvent('drop', 88, 5))
+        ;(e as any).stack.dispatchEvent(dragEvent('dragend', 0, 0, { dropEffect: 'move' }))
+        expect(e.state.doc.textContent).toBe(' worldhello')
+        e.destroy()
+    })
+
+    // ── Edge auto-scroll ─────────────────────────────────────────────
+
+    test('a drag near an edge scrolls, and the middle does not', () =>
+    {
+        const e = ed('hello world', { maxHeight: 200 })
+        ;(e as any).scroller.getBoundingClientRect =
+            () => ({ top: 0, bottom: 200, height: 200 })
+        const dy = (clientY: number) => {
+            ;(e as any).updateAutoScroll(0, clientY)
+            return (e as any).autoScrollDy
+        }
+        expect(dy(196)).toBeGreaterThan(0)   // near the bottom → scroll down
+        expect(dy(4)).toBeLessThan(0)        // near the top → scroll up
+        expect(dy(100)).toBe(0)              // middle → still
+        // Deeper into the band is faster than its edge.
+        expect(Math.abs(dy(199))).toBeGreaterThan(Math.abs(dy(180)))
+        e.destroy()
+    })
+
+    test('without a scroller there is nothing to auto-scroll', () =>
+    {
+        const e = ed()
+        ;(e as any).updateAutoScroll(0, 0)
+        expect((e as any).autoScrollDy).toBe(0)
+        e.destroy()
+    })
+
+    test('the auto-scroll loop is stopped when a node drag is cancelled', () =>
+    {
+        const e = ed('hello world', { maxHeight: 200 })
+        ;(e as any).scroller.getBoundingClientRect =
+            () => ({ top: 0, bottom: 200, height: 200 })
+        ;(e as any).updateAutoScroll(0, 199)
+        expect((e as any).autoScrollDy).not.toBe(0)
+        ;(e as any).cancelNodeDrag()
+        expect((e as any).autoScrollDy).toBe(0)
+        e.destroy()
     })
 })
 

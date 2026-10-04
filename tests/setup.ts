@@ -20,6 +20,8 @@ GlobalRegistrator.register()
         clearRect() {},
         fillRect() {},
         fillText() {},
+        // The magnifier blits from the editor's canvas into its own.
+        drawImage() {},
         measureText(s: string)
         {
             return { width: s.length * 8 }
