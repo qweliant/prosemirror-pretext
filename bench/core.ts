@@ -146,7 +146,14 @@ function summarize(samples: number[]): Stats {
 /**
  * Run `keystrokes` insertions at `caretPos`, timing the synchronous cost of
  * `type → sync → (optionally) readCaret` per keystroke. `readCaret: true` is the
- * realistic "editor with caret-positioned UI" case (the kill shot).
+ * realistic "editor with caret-positioned UI" case.
+ *
+ * These scenarios run at one document size, and at that size the two view
+ * layers are level — the browser's incremental layout is very good, and the
+ * read-after-write tax is small when there is little to re-lay. The
+ * architectural difference is a function of document size, not of reading the
+ * caret, so it is `sweep()` that shows it: flat against linear from 200 blocks
+ * to 8,000. Don't read these four rows as the headline.
  */
 export function measure(
     adapter: EditorAdapter,

@@ -52,33 +52,31 @@ export const MIN_COL_WIDTH = 32
 /**
  * Canvas width beyond the content column, in px.
  *
- * Marked lines can paint a little wider than the width they were broken to, and
- * a canvas sized to exactly the column guillotines the last glyph when they do.
- * This strip is transparent and nothing is *placed* in it: layout still wraps to
- * the content width, and selection, inline-decoration, and node-decoration rects
- * all still stop there. It exists only so a hair of overrun is drawn, not cut.
+ * Insurance, now that the overrun it was built for is fixed at the source.
  *
- * Where the overrun comes from — measured, not guessed. Pretext lays marked text
- * out as styled runs and trims the whitespace between them into a `gapBefore` it
- * reserves on its own terms. The editor re-expands that whitespace so every
- * space stays an editable character, appends it to the *preceding* run, and
- * re-measures with `measureText` in that run's font. A space in Georgia and the
- * same space in its italic are not the same width, so each mark boundary on a
- * line contributes a fraction of a pixel, and a line crossing several of them
- * accumulates a few.
+ * The history is worth keeping, because the strip is the reason the bug was
+ * survivable. Pretext lays marked text out as styled runs and trims the
+ * whitespace between them into a `gapBefore` it reserves on its own terms. The
+ * editor re-expands that whitespace so every space stays an editable
+ * character, and it used to *re-measure* it in the preceding run's font —
+ * answering a slightly different question than the engine had, once per mark
+ * boundary, cumulatively. Every later fragment on the line was pushed right by
+ * the running error, so a line crossing several boundaries painted past the
+ * width it was broken to, and a canvas sized to exactly the column guillotined
+ * its last glyph.
  *
- * Sweeping the demo document across 61 wrap widths (2,248 laid-out lines):
+ * Across fonts of one family that is hundredths of a pixel. Across a family
+ * switch — an inline `code` span in prose, serif to monospace — a real-browser
+ * sweep measured over 11px, well past this strip. `buildMarkedLine` now
+ * advances by Pretext's own `gapBefore`, so the editor and the engine agree
+ * about where a line ends; the same sweep measures 0.00px of painted overshoot.
+ * `check/` is that sweep, and it runs in CI.
  *
- *   - 5 lines (0.2%) overran with real glyphs, worst case 5.1px, every one of
- *     them a marked line crossing a mark boundary;
- *   - 47 more "overran" by trailing whitespace only, which paints nothing;
- *   - no single-font line ever overran.
- *
- * 6px covers the measured worst case with room to spare. The honest fix is for
- * the editor to stop re-expanding whitespace into the painted text — CSS
- * `white-space: normal` renders a double space as one and still lets the caret
- * walk both — but that is the most caret-test-dependent code in the repo, and
- * `prepareRichInline` has no `pre-wrap` option to hand the problem back to.
+ * The strip stays because it costs nothing — transparent, nothing *placed* in
+ * it, layout still wraps to the content width, and selection, inline-decoration
+ * and node-decoration rects all still stop there — and because glyph side
+ * bearings are a different source of overhang from the one that was fixed. It
+ * is now headroom rather than a mitigation.
  */
 export const TEXT_BLEED = 6
 

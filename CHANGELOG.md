@@ -4,6 +4,59 @@
 
 ### Fixed
 
+- **Lines no longer paint past the column they were broken to — fixed at the
+  source this time.** 0.3.0 widened the canvas by `TEXT_BLEED` (6px) so a hair
+  of overrun was drawn rather than guillotined, and said plainly that this was
+  a mitigation and not a diagnosis. It is now diagnosed.
+
+  Pretext trims the whitespace between styled runs into a `gapBefore` it
+  reserves on its own terms, and it breaks the line to a width that already
+  includes those gaps. The editor re-expands that whitespace so every space
+  stays an editable character — and then re-measured it in the *preceding
+  run's* font, which answers a slightly different question than the engine had
+  asked. The error is per-boundary and cumulative: each later fragment on the
+  line is pushed right by the running total, so a line crossing several mark
+  boundaries ends up painting past its column.
+
+  Across fonts of one family that is hundredths of a pixel, which is why the
+  original sweep of the demo document found a 5.1px worst case and 6px looked
+  like ample cover. Across a *family* switch it is not: an inline `code` span
+  in serif prose measured **over 11px** of painted overshoot, clipping real
+  glyphs well outside the canvas. Inline code in a paragraph is not an exotic
+  document.
+
+  `buildMarkedLine` now advances by Pretext's `gapBefore` instead of
+  re-measuring. The gap text still joins the preceding run, so every space is
+  still a real editable character; only the advance changes, which also makes
+  several collapsed spaces occupy one space's width — exactly what CSS
+  `white-space: normal` does, and what 0.3.0's note named as the honest fix.
+  The same sweep now measures **0.00px** of painted overshoot.
+
+  `TEXT_BLEED` stays at 6px as headroom rather than a mitigation: it costs
+  nothing, and glyph side bearings are a different source of overhang from the
+  one that was fixed.
+
+### Added
+
+- **A real-browser layout gate (`check/`), running in CI.** The unit suite
+  mocks both Pretext and `measureText` (`width = text.length * 8`), which is
+  what makes its coordinate assertions deterministic — and what made it
+  structurally incapable of seeing the bug above. The clipped glyph lived in the
+  seam between this editor's placement arithmetic and the real engine's, and it
+  was found by hand in a browser and never became a test.
+
+  `bun run check:browser` boots the page in a real Chromium, lays a
+  mark-boundary-heavy document out across 61 wrap widths (~5,300 lines), and
+  measures what would actually be painted the way `paintToCanvas` places it —
+  a plain line at `line.x`, a marked line fragment by fragment at
+  `line.x + frag.x`. It asserts an invariant rather than golden numbers: the
+  right edge of the last painted glyph must land inside the canvas. Fonts are
+  deliberately not pinned, so a runner substituting for Georgia changes *which*
+  lines overrun without making an overrun acceptable.
+
+  It is the gate that would have caught the `code`-span clipping, and it did:
+  it failed on first run, with 71 clipped lines.
+
 - **Copying carries marks and structure, not just characters.** `copy` and
   `cut` wrote `text/plain` and nothing else, while a *drag* of the same
   selection wrote `text/html` through the schema's own `toDOM`. So the same

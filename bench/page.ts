@@ -37,7 +37,7 @@ const SCENARIOS: { name: string, docKind: 'simple' | 'complex', readCaret: boole
     { name: 'A · simple, no caret read', docKind: 'simple', readCaret: false },
     { name: 'A · simple, read caret', docKind: 'simple', readCaret: true },
     { name: 'B · complex, no caret read', docKind: 'complex', readCaret: false },
-    { name: 'C · complex, read caret (kill shot)', docKind: 'complex', readCaret: true },
+    { name: 'C · complex, read caret', docKind: 'complex', readCaret: true },
 ]
 
 const stage = () => document.getElementById('stage') as HTMLElement

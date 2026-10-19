@@ -3277,6 +3277,73 @@ describe('drag & drop', () =>
         return e
     }
 
+    // ── startNodeDrag (public, for custom handles) ───────────────────
+
+    test('startNodeDrag arms a drag on a block and reports that it did', () =>
+    {
+        const { ed } = dndEditor()
+        expect(ed.startNodeDrag(7, pointer('pointerdown', { clientX: 10, clientY: 66 }) as PointerEvent)).toBe(true)
+        const drag = (ed as any).nodeDrag
+        expect(drag.from).toBe(7)
+        // Armed but inert: a press is not yet a drag.
+        expect(drag.active).toBe(false)
+        ed.destroy()
+    })
+
+    test('a position that is not a block node is refused', () =>
+    {
+        const { ed } = dndEditor()
+        // 2 is inside the first paragraph's text, not the start of a block.
+        expect(ed.startNodeDrag(2, pointer('pointerdown', { clientX: 10, clientY: 10 }) as PointerEvent)).toBe(false)
+        expect((ed as any).nodeDrag).toBeNull()
+        ed.destroy()
+    })
+
+    test('a read-only editor refuses to start one', () =>
+    {
+        const { ed } = dndEditor({ editable: false })
+        expect(ed.startNodeDrag(7, pointer('pointerdown', { clientX: 10, clientY: 66 }) as PointerEvent)).toBe(false)
+        expect((ed as any).nodeDrag).toBeNull()
+        ed.destroy()
+    })
+
+    test('the dragStart handler can veto it', () =>
+    {
+        const seen: number[] = []
+        const { ed } = dndEditor({
+            handlers: { dragStart: (_e: unknown, pos: number) => { seen.push(pos); return true } },
+        })
+        expect(ed.startNodeDrag(7, pointer('pointerdown', { clientX: 10, clientY: 66 }) as PointerEvent)).toBe(false)
+        expect(seen).toEqual([7])
+        expect((ed as any).nodeDrag).toBeNull()
+        ed.destroy()
+    })
+
+    test('travel past the threshold turns the armed press into a live drag', () =>
+    {
+        const { ed } = dndEditor()
+        ed.startNodeDrag(7, pointer('pointerdown', { clientX: 10, clientY: 66 }) as PointerEvent)
+        // Under the threshold: still a click as far as the editor is concerned.
+        window.dispatchEvent(pointer('pointermove', { clientX: 12, clientY: 68 }))
+        expect((ed as any).nodeDrag.active).toBe(false)
+        window.dispatchEvent(pointer('pointermove', { clientX: 10, clientY: 110 }))
+        expect((ed as any).nodeDrag.active).toBe(true)
+        ed.destroy()
+    })
+
+    test('Escape abandons a drag armed from a custom handle', () =>
+    {
+        const { ed } = dndEditor()
+        ed.startNodeDrag(7, pointer('pointerdown', { clientX: 10, clientY: 66 }) as PointerEvent)
+        window.dispatchEvent(pointer('pointermove', { clientX: 10, clientY: 110 }))
+        expect((ed as any).nodeDrag.active).toBe(true)
+        ;(ed as any).textarea.dispatchEvent(
+            new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+        expect((ed as any).nodeDrag).toBeNull()
+        expect(ed.state.doc.child(1).type.name).toBe('widget')   // stayed put
+        ed.destroy()
+    })
+
     // ── Moving a node ────────────────────────────────────────────────
 
     test('moveNode reorders a block and selects it where it landed', () =>

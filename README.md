@@ -363,6 +363,8 @@ flush the hidden DOM mirror.
 bun install
 bun run dev          # the demo, at http://localhost:5173/prosemirror-pretext/
 bun run dev:site     # the same thing — an alias kept for muscle memory
+bun run check:browser  # real-browser layout gate (needs Chrome; CHROME_PATH to pick one)
+bun run dev:check      # the same sweep, by hand, with a button
 ```
 
 Both commands are identical, and both print the URL. The base path matches the
@@ -537,6 +539,11 @@ Canvas is a pixel buffer, so a naive canvas editor is **invisible to assistive t
 - **No DOM for text.** All text rendering goes through `ctx.fillText()`. No `<p>`, no `<span>`, no contenteditable.
 - **No prosemirror-view.** ProseMirror manages the document model; rendering is entirely ours.
 - **Font must be loaded before layout.** Always `await document.fonts.ready` before creating the editor.
+- **Left-to-right only.** There is no bidi reordering and no direction-aware
+  caret logic: the editor lays runs out in logical order, left to right. Pretext
+  measures and segments Arabic, Hebrew and Thai text correctly, so it is easy to
+  assume the editor inherits that — it doesn't. Mixed-direction text will lay
+  out and edit wrongly, so don't adopt this for RTL content yet.
 - **Pretext is young** (released March 2026). Expect API changes. `system-ui` font causes measurement mismatches on macOS -- use named fonts like Inter.
 
 ## Dependencies

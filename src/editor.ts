@@ -198,7 +198,11 @@ export class CanvasEditor {
   private readonly minSlotWidth = 24;
 
   // ─── State ─────────────────────────────────────────────────────────
-  state: EditorState;
+  // Read-only to consumers: everything downstream of a state change — layout
+  // caches, the caret, the accessibility mirror, the next paint — is arranged
+  // by `dispatch`, so a plain assignment would leave the editor showing a
+  // document it no longer has.
+  private _state: EditorState;
 
   // ─── DOM ───────────────────────────────────────────────────────────
   private readonly container: HTMLElement;
@@ -373,7 +377,7 @@ export class CanvasEditor {
   });
 
   constructor(options: CanvasEditorOptions) {
-    this.state = options.state;
+    this._state = options.state;
     this.container = options.container;
     this.font = options.font ?? "16px Inter";
     this.lineHeight = options.lineHeight ?? 26;
@@ -612,7 +616,7 @@ export class CanvasEditor {
   dispatch(tr: Transaction): void {
     // Read-only: allow selection/navigation transactions, drop edits.
     if (!this.isEditable && tr.docChanged) return;
-    this.state = this.state.apply(tr);
+    this._state = this._state.apply(tr);
     this.layoutDirty = true;
     this.lastInputTime = performance.now();
     this.caretVisible = true;
@@ -755,6 +759,11 @@ export class CanvasEditor {
     this.textarea.readOnly = !value;
     this.textarea.setAttribute("aria-readonly", String(!value));
     this.scheduleRender();
+  }
+
+  /** The current document + selection. Change it with `dispatch`. */
+  get state(): EditorState {
+    return this._state;
   }
 
   /** The content column's width in px — what `options.width` set. */
@@ -1025,6 +1034,12 @@ export class CanvasEditor {
       view.resizeObserver?.disconnect();
     this.mountedViews.clear();
     this.container.innerHTML = "";
+    // Emptying the container detaches these, but the fields went on pointing at
+    // them — so a lazily-built overlay would be handed back already orphaned,
+    // and the nodes themselves stayed reachable from the editor.
+    this.loupe = null;
+    this.selHandles = null;
+    this.mountedWidgets.clear();
   }
 
   // ─── Layout (cache-aware) ──────────────────────────────────────────
@@ -1460,7 +1475,27 @@ export class CanvasEditor {
       if (fragments.length > 0 && pmStart > prevPmEnd) {
         const prev = fragments[fragments.length - 1];
         const gap = ctx.blockText.substring(prevPmEnd, pmStart);
-        const gapWidth = this.measureWidth(gap, prev.font);
+        // Advance by the gap Pretext reserved, not by re-measuring the
+        // whitespace in the previous run's font.
+        //
+        // Pretext broke this line to a width that already includes its own
+        // `gapBefore` for each boundary. Re-measuring the gap in the preceding
+        // run's font answers a slightly different question, and the difference
+        // is per-boundary and cumulative: every later fragment on the line is
+        // pushed right by the running error, so a line crossing several
+        // boundaries paints past the column it was broken to and the canvas
+        // guillotines its last glyph. Across fonts of the same family that is
+        // hundredths of a pixel; across a family switch — a `code` span in
+        // prose, serif to monospace — it was over 11px, far past the 6px
+        // `TEXT_BLEED` meant to absorb it.
+        //
+        // The gap text still joins the previous run, so every space stays a
+        // real editable character. Only the advance changes, which also makes
+        // several collapsed spaces occupy one space's width — what CSS
+        // `white-space: normal` does, and what this was always supposed to be.
+        const gapWidth = f.gapBefore > 0
+          ? f.gapBefore
+          : this.measureWidth(gap, prev.font);
         prev.text += gap;
         prev.width += gapWidth;
         x += gapWidth;

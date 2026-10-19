@@ -34,7 +34,9 @@
     "prepublishOnly": "bun run typecheck && bun test && bun run build",
     "dev:bench": "vite --config vite.bench.config.ts",
     "build:bench": "vite build --config vite.bench.config.ts",
-    "bench": "node bench/run.mjs"
+    "bench": "node bench/run.mjs",
+    "check:browser": "node check/run.mjs",
+    "dev:check": "vite --config vite.check.config.ts"
   },
   "keywords": [
     "prosemirror",

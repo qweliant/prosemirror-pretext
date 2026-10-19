@@ -36,3 +36,14 @@ jobs:
 
       - name: Build docs site
         run: bun run build:site
+
+      # Real Pretext, real font metrics, real canvas. The unit suite mocks the
+      # layout engine and `measureText`, which is what makes its coordinate
+      # assertions deterministic and what makes it blind to a disagreement
+      # between this editor's placement arithmetic and the engine's. That seam
+      # is where the clipped-glyph bug lived. The runner uses the Chrome the
+      # image already ships rather than downloading one.
+      - name: Layout correctness (real browser)
+        run: bun run check:browser
+        env:
+          CHROME_PATH: /usr/bin/google-chrome

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>prosemirror-pretext · layout correctness check</title>
+  <style>
+    body { font: 14px/1.5 ui-sans-serif, system-ui, sans-serif; margin: 24px; }
+    button { font: 600 14px/1 system-ui; padding: 8px 14px; border-radius: 8px;
+             border: 1.5px solid #4f9e2c; background: #eaffe0; cursor: pointer; }
+    pre { background: #0d1f0a; color: #d7ffc7; padding: 14px; border-radius: 10px;
+          overflow: auto; font: 12px/1.5 ui-monospace, monospace; max-height: 70vh; }
+    /* Mounted off-screen but still laid out — display:none would give the
+       canvas no real metrics to measure against. */
+    #stage { position: absolute; left: -10000px; top: 0; }
+  </style>
+</head>
+<body>
+  <h1>Layout correctness — painted glyphs stay inside the canvas</h1>
+  <p>Sweeps wrap widths with real Pretext and real font metrics, and reports any
+     line whose last painted glyph would fall outside the canvas (the content
+     column plus <code>TEXT_BLEED</code>). Driven in CI by
+     <code>check/run.mjs</code>.</p>
+  <button id="run">Run sweep</button>
+  <pre id="out">—</pre>
+  <div id="stage"></div>
+  <script type="module" src="./page.ts"></script>
+</body>
+</html>

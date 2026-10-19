@@ -1,6 +1,8 @@
 node_modules/
 dist/
 docs/
+bench-dist/
+check-dist/
 .vite/
 *.local
 
