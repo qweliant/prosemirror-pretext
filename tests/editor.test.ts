@@ -4832,3 +4832,156 @@ describe('IME composition preview', () =>
         e.destroy()
     })
 })
+
+
+describe('inline atoms (mentions / chips)', () =>
+{
+    // A schema whose paragraphs hold inline nodes, not just text.
+    const ischema = new Schema({
+        nodes: {
+            doc: { content: 'paragraph+' },
+            paragraph: { content: 'inline*', group: 'block', toDOM: () => ['p', 0] },
+            mention: {
+                inline: true, atom: true, group: 'inline',
+                attrs: { label: { default: '' } },
+                toDOM: (n) => ['span', { class: 'mention' }, n.attrs['label']],
+            },
+            text: { group: 'inline' },
+        },
+        marks: markSpecs,
+    })
+
+    // "hi @bob there": h0 i1 ' '2 [bob]3 ' '4 t5 h6 e7 r8 e9.
+    // Mock geometry (len*8, 8px gaps); the chip is "bob" (24) + 2*6 padding = 36.
+    //   'hi ' x0 w24 | chip x24 w36 | ' ' x60 w8 | 'there' x68 w40
+    function atomEditor(inlineNodes: any = {})
+    {
+        const doc = ischema.node('doc', null, [
+            ischema.node('paragraph', null, [
+                ischema.text('hi '),
+                ischema.nodes['mention'].create({ label: 'bob' }),
+                ischema.text(' there'),
+            ]),
+        ])
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        const ed = new CanvasEditor({
+            state: EditorState.create({ doc, schema: ischema }),
+            container,
+            inlineNodes,
+        })
+        return { ed, container }
+    }
+
+    test('block text and offsets count the atom as one position', () =>
+    {
+        const { ed } = atomEditor()
+        const block = (ed as any).lastLayouts[0]
+        expect(block.text).toBe('hi ￼ there')
+        expect(block.pmEndPos - block.pmStartPos).toBe(ed.state.doc.firstChild!.content.size)
+        ed.destroy()
+    })
+
+    test('the atom is one fixed-width box; the space after it stays editable', () =>
+    {
+        const { ed } = atomEditor()
+        const frags = (ed as any).lastLayouts[0].lines[0].fragments
+        expect(frags.map((f: any) => f.text)).toEqual(['hi ', '￼', ' ', 'there'])
+        expect(frags.map((f: any) => f.pmStart)).toEqual([0, 3, 4, 5])
+        expect(frags.map((f: any) => f.x)).toEqual([0, 24, 60, 68])
+        expect(frags[1].width).toBe(36)
+        expect(frags[1].atom.label).toBe('bob') // default label from attrs.label
+        ed.destroy()
+    })
+
+    test('caret sits at the atom\'s edges, never inside it', () =>
+    {
+        const { ed } = atomEditor()
+        const block = (ed as any).lastLayouts[0]
+        const x = (o: number) => (ed as any).offsetToCoordsInBlock(block, o).x
+        expect(x(3)).toBe(24) // before the chip
+        expect(x(4)).toBe(60) // after the chip
+        expect(x(5)).toBe(68) // start of 'there'
+        ed.destroy()
+    })
+
+    test('hit-testing snaps to the nearer edge of the atom', () =>
+    {
+        const { ed } = atomEditor()
+        const layouts = (ed as any).lastLayouts
+        expect((ed as any).clickToPos(layouts, 30, 5).pos).toBe(1 + 3)
+        expect((ed as any).clickToPos(layouts, 55, 5).pos).toBe(1 + 4)
+        ed.destroy()
+    })
+
+    test('clicking the atom selects the node', () =>
+    {
+        const { ed } = atomEditor()
+        ;(ed as any).canvas.dispatchEvent(new MouseEvent('mousedown', {
+            bubbles: true, button: 0, clientX: 40, clientY: 5,
+        }))
+        const sel = ed.state.selection
+        expect(sel instanceof NodeSelection).toBe(true)
+        expect((sel as NodeSelection).node.type.name).toBe('mention')
+        expect(sel.from).toBe(4)
+        ed.destroy()
+    })
+
+    test('arrow keys step over the atom as one unit, and Backspace deletes it', () =>
+    {
+        const { ed } = atomEditor()
+        expect((ed as any).steppedGraphemePos(4, 1)).toBe(5)
+        expect((ed as any).steppedGraphemePos(5, -1)).toBe(4)
+        ed.dispatch(ed.state.tr.setSelection(TextSelection.create(ed.state.doc, 5)))
+        ;(ed as any).deleteBackward()
+        expect(ed.state.doc.textContent).toBe('hi  there')
+        expect(ed.state.doc.firstChild!.childCount).toBe(1)
+        ed.destroy()
+    })
+
+    test('a spec sets the label, width and padding', () =>
+    {
+        const { ed } = atomEditor({
+            mention: { label: (n: any) => `@${n.attrs.label}`, paddingX: 2 },
+        })
+        const chip = (ed as any).lastLayouts[0].lines[0].fragments[1]
+        expect(chip.atom.label).toBe('@bob')
+        expect(chip.width).toBe(32 + 4)
+        ed.destroy()
+
+        const fixed = atomEditor({ mention: { width: () => 50 } })
+        expect((fixed.ed as any).lastLayouts[0].lines[0].fragments[1].width).toBe(50)
+        fixed.ed.destroy()
+    })
+
+    test('`render` mounts DOM over the box and removes it with the node', async () =>
+    {
+        const { ed, container } = atomEditor({
+            mention: {
+                width: () => 40,
+                render: (n: any) =>
+                {
+                    const el = document.createElement('button')
+                    el.className = 'chip'
+                    el.textContent = n.attrs.label
+                    return el
+                },
+            },
+        })
+        const el = container.querySelector('.chip') as HTMLElement
+        expect(el).not.toBeNull()
+        const box = el.parentElement!
+        expect(box.style.left).toBe('24px')
+        expect(box.style.width).toBe('40px')
+
+        // Typing before the chip moves its DOM along with it.
+        ed.dispatch(ed.state.tr.insertText('xx', 1))
+        await nextFrame()
+        expect((container.querySelector('.chip')!.parentElement as HTMLElement).style.left).toBe('40px')
+
+        ed.dispatch(ed.state.tr.delete(6, 7))
+        await nextFrame()
+        expect(container.querySelector('.chip')).toBeNull()
+        ed.destroy()
+    })
+})

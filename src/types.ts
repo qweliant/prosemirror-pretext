@@ -105,6 +105,15 @@ export interface CanvasEditorOptions
      * document position (e.g. for `NodeSelection.create(state.doc, getPos())`).
      */
     nodeViews?: Record<string, NodeViewFn>
+    /**
+     * How inline atom nodes (mentions, tags, chips: `inline: true, atom: true`)
+     * look as they flow within a line of text. Keyed by node type name. Each one
+     * is laid out as a single unbreakable box, drawn as a pill on the canvas by
+     * default, or covered by interactive DOM when the spec has `render`. Inline
+     * leaves without an entry still get a default pill labelled from the
+     * node's `leafText` or type name, so the text around them stays aligned.
+     */
+    inlineNodes?: Record<string, InlineNodeSpec>
     /** Called after every render with timing/cache stats. */
     onRender?: (stats: RenderStats) => void
     /**
@@ -150,6 +159,48 @@ export interface CanvasEditorOptions
      * still needs a `nodeViews` entry that renders + positions it.
      */
     floatRect?: (node: PMNode) => { x: number, y: number, width: number } | null
+}
+
+/** How one type of inline atom is sized and drawn. See `inlineNodes`. */
+export interface InlineNodeSpec
+{
+    /**
+     * Text drawn inside the pill, and what sizes it. Default: the node's
+     * `leafText`, else its `label` attr, else the type name.
+     */
+    label?: (node: PMNode) => string
+    /** A fixed box width in px, overriding label + padding (e.g. for `render`). */
+    width?: (node: PMNode) => number
+    /** Padding (px) on each side of the label. Default: 6. */
+    paddingX?: number
+    /** Pill fill. Default: a translucent blue. */
+    background?: string
+    /** Label color. Default: a deep blue. */
+    color?: string
+    /** Corner radius (px). Default: 4. */
+    radius?: number
+    /** Label font. Default: the font of the text the atom sits in. */
+    font?: string
+    /**
+     * Interactive DOM mounted over the atom's box instead of the canvas pill.
+     * It gets the box's width and the line's height; give the spec a `width`
+     * (or a `label`) so the editor knows how much room to reserve.
+     */
+    render?: NodeViewFn
+}
+
+/** Resolved paint data for an inline atom's fragment. */
+export interface InlineAtomBox
+{
+    node: PMNode
+    label: string
+    font: string
+    paddingX: number
+    background: string
+    color: string
+    radius: number
+    /** True when DOM (`render`) covers the box, so the canvas skips the pill. */
+    dom: boolean
 }
 
 /** Builds the DOM for a leaf/atom block node. See `nodeViews`. */
@@ -297,6 +348,8 @@ export interface LineFragment
     strikethrough?: boolean
     /** Vertical paint offset for super/subscript runs. */
     baselineShift?: number
+    /** Set when this fragment is an inline atom (its text is one `ATOM_CHAR`). */
+    atom?: InlineAtomBox
 }
 
 export interface LineLayout
@@ -447,6 +500,7 @@ export interface CachedFragment
     underline?: boolean
     strikethrough?: boolean
     baselineShift?: number
+    atom?: InlineAtomBox
 }
 
 export interface CachedLine
@@ -499,6 +553,8 @@ export interface MarkedLineCtx
         pmStart: number, leadTrim: number, font: string,
         color: string | null, background: string | null, trimmed: string,
         underline: boolean, strikethrough: boolean, baselineShift: number,
+        /** Inline atom: the box's paint data and its width (label + chrome). */
+        atom?: InlineAtomBox, atomWidth?: number,
     }[]
     blockText: string
     consumed: number[]

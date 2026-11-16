@@ -4,6 +4,28 @@
  * `Intl.Segmenter` (and a measuring context where needed).
  */
 
+import type { Node as PMNode } from 'prosemirror-model'
+
+/**
+ * Stand-in character for an inline atom (mention, chip) in a block's text.
+ * An atom occupies one ProseMirror position but contributes nothing to
+ * `textContent`, so every offset after it would be off by one. Giving it this
+ * one-character placeholder keeps block text and PM offsets aligned, and it is
+ * a grapheme of its own, so caret steps and Backspace treat the atom as one
+ * unit.
+ */
+export const ATOM_CHAR = '\uFFFC'
+
+/**
+ * A textblock's text in PM-offset space: text verbatim, each inline leaf as
+ * `ATOM_CHAR`. Use this instead of `node.textContent` anywhere an index into
+ * the string must equal an offset into the block.
+ */
+export function inlineText(node: PMNode): string
+{
+    return node.textBetween(0, node.content.size, '', ATOM_CHAR)
+}
+
 export function clamp(n: number, min: number, max: number): number
 {
     return Math.max(min, Math.min(max, n))

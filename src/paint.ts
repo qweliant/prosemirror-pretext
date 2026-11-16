@@ -307,6 +307,12 @@ export function paintToCanvas(
                 // runs keep the first-line accent.
                 for (const frag of runs)
                 {
+                    if (frag.atom)
+                    {
+                        // DOM covers a rendered atom; the canvas draws the rest.
+                        if (!frag.atom.dom) paintInlineAtom(ctx, frag, line, block)
+                        continue
+                    }
                     ctx.font = frag.font
                     ctx.fillStyle = frag.color ?? lineColor
                     const fy = line.y + (frag.baselineShift ?? 0)
@@ -394,6 +400,46 @@ function paintWavy(
 }
 
 /** Underline / strikethrough lines for a run, in the current fill color. */
+/**
+ * The vertical box an inline atom occupies on a line: the glyph band (text is
+ * drawn with a `top` baseline at `lineY`, so glyphs fill roughly one font size
+ * below it) plus a little air, kept inside the line. Shared by the canvas pill
+ * and the DOM overlay so both cover the same pixels.
+ */
+export function atomPillRect(lineY: number, fontSize: number, lineHeight: number): { y: number, height: number }
+{
+    const height = Math.min(lineHeight, Math.round(fontSize * 1.25) + 2)
+    return { y: lineY - 2, height }
+}
+
+/** Canvas-drawn inline atom: a rounded pill with its label. */
+function paintInlineAtom(
+    ctx: CanvasRenderingContext2D,
+    frag: LineFragment,
+    line: LineLayout,
+    block: BlockLayout,
+): void
+{
+    const atom = frag.atom!
+    const x = line.x + frag.x
+    const r = atomPillRect(line.y, block.fontSize, block.lineHeight)
+    ctx.fillStyle = atom.background
+    if (typeof ctx.roundRect === 'function')
+    {
+        ctx.beginPath()
+        ctx.roundRect(x, r.y, frag.width, r.height, atom.radius)
+        ctx.fill()
+    }
+    else
+    {
+        ctx.fillRect(x, r.y, frag.width, r.height)
+    }
+    if (!atom.label) return
+    ctx.font = atom.font
+    ctx.fillStyle = atom.color
+    ctx.fillText(atom.label, x + atom.paddingX, line.y)
+}
+
 function paintDecoration(
     ctx: CanvasRenderingContext2D,
     frag: LineFragment,

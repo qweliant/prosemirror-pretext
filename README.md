@@ -89,6 +89,7 @@ The container element should be an empty block-level element. The editor creates
 | `linkMark` | `'link'` | Schema mark name treated as a followable link |
 | `onFollowLink` | opens in new tab | `(href, event)` run on Cmd/Ctrl-click of a link |
 | `nodeViews` | `{}` | `{ typeName: (node, getPos) => HTMLElement }` — custom DOM for atom blocks |
+| `inlineNodes` | `{}` | `{ typeName: InlineNodeSpec }` — how inline atoms (mentions, chips) are sized and drawn |
 | `onRender` | — | Called after every render with cache + timing stats |
 
 Default `markStyles`: `strong` → bold, `em` → italic, `code` → monospace + green,
@@ -205,6 +206,36 @@ children should `stopPropagation()` on mousedown so clicking them doesn't select
 the node. This is the foundation for images, embeds, and runnable blocks. Scope:
 flat atom blocks (no nesting), and a changed node's view is recreated, not
 diffed.
+
+### Inline atoms (mentions, chips)
+
+An inline atom node (`inline: true, atom: true`) flows within a line of text as
+one unbreakable box: Pretext's rich-inline lays it out with `break: 'never'`
+and reserves its padding with `extraWidth`, so the line wraps around it like a
+word and never splits it. By default it's painted on the canvas as a pill;
+`inlineNodes` sets how it looks:
+
+```ts
+const editor = new CanvasEditor({
+  state, container,
+  inlineNodes: {
+    mention: {
+      label: (node) => `@${node.attrs.name}`, // default: leafText, then attrs.label, then the type name
+      background: '#e8f0fe', color: '#1a56c4',  // also: paddingX, radius, font, width
+    },
+    datePicker: {
+      width: () => 96,                          // a DOM chip needs a fixed width
+      render: (node, getPos) => myDateButton(node, getPos),
+    },
+  },
+})
+```
+
+The atom is one document position: the caret sits at either edge (never
+inside), arrows step over it in one go, **Backspace** deletes it, and a
+**click** selects it (`NodeSelection`). With `render`, the editor mounts your
+element over exactly the box it reserved and moves it as the text around it
+changes.
 
 ## Drag & drop
 
@@ -479,7 +510,8 @@ editor needs to implement.
 
 - [x] **Atom block node views** — interactive DOM (buttons, embeds) positioned over reserved space (`nodeViews`)
 - [x] **Images** — a block atom rendered by a node view (a real `<img>`); drag-to-resize (corner handle), and drag-to-float so text wraps around it (`floatRect`, reusing the float engine — the same obstacle-wrap Pretext's own demos use)
-- [~] **Inline atoms** — text-like chips/mentions/emoji are doable today as styled inline ranges (marks / inline decorations). Interactive inline DOM node views aren't wired yet, but they're *not* blocked on the layout engine: Pretext's rich-inline already reserves atomic fixed-width boxes (`break: 'never'` + `extraWidth`). Design + a content-holding node-view sketch in [`design/node-views.md`](design/node-views.md)
+- [x] **Inline atoms** — mentions/chips as unbreakable boxes in the line (`inlineNodes`), canvas-drawn pills or interactive DOM via `render`. Laid out by Pretext's rich-inline (`break: 'never'` + `extraWidth`), no engine change
+- [ ] **Content-holding node views** — callouts, `<details>`: editable children inside custom chrome. Sketch in [`design/node-views.md`](design/node-views.md)
 
 ### Selection & affordances
 

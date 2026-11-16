@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- **An inline leaf no longer shifts every offset after it by one.** It takes a
+  document position but contributes nothing to `textContent`, which the editor
+  used as its offset space. The caret, hit-testing and Backspace all read the
+  wrong character after any inline node. They now read the block's text with
+  one placeholder character per inline leaf.
+
 - **Lines no longer paint past the column they were broken to — fixed at the
   source this time.** 0.3.0 widened the canvas by `TEXT_BLEED` (6px) so a hair
   of overrun was drawn rather than guillotined, and said plainly that this was
@@ -110,6 +116,18 @@
   than blending into it, and a commit replaces it with real content that lays
   out properly. Composing mid-line therefore covers what follows until the
   commit, rather than pushing it along.
+
+- **Inline atoms: mentions, tags and chips that flow within a line.** A node
+  with `inline: true, atom: true` is laid out by Pretext's rich-inline as one
+  unbreakable box (`break: 'never'`, with `extraWidth` reserving its padding),
+  so a line wraps around it like a word and never splits it. The new
+  `inlineNodes` option sets each type's label, colors, padding, radius, font
+  or a fixed width. By default the canvas draws it as a pill; with `render` the
+  editor mounts your DOM over exactly the box it reserved and moves it as the
+  text around it changes. The atom is one position: the caret sits at its
+  edges, arrows step over it, Backspace deletes it, and a click selects it.
+  The real-browser gate now puts chips in its document too, and still measures
+  0.00px of painted overshoot.
 
 ## 0.3.0
 

@@ -36,7 +36,9 @@ export function blockHasMarks(node: PMNode): boolean
     let has = false
     node.forEach((child) =>
     {
-        if (child.marks.length > 0) has = true
+        // An inline atom needs the run-based path too: only it can place a
+        // fixed-width box in the middle of a line.
+        if (child.marks.length > 0 || !child.isText) has = true
     })
     return has
 }

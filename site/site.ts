@@ -70,7 +70,7 @@ const nodes: Record<string, NodeSpec> = {
         toDOM: () => ['th', 0], parseDOM: [{ tag: 'th' }],
     },
     paragraph: {
-        content: 'text*', attrs: { align: { default: null } },
+        content: 'inline*', attrs: { align: { default: null } },
         toDOM: (n) => ['p', n.attrs['align'] ? { style: `text-align:${n.attrs['align']}` } : {}, 0],
         parseDOM: [{ tag: 'p', getAttrs: (d) => ({ align: (d as HTMLElement).style.textAlign || null }) }],
     },
@@ -98,7 +98,15 @@ const nodes: Record<string, NodeSpec> = {
         toDOM: (n) => ['div', { 'data-run': n.attrs['code'] }, `Run ${n.attrs['code']}`],
         parseDOM: [{ tag: 'div[data-run]', getAttrs: (d) => ({ code: (d as HTMLElement).getAttribute('data-run') }) }],
     },
-    text: { inline: true },
+    // An inline atom: one position in the text, laid out by Pretext as an
+    // unbreakable box and painted as a chip (see `inlineNodes` below).
+    mention: {
+        inline: true, atom: true, group: 'inline', attrs: { name: {} },
+        leafText: (n) => `@${n.attrs['name']}`,
+        toDOM: (n) => ['span', { 'data-mention': n.attrs['name'] }, `@${n.attrs['name']}`],
+        parseDOM: [{ tag: 'span[data-mention]', getAttrs: (d) => ({ name: (d as HTMLElement).getAttribute('data-mention') }) }],
+    },
+    text: { inline: true, group: 'inline' },
 }
 const schema = new Schema({ nodes, marks: markSpecs })
 
@@ -132,6 +140,11 @@ const doc = schema.node('doc', null, [
         m(' — real, focusable DOM the editor mounts over space it reserved in the canvas layout. Press it; the answer is also spoken through '),
         m('editor.announce()', 'code'),
         m('. Arrow into it to select it, Backspace to delete it.'),
+    ]),
+    schema.node('paragraph', null, [
+        m('Inline atoms flow with the text: ping '), schema.nodes['mention'].create({ name: 'ada' }),
+        m(' or '), schema.nodes['mention'].create({ name: 'grace' }),
+        m(' and the chip wraps like a word but never splits. Click one to select it; the caret steps over it in one go.'),
     ]),
     schema.node('horizontal_rule'),
     // A table: cells are ordinary blocks laid out into their own frames, so
@@ -512,6 +525,7 @@ async function boot(): Promise<void> {
         placeholderColor: '#a9bd9c',
         keymap: { ...buildMarkKeymap(schema), 'Mod-z': undo, 'Mod-y': redo, 'Shift-Mod-z': redo },
         nodeViews: { image: imageView, run_button: runButtonView },
+        inlineNodes: { mention: { background: 'rgba(90, 140, 60, 0.16)', color: '#3f6b2a' } },
         floatRect: (n) => n.type.name === 'image' && n.attrs['x'] != null ? { x: n.attrs['x'], y: n.attrs['y'], width: n.attrs['width'] ?? 220 } : null,
         decorations: decorationsFn,
         onRender(s: RenderStats) {

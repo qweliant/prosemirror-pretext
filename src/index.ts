@@ -11,6 +11,8 @@ export type {
     BlockStyleResolver,
     FloatRect,
     NodeViewFn,
+    InlineNodeSpec,
+    InlineAtomBox,
     EditorHandlers,
     CanvasGeometry,
 } from './editor'

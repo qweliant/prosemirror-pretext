@@ -9,7 +9,7 @@ import {
 import { GapCursor } from 'prosemirror-gapcursor'
 import {
     clamp, expandCollapsedWhitespace, hitTestInText,
-    nextGraphemeBoundary, prevGraphemeBoundary,
+    nextGraphemeBoundary, prevGraphemeBoundary, ATOM_CHAR, inlineText,
 } from './text'
 import type {
     Decoration, InlineDecoration, NodeDecoration, WidgetDecoration,
@@ -47,7 +47,7 @@ import type {
     RenderStats, LineFragment, LineLayout, BlockLayout,
     ResolvedBlockStyle, BlockDesc, CachedFragment, CachedLine, CachedBlock,
     MountedView, MarkedLineCtx, MarkedSegment, LayoutFrame, TableChrome,
-    CanvasGeometry,
+    CanvasGeometry, InlineNodeSpec, InlineAtomBox,
 } from './types'
 import {
     HEADING_SCALE, DEFAULT_MARK_STYLES, LIST_INDENT, MARKER_PAD,
@@ -62,7 +62,7 @@ import {
 } from './layout/blocks'
 import { layoutTable, type TableLayoutContext } from './layout/table'
 import { CellSelection } from './table-selection'
-import { applyVirtualLayout, paintToCanvas, type PaintContext } from './paint'
+import { applyVirtualLayout, paintToCanvas, atomPillRect, type PaintContext } from './paint'
 import {
     blockHasMarks, resolveRunStyle, resolveBlockStyle, boxFields, blockBase,
     blockContentWidth, type StyleContext,
@@ -75,6 +75,7 @@ export type {
     MarkStyle, MarkStyleResolver, BlockStyle, BlockStyleResolver,
     RenderStats, LineFragment, LineLayout, BlockLayout,
     LayoutFrame, TableChrome, TableCellBox, CanvasGeometry,
+    InlineNodeSpec, InlineAtomBox,
 } from './types'
 
 /**
@@ -188,6 +189,12 @@ export class CanvasEditor {
   // Measured heights so layout can reserve space for each atom block.
   private readonly nodeViewHeights = new Map<PMNode, number>();
   private readonly defaultAtomHeight = 40;
+  // ─── Inline atoms (mentions, chips) ────────────────────────────────
+  private readonly inlineNodes: Record<string, InlineNodeSpec>;
+  // DOM-rendered inline atoms. A list per node because one node object can
+  // legitimately sit in the document twice (a pasted copy shares it); each
+  // render pass hands the list's entries out in document order.
+  private readonly inlineViews = new Map<PMNode, MountedView[]>();
   // Transient decorations: a resolver + the live widget DOM (keyed for reuse).
   private readonly decorationsFor:
     | ((state: EditorState) => Decoration[])
@@ -462,6 +469,7 @@ export class CanvasEditor {
         window.open(href, "_blank", "noopener");
       });
     this.nodeViews = options.nodeViews ?? {};
+    this.inlineNodes = options.inlineNodes ?? {};
     this.decorationsFor = options.decorations ?? null;
     this.handlers = options.handlers ?? {};
     this.dragDrop = options.dragDrop !== false;
@@ -1033,6 +1041,7 @@ export class CanvasEditor {
     for (const view of this.mountedViews.values())
       view.resizeObserver?.disconnect();
     this.mountedViews.clear();
+    this.inlineViews.clear();
     this.container.innerHTML = "";
     // Emptying the container detaches these, but the fields went on pointing at
     // them — so a lazily-built overlay would be handed back already orphaned,
@@ -1066,7 +1075,7 @@ export class CanvasEditor {
     const base = this.blockBase(node, indent);
     const frameX = frame?.x ?? 0;
     const frameW = frame?.width ?? this.containerWidth;
-    const text = node.textContent;
+    const text = inlineText(node);
     if (text.length === 0) {
       return {
         prepared: null,
@@ -1275,7 +1284,7 @@ export class CanvasEditor {
     node: PMNode,
     base: ResolvedBlockStyle,
   ): { segments: MarkedSegment[]; blockText: string } {
-    const blockText = node.textContent;
+    const blockText = inlineText(node);
     type Run = {
       font: string;
       color: string | null;
@@ -1317,7 +1326,39 @@ export class CanvasEditor {
 
     let offset = 0;
     node.forEach((child) => {
-      const childText = child.isText ? (child.text ?? "") : "";
+      if (!child.isText) {
+        // An inline leaf (mention, chip) is one unbreakable box: Pretext's
+        // `break: 'never'` keeps it whole, and `extraWidth` reserves the
+        // chrome around its label, so the line breaks around it like a word.
+        if (child.isLeaf) {
+          flushRun();
+          const style = this.resolveRunStyle(child.marks, base);
+          const { box, width } = this.inlineAtomBox(child, style.font);
+          const text = box.label || ATOM_CHAR;
+          seg.items.push({
+            text,
+            font: box.font,
+            break: "never",
+            extraWidth: Math.max(0, width - this.measureWidth(text, box.font)),
+          });
+          seg.meta.push({
+            pmStart: offset,
+            leadTrim: 0,
+            font: box.font,
+            color: null,
+            background: style.background,
+            trimmed: ATOM_CHAR,
+            underline: false,
+            strikethrough: false,
+            baselineShift: 0,
+            atom: box,
+            atomWidth: width,
+          });
+        }
+        offset += child.nodeSize;
+        return;
+      }
+      const childText = child.text ?? "";
       const style = this.resolveRunStyle(child.marks, base);
       const parts = childText.split("\n");
       let local = offset;
@@ -1349,6 +1390,46 @@ export class CanvasEditor {
     flushRun();
 
     return { segments, blockText };
+  }
+
+  /**
+   * How an inline atom is drawn and how wide its box is. The width is
+   * measured with the same context as every text run, so the box the line
+   * breaker reserved is the box that gets painted and hit-tested.
+   */
+  private inlineAtomBox(
+    node: PMNode,
+    runFont: string,
+  ): { box: InlineAtomBox; width: number } {
+    const spec = this.inlineNodes[node.type.name] ?? {};
+    const font = spec.font ?? runFont;
+    const leafText = node.type.spec.leafText;
+    const attrLabel = node.attrs["label"];
+    const label = (
+      spec.label?.(node) ??
+      (leafText
+        ? leafText(node)
+        : typeof attrLabel === "string"
+          ? attrLabel
+          : node.type.name)
+    ).trim();
+    const paddingX = spec.paddingX ?? 6;
+    const width =
+      spec.width?.(node) ??
+      (label ? this.measureWidth(label, font) : 0) + 2 * paddingX;
+    return {
+      box: {
+        node,
+        label,
+        font,
+        paddingX,
+        background: spec.background ?? "rgba(59, 130, 246, 0.14)",
+        color: spec.color ?? "#1d4ed8",
+        radius: spec.radius ?? 4,
+        dom: !!spec.render,
+      },
+      width,
+    };
   }
 
   private layoutMarkedBlock(
@@ -1421,7 +1502,7 @@ export class CanvasEditor {
   /** Float-aware counterpart of layoutBlock: lays each line at its own width. */
   private layoutBlockAt(node: PMNode, topY: number, indent = 0): CachedBlock {
     const base = this.blockBase(node, indent);
-    const text = node.textContent;
+    const text = inlineText(node);
     if (text.length === 0) {
       return {
         prepared: null,
@@ -1459,8 +1540,83 @@ export class CanvasEditor {
     let x = 0;
     let lineText = "";
     let prevPmEnd = -1;
+    // A jump in PM offset means Pretext trimmed whitespace between the runs
+    // into a gap. Append the real boundary whitespace to the previous run so
+    // every space stays navigable (rather than collapsing several to one).
+    // Never at a line start. Returns the advance.
+    //
+    // Advance by the gap Pretext reserved, not by re-measuring the whitespace
+    // in the previous run's font.
+    //
+    // Pretext broke this line to a width that already includes its own
+    // `gapBefore` for each boundary. Re-measuring the gap in the preceding
+    // run's font answers a slightly different question, and the difference
+    // is per-boundary and cumulative: every later fragment on the line is
+    // pushed right by the running error, so a line crossing several
+    // boundaries paints past the column it was broken to and the canvas
+    // guillotines its last glyph. Across fonts of the same family that is
+    // hundredths of a pixel; across a family switch — a `code` span in
+    // prose, serif to monospace — it was over 11px, far past the 6px
+    // `TEXT_BLEED` meant to absorb it.
+    //
+    // The gap text still joins the previous run, so every space stays a
+    // real editable character. Only the advance changes, which also makes
+    // several collapsed spaces occupy one space's width — what CSS
+    // `white-space: normal` does, and what this was always supposed to be.
+    //
+    // An atom's box is exactly its own width and its text exactly one
+    // character, so whitespace after one can't join it: it becomes a
+    // fragment of its own, styled like the run that follows.
+    const joinGap = (
+      pmStart: number,
+      gapBefore: number,
+      next: MarkedLineCtx["meta"][number],
+    ): number => {
+      const prev = fragments[fragments.length - 1];
+      const gap = ctx.blockText.substring(prevPmEnd, pmStart);
+      const font = prev.atom ? next.font : prev.font;
+      const gapWidth = gapBefore > 0 ? gapBefore : this.measureWidth(gap, font);
+      if (prev.atom) {
+        fragments.push({
+          text: gap,
+          font,
+          color: next.color,
+          background: null,
+          x,
+          width: gapWidth,
+          pmStart: prevPmEnd,
+        });
+      } else {
+        prev.text += gap;
+        prev.width += gapWidth;
+      }
+      lineText += gap;
+      return gapWidth;
+    };
     for (const f of mat.fragments) {
       const m = ctx.meta[f.itemIndex];
+      if (m.atom) {
+        // An atom is one position wide and exactly as wide as its box. Any
+        // whitespace Pretext trimmed in front of it joins the run before.
+        if (fragments.length > 0 && m.pmStart > prevPmEnd) {
+          x += joinGap(m.pmStart, f.gapBefore, m);
+        }
+        fragments.push({
+          text: ATOM_CHAR,
+          font: m.font,
+          color: null,
+          background: m.background,
+          x,
+          width: m.atomWidth ?? 0,
+          pmStart: m.pmStart,
+          atom: m.atom,
+        });
+        x += m.atomWidth ?? 0;
+        lineText += ATOM_CHAR;
+        prevPmEnd = m.pmStart + 1;
+        ctx.consumed[f.itemIndex] = 1;
+        continue;
+      }
       const start = ctx.consumed[f.itemIndex];
       // Pretext collapses runs of whitespace inside a fragment; re-expand
       // against the source so every space stays a real editable character.
@@ -1468,38 +1624,9 @@ export class CanvasEditor {
       ctx.consumed[f.itemIndex] = end;
       const pmStart = m.pmStart + m.leadTrim + start;
 
-      // A jump in PM offset means Pretext trimmed whitespace between the
-      // runs into a gap. Append the real boundary whitespace to the
-      // previous run so every space stays navigable (rather than
-      // collapsing several to one). Never at a line start.
+      // Whitespace Pretext trimmed into a gap (see joinGap).
       if (fragments.length > 0 && pmStart > prevPmEnd) {
-        const prev = fragments[fragments.length - 1];
-        const gap = ctx.blockText.substring(prevPmEnd, pmStart);
-        // Advance by the gap Pretext reserved, not by re-measuring the
-        // whitespace in the previous run's font.
-        //
-        // Pretext broke this line to a width that already includes its own
-        // `gapBefore` for each boundary. Re-measuring the gap in the preceding
-        // run's font answers a slightly different question, and the difference
-        // is per-boundary and cumulative: every later fragment on the line is
-        // pushed right by the running error, so a line crossing several
-        // boundaries paints past the column it was broken to and the canvas
-        // guillotines its last glyph. Across fonts of the same family that is
-        // hundredths of a pixel; across a family switch — a `code` span in
-        // prose, serif to monospace — it was over 11px, far past the 6px
-        // `TEXT_BLEED` meant to absorb it.
-        //
-        // The gap text still joins the previous run, so every space stays a
-        // real editable character. Only the advance changes, which also makes
-        // several collapsed spaces occupy one space's width — what CSS
-        // `white-space: normal` does, and what this was always supposed to be.
-        const gapWidth = f.gapBefore > 0
-          ? f.gapBefore
-          : this.measureWidth(gap, prev.font);
-        prev.text += gap;
-        prev.width += gapWidth;
-        x += gapWidth;
-        lineText += gap;
+        x += joinGap(pmStart, f.gapBefore, m);
       }
 
       const width = this.measureWidth(text, m.font);
@@ -1764,12 +1891,12 @@ export class CanvasEditor {
     const layout: BlockLayout = {
       type: node.type.name,
       node,
-      text: node.textContent,
+      text: inlineText(node),
       yOffset: cursorY,
       height: blockHeight,
       lines: positioned,
       pmStartPos: pos + 1,
-      pmEndPos: pos + 1 + node.textContent.length,
+      pmEndPos: pos + 1 + inlineText(node).length,
       lineHeight: cached.lineHeight,
       font: cached.font,
       fontSize: cached.fontSize,
@@ -2042,7 +2169,7 @@ export class CanvasEditor {
           sameMarker(reuse.marker, marker)
         ) {
           reuse.pmStartPos = pos + 1;
-          reuse.pmEndPos = pos + 1 + node.textContent.length;
+          reuse.pmEndPos = pos + 1 + inlineText(node).length;
           result.push(reuse);
           cursorY += reuse.height + this.blockGap;
           this.cacheHits++;
@@ -2259,6 +2386,9 @@ export class CanvasEditor {
         const fEnd = f.pmStart + f.text.length;
         if (offsetInBlock <= f.pmStart) return line.x + f.x;
         if (offsetInBlock <= fEnd) {
+          // An atom has no interior: its two positions are its two edges.
+          if (f.atom)
+            return line.x + f.x + (offsetInBlock > f.pmStart ? f.width : 0);
           this.measureCtx.font = f.font;
           const w = this.measureCtx.measureText(
             f.text.substring(0, offsetInBlock - f.pmStart),
@@ -2512,6 +2642,34 @@ export class CanvasEditor {
    * fragment under `targetX` (or the nearest one across a gap) and hit-tests
    * within it using that run's font.
    */
+  /** Offset within one fragment nearest to `dx` px from its left edge. An
+   *  atom snaps to whichever of its two edges is nearer. */
+  private hitTestFragment(f: LineFragment, dx: number): number {
+    if (f.atom) return dx < f.width / 2 ? 0 : 1;
+    return hitTestInText(this.measureCtx, this.segmenter, f.text, f.font, dx);
+  }
+
+  /**
+   * The document position of the inline atom whose box contains the
+   * document-space point, or null. A click there selects the node, as it
+   * does in prosemirror-view, rather than dropping a caret beside it.
+   */
+  private inlineAtomAt(x: number, y: number): number | null {
+    for (const block of this.lastLayouts) {
+      if (y < block.yOffset || y >= block.yOffset + block.height) continue;
+      for (const line of block.lines) {
+        if (!line.fragments) continue;
+        if (y < line.y || y >= line.y + block.lineHeight) continue;
+        for (const f of line.fragments) {
+          if (!f.atom) continue;
+          const left = line.x + f.x;
+          if (x >= left && x < left + f.width) return block.pmStartPos + f.pmStart;
+        }
+      }
+    }
+    return null;
+  }
+
   private hitTestX(
     block: BlockLayout,
     line: LineLayout,
@@ -2521,16 +2679,7 @@ export class CanvasEditor {
       const frags = line.fragments;
       if (frags.length === 0) return line.pmStart;
       if (targetX <= frags[0].x) {
-        return (
-          frags[0].pmStart +
-          hitTestInText(
-            this.measureCtx,
-            this.segmenter,
-            frags[0].text,
-            frags[0].font,
-            targetX - frags[0].x,
-          )
-        );
+        return frags[0].pmStart + this.hitTestFragment(frags[0], targetX - frags[0].x);
       }
       for (let i = 0; i < frags.length; i++) {
         const f = frags[i];
@@ -2543,16 +2692,7 @@ export class CanvasEditor {
             const mid = (prev.x + prev.width + f.x) / 2;
             return targetX < mid ? prev.pmStart + prev.text.length : f.pmStart;
           }
-          return (
-            f.pmStart +
-            hitTestInText(
-              this.measureCtx,
-              this.segmenter,
-              f.text,
-              f.font,
-              targetX - f.x,
-            )
-          );
+          return f.pmStart + this.hitTestFragment(f, targetX - f.x);
         }
       }
       const last = frags[frags.length - 1];
@@ -2675,6 +2815,7 @@ export class CanvasEditor {
     );
     this.paintDropIndicator();
     this.syncNodeViews(layouts);
+    this.syncInlineViews(layouts);
     this.syncWidgets(layouts, decorations);
     this.syncSelectionHandles();
 
@@ -2746,7 +2887,65 @@ export class CanvasEditor {
     }
   }
 
-  private createNodeView(node: PMNode, pos: number): MountedView {
+  /**
+   * Mount/position/destroy the DOM for inline atoms whose spec has `render`.
+   * Each element covers exactly the box the line breaker reserved, so the
+   * DOM and the text around it can't drift apart.
+   */
+  private syncInlineViews(layouts: BlockLayout[]): void {
+    if (this.inlineViews.size === 0 && !this.hasInlineRender()) return;
+    const seen = new Map<PMNode, number>();
+    const live = new Set<MountedView>();
+    for (const block of layouts) {
+      for (const line of block.lines) {
+        if (!line.fragments) continue;
+        for (const f of line.fragments) {
+          if (!f.atom?.dom) continue;
+          const node = f.atom.node;
+          const render = this.inlineNodes[node.type.name]?.render;
+          if (!render) continue;
+          const i = seen.get(node) ?? 0;
+          seen.set(node, i + 1);
+          let list = this.inlineViews.get(node);
+          if (!list) {
+            list = [];
+            this.inlineViews.set(node, list);
+          }
+          const pos = block.pmStartPos + f.pmStart;
+          let view = list[i];
+          if (!view) {
+            view = this.createNodeView(node, pos, render, false);
+            list.push(view);
+          }
+          view.pos = pos;
+          const r = atomPillRect(line.y, block.fontSize, block.lineHeight);
+          view.container.style.left = `${line.x + f.x}px`;
+          view.container.style.top = `${r.y}px`;
+          view.container.style.width = `${f.width}px`;
+          view.container.style.height = `${r.height}px`;
+          live.add(view);
+        }
+      }
+    }
+    for (const [node, list] of this.inlineViews) {
+      const keep = list.filter((v) => live.has(v));
+      for (const v of list) if (!live.has(v)) v.container.remove();
+      if (keep.length === 0) this.inlineViews.delete(node);
+      else this.inlineViews.set(node, keep);
+    }
+  }
+
+  private hasInlineRender(): boolean {
+    for (const k in this.inlineNodes) if (this.inlineNodes[k].render) return true;
+    return false;
+  }
+
+  private createNodeView(
+    node: PMNode,
+    pos: number,
+    build: NodeViewFn = this.nodeViews[node.type.name],
+    observeSize = true,
+  ): MountedView {
     const container = document.createElement("div");
     container.style.position = "absolute";
     container.style.zIndex = "1";
@@ -2768,7 +2967,7 @@ export class CanvasEditor {
       pos,
       resizeObserver: null,
     };
-    view.dom = this.nodeViews[node.type.name](node, () => view.pos);
+    view.dom = build(node, () => view.pos);
     view.dom.style.pointerEvents = "auto";
     // The stack turns DOM text selection off (its own selection is
     // ProseMirror's), but a node view is the consumer's DOM and may well hold
@@ -2805,7 +3004,9 @@ export class CanvasEditor {
       },
       { signal: this.abortController?.signal },
     );
-    if (typeof ResizeObserver !== "undefined") {
+    // Block views feed their measured height back into layout; an inline
+    // view's box is fixed by its spec, so there is nothing to observe.
+    if (observeSize && typeof ResizeObserver !== "undefined") {
       view.resizeObserver = new ResizeObserver(() => this.scheduleRender());
       view.resizeObserver.observe(container);
     }
@@ -3045,6 +3246,21 @@ export class CanvasEditor {
           const href = this.linkHrefAt(hit.pos);
           if (href !== null) {
             this.onFollowLink(href, e);
+            return;
+          }
+        }
+
+        // A plain click on an inline atom selects it, like a block atom.
+        if (!e.shiftKey) {
+          const atomPos = this.inlineAtomAt(x, y);
+          if (atomPos !== null) {
+            this.dispatch(
+              this.state.tr.setSelection(
+                NodeSelection.create(this.state.doc, atomPos),
+              ),
+            );
+            this.dragging = false;
+            this.textarea.focus();
             return;
           }
         }
@@ -3815,7 +4031,7 @@ export class CanvasEditor {
     if (joinBackward(this.state, (tr) => this.dispatch(tr))) return;
     const $from = sel.$from;
     if ($from.parent.isTextblock) {
-      const text = $from.parent.textContent;
+      const text = inlineText($from.parent);
       const prev = prevGraphemeBoundary(
         this.segmenter,
         text,
@@ -3843,7 +4059,7 @@ export class CanvasEditor {
     if (joinForward(this.state, (tr) => this.dispatch(tr))) return;
     const $to = sel.$to;
     if ($to.parent.isTextblock) {
-      const text = $to.parent.textContent;
+      const text = inlineText($to.parent);
       const next = nextGraphemeBoundary(this.segmenter, text, $to.parentOffset);
       const delta = next - $to.parentOffset;
       if (delta > 0) {
@@ -4411,7 +4627,7 @@ export class CanvasEditor {
   private steppedGraphemePos(pos: number, direction: 1 | -1): number {
     const $pos = this.state.doc.resolve(pos);
     if (!$pos.parent.isTextblock) return pos + direction;
-    const text = $pos.parent.textContent;
+    const text = inlineText($pos.parent);
     const offset = $pos.parentOffset;
     if (direction > 0) {
       const next = nextGraphemeBoundary(this.segmenter, text, offset);

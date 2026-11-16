@@ -35,6 +35,12 @@ const schema = new Schema({
             parseDOM: [1, 2, 3].map((l) => ({ tag: `h${l}`, attrs: { level: l } })),
         },
         blockquote: { group: 'block', content: 'block+', toDOM: () => ['blockquote', 0], parseDOM: [{ tag: 'blockquote' }] },
+        // An inline atom: Pretext lays it out as one unbreakable box whose
+        // width the editor sets, so it is a third way for a line to overrun.
+        mention: {
+            group: 'inline', inline: true, atom: true, attrs: { label: { default: '' } },
+            toDOM: (n) => ['span', n.attrs.label],
+        },
         text: { group: 'inline' },
     },
     marks: markSpecs,
@@ -65,7 +71,9 @@ function markedDoc(paragraphs: number): PMNode {
             // the preceding run and re-measures it in that run's font. A space
             // folded inside the marked run never crosses a boundary at all,
             // and reproduces nothing.
-            if (w % 3 === 0) {
+            if (w % 11 === 5) {
+                inline.push(schema.nodes.mention!.create({ label: `@${word}` }))
+            } else if (w % 3 === 0) {
                 const name = marks[(p + w) % marks.length]!
                 inline.push(schema.text(word, [schema.marks[name]!.create()]))
             } else {
@@ -152,6 +160,11 @@ function overrun(widths: number[], paragraphs = 24): OverrunReport {
                 if (line.fragments?.length) {
                     right = 0
                     for (const f of line.fragments) {
+                        // A chip paints its whole box, label and padding alike.
+                        if (f.atom) {
+                            right = Math.max(right, line.x + f.x + f.width)
+                            continue
+                        }
                         const painted = f.text.replace(/\s+$/, '')
                         if (!painted) continue
                         right = Math.max(right, line.x + f.x + measure(painted, f.font))
