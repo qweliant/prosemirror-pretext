@@ -1490,6 +1490,43 @@ describe('floating nodes (text wrap)', () =>
         e.destroy()
     })
 
+    test('a float with no y is anchored where its node sits, and moves with the text', () =>
+    {
+        const doc = schema.node('doc', null, [
+            schema.node('paragraph', null, [schema.text('top')]),
+            schema.node('widget'),
+            schema.node('paragraph', null, [schema.text('beside the float')]),
+        ])
+        const e = mk(doc, (n: any) => n.type.name === 'widget' ? { x: 0, width: 100 } : null)
+        const ls = () => (e as any).lastLayouts as any[]
+        const top = ls()[0]
+        const w = () => ls().find((b: any) => b.type === 'widget')
+        const para = () => ls().find((b: any) => b.text === 'beside the float')
+        // Where the node falls in the flow: after 'top'. Text above is untouched.
+        expect(w().floatRect.y).toBe(para().yOffset)
+        expect(top.lines[0].x).toBe(0)
+        // The paragraph after it wraps beside it.
+        expect(para().lines[0].x).toBeGreaterThanOrEqual(100)
+        // Text added above carries the float down with it.
+        const y0 = w().floatRect.y
+        e.dispatch(e.state.tr.insert(0, schema.node('paragraph', null, [schema.text('new')])))
+        e.flush()
+        expect(w().floatRect.y).toBe(y0 + ls()[0].height + (e as any).blockGap)
+        e.destroy()
+    })
+
+    test('a float at the end of the document is counted in its height', () =>
+    {
+        const doc = schema.node('doc', null, [
+            schema.node('paragraph', null, [schema.text('only line')]),
+            schema.node('widget'),
+        ])
+        const e = mk(doc, (n: any) => n.type.name === 'widget' ? { x: 0, width: 100 } : null)
+        const w = ((e as any).lastLayouts as any[]).find((b: any) => b.type === 'widget')
+        expect((e as any).lastTotalHeight).toBeGreaterThanOrEqual(w.floatRect.y + w.floatRect.height)
+        e.destroy()
+    })
+
     test('without a floatRect the same node stays in flow (pushes text down)', () =>
     {
         const doc = schema.node('doc', null, [

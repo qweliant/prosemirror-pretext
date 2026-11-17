@@ -223,7 +223,7 @@ export class CanvasEditor {
   private activeFloats: FloatRect[] = [];
   // Derives a float rect for a node (text wraps around it), or null for in-flow.
   private readonly floatRectFor:
-    | ((node: PMNode) => { x: number; y: number; width: number } | null)
+    | ((node: PMNode) => { x: number; y?: number; width: number } | null)
     | null;
   // Breathing room kept around each float so text never kisses its edge.
   private readonly floatGutter: number;
@@ -2400,7 +2400,10 @@ export class CanvasEditor {
         if (!r) continue;
         floatRects.set(d.node, {
           x: r.x,
-          y: r.y,
+          // An anchored float (no y) gets its y when the main pass reaches
+          // its node; until then it lies below everything, so nothing above
+          // it wraps around it.
+          y: r.y ?? Infinity,
           width: r.width,
           height: this.nodeViewHeights.get(d.node) ?? this.defaultAtomHeight,
         });
@@ -2454,6 +2457,9 @@ export class CanvasEditor {
       if (leaf) {
         const fr = floatRects.get(node);
         if (fr) {
+          // Anchored: it sits where the flow has reached. The rect is shared
+          // with activeFloats, so every block after this wraps around it.
+          if (fr.y === Infinity) fr.y = cursorY;
           // Floating node: positioned at its rect, out of the flow.
           result.push({
             type: node.type.name,
@@ -2545,7 +2551,10 @@ export class CanvasEditor {
       cursorY += layout.height + this.blockGap;
     }
 
-    const totalHeight = Math.max(this.lineHeight, cursorY - this.blockGap);
+    // A float hanging below the last block still takes up room.
+    let floatBottom = 0;
+    for (const f of floatRects.values()) floatBottom = Math.max(floatBottom, f.y + f.height);
+    const totalHeight = Math.max(this.lineHeight, cursorY - this.blockGap, floatBottom);
     this.hadFloats = floating;
     // Cheap to verify directly rather than inferred from "no floats and no
     // tables" — one pass over data already in cache, and it cannot drift out

@@ -203,6 +203,19 @@
   `render` and no `width`, the editor measures the element and breaks the line
   around its real width, so a DOM chip no longer needs a fixed size.
 
+- **Floats can be anchored where their node is.** `floatRect` may now leave
+  out `y`: the float then sits where its node falls in the flow, as a CSS
+  float does, so the text after it wraps beside it and it moves as the text
+  above changes. A float with a `y` stays pinned to that position. The
+  document's height now includes a float that hangs past the last block.
+
+  The demo's image uses it. Dragging the photo to pin it anywhere, and
+  dragging its corner to resize, are gone: a pinned photo stayed put while
+  the text moved, so it ended up beside unrelated paragraphs, and bent code
+  blocks around itself. It now has a `layout` attr set from a small hover
+  toolbar (float left or right, center, inline), the way document editors do
+  it, and moves with the editor's node drag.
+
 - **The demo is a note page on phones.** The live board put three scroll
   surfaces under one finger (the board pans, the document card scrolls, the
   page scrolls), gave the document a 280px column and a photo that left three

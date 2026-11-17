@@ -84,7 +84,7 @@ The container element should be an empty block-level element. The editor creates
 | `blockStyles` | `heading` / `blockquote` / `code_block` defaults | Maps block-type names → text style `{ fontSize, fontWeight, fontStyle, fontFamily, lineHeight, color }` + box decorations `{ paddingLeft/Right/Top/Bottom, background, borderLeft }` (or a `(node) => style` fn) |
 | `keymap` | `{}` | ProseMirror key bindings, checked before built-in keys |
 | `floats` | `[]` | Rects (`{ x, y, width, height }`) the text flows around |
-| `floatRect` | `undefined` | `(node) => { x, y, width } \| null` — float a doc node so text wraps around it (height comes from its node view); null keeps it in flow |
+| `floatRect` | `undefined` | `(node) => { x, y?, width } \| null` — float a doc node so text wraps around it (height comes from its node view); null keeps it in flow. Leave out `y` to anchor it where the node sits, like a CSS float, so it moves with the text; give `y` to pin it to a fixed position |
 | `floatGutter` | `12` | Gap in px kept between text and each float |
 | `linkMark` | `'link'` | Schema mark name treated as a followable link |
 | `onFollowLink` | opens in new tab | `(href, event)` run on Cmd/Ctrl-click of a link |
@@ -564,7 +564,7 @@ editor needs to implement.
 ### Media & embeds
 
 - [x] **Atom block node views** — interactive DOM (buttons, embeds) positioned over reserved space (`nodeViews`)
-- [x] **Images** — a block atom rendered by a node view (a real `<img>`); drag-to-resize (corner handle), and drag-to-float so text wraps around it (`floatRect`, reusing the float engine — the same obstacle-wrap Pretext's own demos use)
+- [x] **Images** — a block atom rendered by a node view (a real `<img>`), floated left or right with text wrapping beside it (`floatRect`, anchored where the node sits, reusing the float engine — the same obstacle-wrap Pretext's own demos use), centered, or inline; moved by the editor's node drag
 - [x] **Inline atoms** — mentions/chips as unbreakable boxes in the line (`inlineNodes`), canvas-drawn pills or interactive DOM via `render`. Laid out by Pretext's rich-inline (`break: 'never'` + `extraWidth`), no engine change
 - [x] **Content-holding nodes** — callouts, `<details>`: editable children laid out inside painted chrome (`containerNodes`), with optional header DOM and collapsing
 

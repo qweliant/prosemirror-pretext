@@ -87,7 +87,11 @@ const nodes: Record<string, NodeSpec> = {
     list_item: { content: 'paragraph block*', defining: true, toDOM: () => ['li', 0], parseDOM: [{ tag: 'li' }] },
     image: {
         atom: true, group: 'block',
-        attrs: { src: {}, alt: { default: '' }, width: { default: null }, x: { default: null }, y: { default: null } },
+        // `layout` is how the picture sits in the text, as in any document
+        // editor: in the flow ('inline' or 'center'), or floated to a side with
+        // the text wrapping beside it ('left' / 'right'). A float is anchored
+        // where the node is, so it moves with the text around it.
+        attrs: { src: {}, alt: { default: '' }, width: { default: null }, layout: { default: 'inline' } },
         toDOM: (n) => ['img', { src: n.attrs['src'], alt: n.attrs['alt'] }],
         parseDOM: [{ tag: 'img[src]', getAttrs: (d) => ({ src: (d as HTMLElement).getAttribute('src'), alt: (d as HTMLElement).getAttribute('alt') ?? '' }) }],
     },
@@ -140,14 +144,14 @@ const doc = schema.node('doc', null, [
         // On a phone, beside the text there is no room for text: it sits in
         // the flow, full width, instead of floating.
         ? schema.node('image', { src: photo('pondlily', 720, 490), alt: 'a calm pond' })
-        : schema.node('image', { src: photo('pondlily', FLOAT_W, Math.round(FLOAT_W * 0.68)), alt: 'a calm pond', x: 0, y: 120, width: FLOAT_W }),
+        : schema.node('image', { src: photo('pondlily', FLOAT_W, Math.round(FLOAT_W * 0.68)), alt: 'a calm pond', layout: 'left', width: FLOAT_W }),
     schema.node('paragraph', null, [
         m('Every glyph here is painted by '), m('ctx.fillText()', 'code'),
         ...(PHONE
             ? [m(' — no contenteditable. The photo above is a real '), m('image node', 'em'),
                 m(': long-press it to pick it up and move it. Long-press a word to select it, then use the toolbar — ')]
             : [m(' — no contenteditable. The photo to the left is a real '), m('image node', 'em'),
-                m(' you can drag: move its body to float it (text wraps), or drag its corner to resize. Select any text and use the toolbar — ')]),
+                m(': hover it to float it left or right (the text wraps, and it moves with the text), center it, or put it inline; drag it to move it to another spot. Select any text and use the toolbar — ')]),
         m('bold', 'strong'), m(', '), m('italic', 'em'), m(', '), m('underline', 'underline'),
         m(', '), m('strikethrough', 'strikethrough'), m(', '), colored('color', '#e0488a'),
         m(', '), hl('highlight'), m(', E=mc'), m('2', 'superscript'), m(', H'), m('2', 'subscript'),
@@ -510,7 +514,13 @@ async function boot(): Promise<void> {
             },
         },
         inlineNodes: { mention: { background: 'rgba(90, 140, 60, 0.16)', color: '#3f6b2a' } },
-        floatRect: (n: PMNode) => n.type.name === 'image' && n.attrs['x'] != null ? { x: n.attrs['x'], y: n.attrs['y'], width: n.attrs['width'] ?? 220 } : null,
+        // Floats are anchored (no y): they sit where the image is in the doc.
+        floatRect: (n: PMNode) => {
+            const side = n.type.name === 'image' ? n.attrs['layout'] : null
+            if (side !== 'left' && side !== 'right') return null
+            const width = (n.attrs['width'] as number | null) ?? 220
+            return { x: side === 'left' ? 0 : Math.max(0, floatColumn - width), width }
+        },
         decorations: decorationsFn,
         onRender(s: RenderStats) {
             statsEl.innerHTML = `${s.blockCount} blocks · ${s.lineCount} lines · ${s.renderTimeMs.toFixed(1)}ms · <span class="reflow">0 reflows ✨</span>`
@@ -518,6 +528,9 @@ async function boot(): Promise<void> {
             sync()
         },
     }
+    // The text column's width, which a right float is placed against. Each
+    // mount sets it before constructing the editor that reads it.
+    let floatColumn = 0
     const editor = PHONE ? mountNotePage() : mountBoard()
     ;(window as any).editor = editor
 
@@ -539,10 +552,11 @@ async function boot(): Promise<void> {
         const page = document.createElement('div')
         page.className = 'note-page'
         shell.querySelector('.editor-card')!.appendChild(page)
+        floatColumn = Math.max(240, page.clientWidth)
         return new CanvasEditor({
             ...editorOptions,
             container: page,
-            width: Math.max(240, page.clientWidth),
+            width: floatColumn,
             // Focus waits for a tap: focusing on load would summon the keyboard
             // (on Android) for a field the reader hasn't chosen yet.
             autofocus: false,
@@ -603,6 +617,7 @@ async function boot(): Promise<void> {
             x: 26, y: 22, w: editorWidth + 36, h: docHeight + 60,
             label: '📄 the document',
         })
+        floatColumn = editorWidth
         const editor = new CanvasEditor({
             ...editorOptions,
             container: docFrame.body,
@@ -899,24 +914,10 @@ function runButtonView(node: PMNode): HTMLElement {
     return root
 }
 
-// A single fixed-position vertical guide line, shown while an image snaps.
-let guideEl: HTMLElement | null = null
-function showGuide(left: number, top: number, height: number): void {
-    if (!guideEl) {
-        guideEl = document.createElement('div')
-        guideEl.style.cssText = 'position:fixed;width:2px;background:#e0488a;z-index:50;pointer-events:none;box-shadow:0 0 6px #e0488a'
-        document.body.appendChild(guideEl)
-    }
-    guideEl.style.left = `${left}px`
-    guideEl.style.top = `${top}px`
-    guideEl.style.height = `${height}px`
-    guideEl.style.display = 'block'
-}
-function hideGuide(): void { if (guideEl) guideEl.style.display = 'none' }
-
-// A draggable image node view: corner handle resizes; dragging the body floats
-// it (text wraps). We preview with a transform and commit attrs on release so
-// the node view isn't recreated mid-drag.
+// The image node view. Its `layout` is set from a small hover toolbar (float
+// left or right with the text wrapping, center, or inline), the way document
+// editors do it; moving it is the editor's own node drag, which drops it into
+// a slot between blocks.
 function imageView(node: PMNode, getPos: () => number): HTMLElement {
     // On a phone it is a plain picture in the flow. Floating, the resize
     // corner and the hover tools are all pointer gestures that would fight a
@@ -929,98 +930,57 @@ function imageView(node: PMNode, getPos: () => number): HTMLElement {
         img.style.cssText = 'display:block;width:100%;border-radius:12px;box-shadow:0 4px 14px rgba(0,0,0,.18);-webkit-touch-callout:none;user-select:none'
         return img
     }
+    const layout = node.attrs['layout'] as string
     const wrap = document.createElement('div')
-    wrap.style.cssText = 'position:relative;display:inline-block;max-width:100%'
+    // Centered is still in the flow, just centered in the column.
+    wrap.style.cssText = 'position:relative;width:fit-content;max-width:100%'
+        + (layout === 'center' ? ';margin:0 auto' : '')
     const img = document.createElement('img')
     img.src = node.attrs['src'] as string
     img.alt = (node.attrs['alt'] as string) ?? ''
-    // touch-action:none lets a finger-drag reposition the photo (float) instead
-    // of scrolling the page — this is what was broken on phones.
-    img.style.cssText = 'display:block;max-width:100%;border-radius:12px;cursor:grab;box-shadow:0 4px 14px rgba(0,0,0,.18);touch-action:none'
+    // The editor drags the node (a bar shows the slot it lands in); the
+    // browser's own image drag would hijack that gesture.
+    img.draggable = false
+    img.style.cssText = 'display:block;max-width:100%;border-radius:12px;cursor:grab;box-shadow:0 4px 14px rgba(0,0,0,.18);-webkit-touch-callout:none'
     if (node.attrs['width']) img.style.width = `${node.attrs['width']}px`
     wrap.appendChild(img)
 
-    const handle = document.createElement('div')
-    handle.style.cssText = 'position:absolute;right:-6px;bottom:-6px;width:18px;height:18px;border-radius:50%;background:#4f9e2c;border:2px solid #fff;cursor:nwse-resize;box-shadow:0 1px 4px rgba(0,0,0,.3);touch-action:none'
-    handle.setAttribute('aria-hidden', 'true')
-    wrap.appendChild(handle)
-
     const ed = () => (window as any).editor as CanvasEditor
 
-    // ── Float controls: appear on hover/tap so you don't have to drag precisely ──
+    // ── Layout controls: appear on hover (or a tap), like any doc editor ──
     const tools = document.createElement('div')
     tools.style.cssText = 'position:absolute;top:8px;left:50%;transform:translateX(-50%);display:none;gap:1px;background:rgba(20,54,31,.94);border-radius:11px;padding:3px;box-shadow:0 3px 12px rgba(0,0,0,.35);z-index:6;white-space:nowrap'
     let hideT: ReturnType<typeof setTimeout>
-    const setPos = (kind: 'left' | 'center' | 'right' | 'inline') => {
-        const cw = (ed() as any).canvas.getBoundingClientRect().width as number
-        const w = (node.attrs['width'] as number) ?? img.offsetWidth ?? 220
-        const x = kind === 'inline' ? null
-            : kind === 'left' ? 0
-                : kind === 'center' ? Math.max(0, Math.round((cw - w) / 2))
-                    : Math.max(0, Math.round(cw - w))
-        ed().command((s, d) => { d?.(s.tr.setNodeMarkup(getPos(), undefined, { ...node.attrs, x, y: x === null ? null : (node.attrs['y'] ?? 40) })); return true })
+    const setLayout = (next: 'left' | 'center' | 'right' | 'inline') => {
+        ed().command((s, d) => { d?.(s.tr.setNodeMarkup(getPos(), undefined, { ...node.attrs, layout: next })); return true })
         ed().focus()
     }
-    const tbtn = (inner: string, aria: string, fn: () => void) => {
+    const tbtn = (inner: string, aria: string, value: 'left' | 'center' | 'right' | 'inline') => {
         const b = document.createElement('button')
         b.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true" style="width:19px;height:19px;fill:none;stroke:#eafff2;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round">${inner}</svg>`
         b.title = aria; b.setAttribute('aria-label', aria)
-        b.style.cssText = 'width:32px;height:30px;border:0;background:transparent;border-radius:8px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;touch-action:none'
+        b.setAttribute('aria-pressed', String(layout === value))
+        const on = layout === value ? 'rgba(255,255,255,.22)' : 'transparent'
+        b.style.cssText = `width:32px;height:30px;border:0;background:${on};border-radius:8px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center`
+        // Keep the press from starting a node drag or moving focus.
         b.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation() })
-        b.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); fn() })
+        b.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); setLayout(value) })
         b.addEventListener('pointerenter', () => { b.style.background = 'rgba(255,255,255,.16)' })
-        b.addEventListener('pointerleave', () => { b.style.background = 'transparent' })
+        b.addEventListener('pointerleave', () => { b.style.background = on })
         return b
     }
     const INLINE_ICON = '<rect x="3" y="4" width="8" height="7" rx="1"/><line x1="13" y1="6" x2="21" y2="6"/><line x1="13" y1="10" x2="21" y2="10"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="3" y1="19" x2="21" y2="19"/>'
     tools.append(
-        tbtn(ICONS['alignLeft'], 'Float left', () => setPos('left')),
-        tbtn(ICONS['alignCenter'], 'Center', () => setPos('center')),
-        tbtn(ICONS['alignRight'], 'Float right', () => setPos('right')),
-        tbtn(INLINE_ICON, 'Inline (in text flow)', () => setPos('inline')),
+        tbtn(ICONS['alignLeft'], 'Float left (text wraps)', 'left'),
+        tbtn(ICONS['alignCenter'], 'Center', 'center'),
+        tbtn(ICONS['alignRight'], 'Float right (text wraps)', 'right'),
+        tbtn(INLINE_ICON, 'Inline (in text flow)', 'inline'),
     )
     wrap.appendChild(tools)
     wrap.addEventListener('pointerenter', () => { clearTimeout(hideT); tools.style.display = 'flex' })
     wrap.addEventListener('pointerleave', (e) => {
         clearTimeout(hideT)
         hideT = setTimeout(() => { tools.style.display = 'none' }, e.pointerType === 'touch' ? 2600 : 160)
-    })
-
-    handle.addEventListener('pointerdown', (e) => {
-        e.preventDefault(); e.stopPropagation()
-        handle.setPointerCapture(e.pointerId)
-        const sx = e.clientX, sw = img.offsetWidth
-        const move = (ev: PointerEvent) => { img.style.width = `${Math.max(60, sw + (ev.clientX - sx))}px` }
-        const up = (ev: PointerEvent) => {
-            handle.releasePointerCapture(ev.pointerId); wrap.removeEventListener('pointermove', move); wrap.removeEventListener('pointerup', up)
-            ed().command((s, d) => { d?.(s.tr.setNodeMarkup(getPos(), undefined, { ...node.attrs, width: img.offsetWidth })); return true })
-        }
-        wrap.addEventListener('pointermove', move); wrap.addEventListener('pointerup', up)
-    })
-
-    img.addEventListener('pointerdown', (e) => {
-        e.preventDefault(); img.setPointerCapture(e.pointerId)
-        const cr = ((ed() as any).canvas as HTMLCanvasElement).getBoundingClientRect()
-        const wr = wrap.getBoundingClientRect()
-        const x0 = wr.left - cr.left, y0 = wr.top - cr.top, sx = e.clientX, sy = e.clientY
-        const imgW = (node.attrs['width'] as number) ?? img.offsetWidth ?? 220
-        const snaps = [0, (cr.width - imgW) / 2, cr.width - imgW] // left / center / right
-        let dx = 0, dy = 0
-        const move = (ev: PointerEvent) => {
-            dx = ev.clientX - sx; dy = ev.clientY - sy
-            // Snap the left edge to the content's left/center/right guides.
-            const target = snaps.find((t) => Math.abs(x0 + dx - t) < 14)
-            if (target !== undefined) { dx = target - x0; showGuide(cr.left + target, cr.top, cr.height) }
-            else hideGuide()
-            wrap.style.transform = `translate(${dx}px,${dy}px)`
-        }
-        const up = (ev: PointerEvent) => {
-            img.releasePointerCapture(ev.pointerId); wrap.removeEventListener('pointermove', move); wrap.removeEventListener('pointerup', up)
-            wrap.style.transform = ''; hideGuide()
-            if (dx === 0 && dy === 0) return
-            ed().command((s, d) => { d?.(s.tr.setNodeMarkup(getPos(), undefined, { ...node.attrs, x: Math.max(0, Math.round(x0 + dx)), y: Math.max(0, Math.round(y0 + dy)), width: node.attrs['width'] ?? 220 })); return true })
-        }
-        wrap.addEventListener('pointermove', move); wrap.addEventListener('pointerup', up)
     })
     return wrap
 }

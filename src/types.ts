@@ -163,11 +163,16 @@ export interface CanvasEditorOptions
     a11yMirror?: boolean
     /**
      * Make a node float: text flows around it (à la Pretext's obstacles) instead
-     * of it taking a block line. Return a content-space rect (height is the node
-     * view's measured height) or null to keep the node in normal flow. The node
+     * of it taking a block line. Return its x and width (height is the node
+     * view's measured height), or null to keep the node in normal flow. The node
      * still needs a `nodeViews` entry that renders + positions it.
+     *
+     * Leave out `y` and the float is anchored where the node sits in the
+     * document, as a CSS float is: the text after it wraps beside it, and it
+     * moves as the text above it changes. Give a `y` to pin it at that
+     * content-space position instead, wherever its node is.
      */
-    floatRect?: (node: PMNode) => { x: number, y: number, width: number } | null
+    floatRect?: (node: PMNode) => { x: number, y?: number, width: number } | null
 }
 
 /** How one type of inline atom is sized and drawn. See `inlineNodes`. */
