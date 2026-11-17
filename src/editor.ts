@@ -48,6 +48,7 @@ import type {
     ResolvedBlockStyle, BlockDesc, CachedFragment, CachedLine, CachedBlock,
     MountedView, MarkedLineCtx, MarkedSegment, LayoutFrame, TableChrome,
     CanvasGeometry, InlineNodeSpec, InlineAtomBox,
+    ContainerNodeSpec, ContainerChrome, Insets, PerNode,
 } from './types'
 import {
     HEADING_SCALE, DEFAULT_MARK_STYLES, LIST_INDENT, MARKER_PAD,
@@ -75,7 +76,7 @@ export type {
     MarkStyle, MarkStyleResolver, BlockStyle, BlockStyleResolver,
     RenderStats, LineFragment, LineLayout, BlockLayout,
     LayoutFrame, TableChrome, TableCellBox, CanvasGeometry,
-    InlineNodeSpec, InlineAtomBox,
+    InlineNodeSpec, InlineAtomBox, ContainerNodeSpec, ContainerChrome, Insets, PerNode,
 } from './types'
 
 /**
@@ -114,6 +115,20 @@ function alignOffset(availWidth: number, lineWidth: number, align: 'left' | 'cen
     if (align === 'center') return Math.max(0, (availWidth - lineWidth) / 2)
     if (align === 'right') return Math.max(0, availWidth - lineWidth)
     return 0
+}
+
+/** A spec value that may be fixed or computed from the node. */
+function perNode<T>(v: PerNode<T> | undefined, node: PMNode, fallback: T): T
+{
+    if (v === undefined) return fallback
+    return typeof v === 'function' ? (v as (n: PMNode) => T)(node) : v
+}
+
+/** A padding value as four sides: a number applies to all of them. */
+function resolveInsets(p: number | Partial<Insets>): Insets
+{
+    if (typeof p === 'number') return { top: p, right: p, bottom: p, left: p }
+    return { top: p.top ?? 0, right: p.right ?? 0, bottom: p.bottom ?? 0, left: p.left ?? 0 }
 }
 
 /** Whether two block markers (list bullets) are visually identical — used to
@@ -195,6 +210,16 @@ export class CanvasEditor {
   // legitimately sit in the document twice (a pasted copy shares it); each
   // render pass hands the list's entries out in document order.
   private readonly inlineViews = new Map<PMNode, MountedView[]>();
+  // ─── Container nodes (callouts, <details>) ─────────────────────────
+  private readonly containerNodes: Record<string, ContainerNodeSpec>;
+  private readonly isContainer = (typeName: string): boolean =>
+    !!this.containerNodes[typeName];
+  private lastContainers: ContainerChrome[] = [];
+  // Header DOM, matched to containers by type and document order. Editing a
+  // container's *children* replaces the node object on every keystroke, so
+  // identity can't be the key; the header is rebuilt only when the node's own
+  // markup (attrs) changes, which is all a header should depend on.
+  private headerViews: { node: PMNode; view: MountedView }[] = [];
   // Transient decorations: a resolver + the live widget DOM (keyed for reuse).
   private readonly decorationsFor:
     | ((state: EditorState) => Decoration[])
@@ -470,6 +495,7 @@ export class CanvasEditor {
       });
     this.nodeViews = options.nodeViews ?? {};
     this.inlineNodes = options.inlineNodes ?? {};
+    this.containerNodes = options.containerNodes ?? {};
     this.decorationsFor = options.decorations ?? null;
     this.handlers = options.handlers ?? {};
     this.dragDrop = options.dragDrop !== false;
@@ -625,6 +651,7 @@ export class CanvasEditor {
     // Read-only: allow selection/navigation transactions, drop edits.
     if (!this.isEditable && tr.docChanged) return;
     this._state = this._state.apply(tr);
+    this.liftOutOfCollapsed();
     this.layoutDirty = true;
     this.lastInputTime = performance.now();
     this.caretVisible = true;
@@ -635,6 +662,39 @@ export class CanvasEditor {
     this.caretBias = -1;
     this.scheduleRender();
     this.syncA11y();
+  }
+
+  /**
+   * A collapsed container lays none of its children out, so a selection left
+   * inside one has no caret to draw, and typing would edit text nobody can
+   * see. Select the container instead (or step past it when it can't be
+   * selected) — the same place a click on its header would leave you.
+   */
+  private liftOutOfCollapsed(): void {
+    if (!this.hasCollapsible()) return;
+    const sel = this._state.selection;
+    const hidden = (pos: number): number | null => {
+      const $p = this._state.doc.resolve(pos);
+      for (let d = 1; d <= $p.depth; d++) {
+        const n = $p.node(d);
+        if (this.containerNodes[n.type.name]?.collapsed?.(n)) return $p.before(d);
+      }
+      return null;
+    };
+    const at = hidden(sel.from) ?? hidden(sel.to);
+    if (at === null) return;
+    const doc = this._state.doc;
+    const node = doc.nodeAt(at)!;
+    const next = NodeSelection.isSelectable(node)
+      ? NodeSelection.create(doc, at)
+      : Selection.near(doc.resolve(at + node.nodeSize), 1);
+    this._state = this._state.apply(this._state.tr.setSelection(next));
+  }
+
+  private hasCollapsible(): boolean {
+    for (const k in this.containerNodes)
+      if (this.containerNodes[k].collapsed) return true;
+    return false;
   }
 
   /**
@@ -1042,6 +1102,7 @@ export class CanvasEditor {
       view.resizeObserver?.disconnect();
     this.mountedViews.clear();
     this.inlineViews.clear();
+    this.headerViews = [];
     this.container.innerHTML = "";
     // Emptying the container detaches these, but the fields went on pointing at
     // them — so a lazily-built overlay would be handed back already orphaned,
@@ -1172,15 +1233,21 @@ export class CanvasEditor {
     contentStart: number,
     originY: number,
     frame: LayoutFrame,
-  ): { blocks: BlockLayout[]; tables: TableChrome[]; height: number } {
+  ): {
+    blocks: BlockLayout[];
+    tables: TableChrome[];
+    containers: ContainerChrome[];
+    height: number;
+  } {
     const descs: BlockDesc[] = [];
-    collectBlocks(parent, contentStart, 0, null, descs, this.hasNodeView);
+    collectBlocks(parent, contentStart, 0, null, descs, this.hasNodeView, this.isContainer);
 
     const blocks: BlockLayout[] = [];
     const tables: TableChrome[] = [];
+    const containers: ContainerChrome[] = [];
     let y = originY;
 
-    for (const { node, pos, indent, marker, leaf, table } of descs) {
+    for (const { node, pos, indent, marker, leaf, table, container } of descs) {
       if (table) {
         const sub = layoutTable(this.tableCx, node, pos, y, {
           x: frame.x + indent,
@@ -1188,6 +1255,18 @@ export class CanvasEditor {
         });
         blocks.push(...sub.blocks);
         tables.push(sub.chrome, ...sub.nested);
+        containers.push(...sub.containers);
+        y += sub.height + this.blockGap;
+        continue;
+      }
+      if (container) {
+        const sub = this.layoutContainer(node, pos, y, {
+          x: frame.x + indent,
+          width: Math.max(1, frame.width - indent),
+        });
+        blocks.push(...sub.blocks);
+        tables.push(...sub.tables);
+        containers.push(...sub.containers);
         y += sub.height + this.blockGap;
         continue;
       }
@@ -1211,8 +1290,65 @@ export class CanvasEditor {
       y += bl.height + this.blockGap;
     }
 
-    const height = blocks.length > 0 ? y - originY - this.blockGap : 0;
-    return { blocks, tables, height };
+    const height = y > originY ? y - originY - this.blockGap : 0;
+    return { blocks, tables, containers, height };
+  }
+
+  /**
+   * Lay a content-holding node out: its children flow through the ordinary
+   * pipeline into a frame inset by the spec's padding and header, and the box
+   * around them is recorded as chrome for painting. The chrome is pushed
+   * before the children's, so an outer box always paints beneath an inner one.
+   */
+  private layoutContainer(
+    node: PMNode,
+    pos: number,
+    originY: number,
+    frame: LayoutFrame,
+  ): {
+    blocks: BlockLayout[];
+    tables: TableChrome[];
+    containers: ContainerChrome[];
+    height: number;
+  } {
+    const spec = this.containerNodes[node.type.name];
+    const pad = resolveInsets(perNode(spec.padding, node, 12));
+    const header = Math.max(0, perNode(spec.header, node, 0));
+    const collapsed = spec.collapsed?.(node) ?? false;
+    const chrome: ContainerChrome = {
+      node,
+      pos,
+      x: frame.x,
+      y: originY,
+      width: frame.width,
+      height: 0,
+      header,
+      collapsed,
+      background: perNode(spec.background, node, null),
+      borderColor: perNode(spec.borderColor, node, null),
+      accentColor: perNode(spec.accentColor, node, null),
+      accentWidth: spec.accentWidth ?? 4,
+      radius: spec.radius ?? 6,
+    };
+    const flow = collapsed
+      ? { blocks: [], tables: [], containers: [], height: 0 }
+      : this.layoutFlow(node, pos + 1, originY + header + pad.top, {
+          x: frame.x + pad.left,
+          width: Math.max(1, frame.width - pad.left - pad.right),
+        });
+    // Collapsed, the padding still frames the header so the box keeps its
+    // shape; with no header either, it shrinks to its padding.
+    chrome.height = collapsed
+      ? header > 0
+        ? header
+        : pad.top + pad.bottom
+      : header + pad.top + flow.height + pad.bottom;
+    return {
+      blocks: flow.blocks,
+      tables: flow.tables,
+      containers: [chrome, ...flow.containers],
+      height: chrome.height,
+    };
   }
 
   /** The BlockLayout for a leaf/atom block occupying reserved height. */
@@ -2011,6 +2147,12 @@ export class CanvasEditor {
         for (const r of t.rows) r.y += dy;
         for (const c of t.cells) c.y += dy;
       }
+      // Container boxes too. An edit *inside* one never gets here (its blocks
+      // carry a frame, which bails above), so every box is wholly below or
+      // wholly above the edited block.
+      for (const c of this.lastContainers) {
+        if (c.y > editedTop) c.y += dy;
+      }
     }
     for (let i = k + 1; i < layouts.length; i++) {
       const L = layouts[i];
@@ -2032,12 +2174,14 @@ export class CanvasEditor {
     layouts: BlockLayout[];
     totalHeight: number;
     tables: TableChrome[];
+    containers: ContainerChrome[];
   } {
     this.cacheHits = 0;
     this.cacheMisses = 0;
 
     const result: BlockLayout[] = [];
     const tables: TableChrome[] = [];
+    const containers: ContainerChrome[] = [];
     let cursorY = 0;
 
     const descs: BlockDesc[] = [];
@@ -2075,12 +2219,24 @@ export class CanvasEditor {
     if (floatRegimeChanged) this.positionedCache = new WeakMap();
     const canReuse = !floating && !floatRegimeChanged;
 
-    for (const { node, pos, indent, marker, leaf, table } of descs) {
+    for (const { node, pos, indent, marker, leaf, table, container } of descs) {
+      if (container) {
+        const sub = this.layoutContainer(node, pos, cursorY, {
+          x: indent,
+          width: this.containerWidth - indent,
+        });
+        result.push(...sub.blocks);
+        tables.push(...sub.tables);
+        containers.push(...sub.containers);
+        this.cacheMisses++;
+        cursorY += sub.height + this.blockGap;
+        continue;
+      }
       // A table lays its own cells out side by side and reports one height.
       // Its cell blocks come back already positioned, in document order, so
       // the rest of the pipeline sees them as ordinary blocks.
       if (table) {
-        const { blocks, chrome, height, nested } = layoutTable(
+        const { blocks, chrome, height, nested, containers: tableContainers } = layoutTable(
           this.tableCx,
           node,
           pos,
@@ -2089,6 +2245,7 @@ export class CanvasEditor {
         );
         result.push(...blocks);
         tables.push(chrome, ...nested);
+        containers.push(...tableContainers);
         this.cacheMisses++;
         cursorY += height + this.blockGap;
         continue;
@@ -2195,7 +2352,7 @@ export class CanvasEditor {
     // tables" — one pass over data already in cache, and it cannot drift out
     // of step with whatever the layout actually produced.
     this.layoutsSortedByY = isSortedByY(result);
-    return { layouts: result, totalHeight, tables };
+    return { layouts: result, totalHeight, tables, containers };
   }
 
   // ─── Painting ──────────────────────────────────────────────────────
@@ -2245,6 +2402,7 @@ export class CanvasEditor {
       decorations,
       this.lastTables,
       this.layoutsSortedByY,
+      this.lastContainers,
     );
   }
 
@@ -2311,7 +2469,7 @@ export class CanvasEditor {
     marker: BlockDesc["marker"],
     out: BlockDesc[],
   ): void {
-    collectBlocks(node, contentStart, depth, marker, out, this.hasNodeView);
+    collectBlocks(node, contentStart, depth, marker, out, this.hasNodeView, this.isContainer);
   }
 
   /** True when the document is a single empty text block. */
@@ -2766,10 +2924,11 @@ export class CanvasEditor {
     // Try the cheap incremental path (single-block edit); fall back to a full
     // pass for anything structural.
     if (!this.tryIncrementalLayout()) {
-      const { layouts, totalHeight, tables } = this.computeLayout();
+      const { layouts, totalHeight, tables, containers } = this.computeLayout();
       this.lastLayouts = layouts;
       this.lastTotalHeight = totalHeight;
       this.lastTables = tables;
+      this.lastContainers = containers;
     }
     this.prevDoc = this.state.doc;
     this.layoutDirty = false;
@@ -2816,6 +2975,7 @@ export class CanvasEditor {
     this.paintDropIndicator();
     this.syncNodeViews(layouts);
     this.syncInlineViews(layouts);
+    this.syncContainerHeaders();
     this.syncWidgets(layouts, decorations);
     this.syncSelectionHandles();
 
@@ -2933,6 +3093,55 @@ export class CanvasEditor {
       if (keep.length === 0) this.inlineViews.delete(node);
       else this.inlineViews.set(node, keep);
     }
+  }
+
+  /**
+   * Mount/position/destroy header DOM for containers whose spec has
+   * `renderHeader`. Matched by type in document order; a header is reused
+   * while its node keeps the same markup and rebuilt when the attrs change.
+   */
+  private syncContainerHeaders(): void {
+    const prev = this.headerViews;
+    if (prev.length === 0 && !this.hasHeaderRender()) return;
+    const pool = new Map<string, { node: PMNode; view: MountedView }[]>();
+    for (const h of prev) {
+      const list = pool.get(h.node.type.name) ?? [];
+      list.push(h);
+      pool.set(h.node.type.name, list);
+    }
+    const next: { node: PMNode; view: MountedView }[] = [];
+    for (const c of this.lastContainers) {
+      const spec = this.containerNodes[c.node.type.name];
+      if (!spec?.renderHeader || c.header <= 0) continue;
+      let h = pool.get(c.node.type.name)?.shift();
+      if (h && !h.node.sameMarkup(c.node)) {
+        h.view.container.remove();
+        h = undefined;
+      }
+      if (!h) {
+        h = {
+          node: c.node,
+          view: this.createNodeView(c.node, c.pos, spec.renderHeader, false),
+        };
+      }
+      h.node = c.node;
+      h.view.pos = c.pos;
+      const st = h.view.container.style;
+      st.left = `${c.x}px`;
+      st.top = `${c.y}px`;
+      st.width = `${c.width}px`;
+      st.height = `${c.header}px`;
+      next.push(h);
+    }
+    for (const list of pool.values())
+      for (const h of list) h.view.container.remove();
+    this.headerViews = next;
+  }
+
+  private hasHeaderRender(): boolean {
+    for (const k in this.containerNodes)
+      if (this.containerNodes[k].renderHeader) return true;
+    return false;
   }
 
   private hasInlineRender(): boolean {

@@ -18,7 +18,7 @@ import type { Selection } from 'prosemirror-state'
 import type {
     CursorDecoration, Decoration, InlineDecoration, NodeDecoration,
 } from './decoration'
-import type { BlockLayout, LineFragment, LineLayout, TableChrome } from './types'
+import type { BlockLayout, ContainerChrome, LineFragment, LineLayout, TableChrome } from './types'
 import {
     CARET_LABEL_FONT, CARET_LABEL_HEIGHT, CARET_LABEL_PAD_X, CARET_LABEL_PAD_Y,
     REMOTE_CARET_WIDTH, TABLE_BORDER, TEXT_BLEED,
@@ -107,6 +107,7 @@ export function paintToCanvas(
     decorations: Decoration[] = [],
     tables: TableChrome[] = [],
     sortedByY = false,
+    containers: ContainerChrome[] = [],
 ): void
 {
     const inlineDecos = decorations.filter((d): d is InlineDecoration => d.kind === 'inline')
@@ -159,7 +160,17 @@ export function paintToCanvas(
     const [lo, hi] = visibleRange(layouts, viewTop, viewBottom, virtualized && sortedByY)
     const visible = lo === 0 && hi === layouts.length ? layouts : layouts.slice(lo, hi)
 
-    // Table chrome underlies everything: header fills, then rules. Drawn
+    // Container boxes (callouts, <details>) underlie everything, outermost
+    // first — they arrive in document order, so a nested box paints over the
+    // box it sits in.
+    for (const c of containers)
+    {
+        if (c.height === 0) continue
+        if (c.y + c.height < viewTop || c.y > viewBottom) continue
+        paintContainerChrome(ctx, c)
+    }
+
+    // Table chrome underlies everything else: header fills, then rules. Drawn
     // before block boxes so a cell's own background still paints over its fill.
     for (const t of tables)
     {
@@ -180,15 +191,19 @@ export function paintToCanvas(
             continue
         }
         if (!block.background && !block.borderLeft) continue
+        // A block laid into a frame (table cell, container) owns only the
+        // frame's width, not the column's.
+        const bx = block.frame?.x ?? 0
+        const bw = block.frame?.width ?? cx.containerWidth
         if (block.background)
         {
             ctx.fillStyle = block.background
-            ctx.fillRect(0, block.yOffset, cx.containerWidth, block.height)
+            ctx.fillRect(bx, block.yOffset, bw, block.height)
         }
         if (block.borderLeft)
         {
             ctx.fillStyle = block.borderLeft.color
-            ctx.fillRect(0, block.yOffset, block.borderLeft.width, block.height)
+            ctx.fillRect(bx, block.yOffset, block.borderLeft.width, block.height)
         }
     }
 
@@ -410,6 +425,44 @@ export function atomPillRect(lineY: number, fontSize: number, lineHeight: number
 {
     const height = Math.min(lineHeight, Math.round(fontSize * 1.25) + 2)
     return { y: lineY - 2, height }
+}
+
+/** A container's box: fill, outline, and accent bar, with rounded corners. */
+function paintContainerChrome(ctx: CanvasRenderingContext2D, c: ContainerChrome): void
+{
+    const rounded = typeof ctx.roundRect === 'function'
+    const box = () =>
+    {
+        ctx.beginPath()
+        ctx.roundRect(c.x + 0.5, c.y + 0.5, c.width - 1, c.height - 1, c.radius)
+    }
+    if (c.background)
+    {
+        ctx.fillStyle = c.background
+        if (rounded) { box(); ctx.fill() }
+        else ctx.fillRect(c.x, c.y, c.width, c.height)
+    }
+    if (c.accentColor)
+    {
+        // Clipped to the rounded box so the bar follows its corners.
+        ctx.fillStyle = c.accentColor
+        if (rounded)
+        {
+            ctx.save()
+            box()
+            ctx.clip()
+            ctx.fillRect(c.x, c.y, c.accentWidth, c.height)
+            ctx.restore()
+        }
+        else ctx.fillRect(c.x, c.y, c.accentWidth, c.height)
+    }
+    if (c.borderColor && rounded)
+    {
+        ctx.strokeStyle = c.borderColor
+        ctx.lineWidth = 1
+        box()
+        ctx.stroke()
+    }
 }
 
 /** Canvas-drawn inline atom: a rounded pill with its label. */

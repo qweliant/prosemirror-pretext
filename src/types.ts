@@ -114,6 +114,15 @@ export interface CanvasEditorOptions
      * node's `leafText` or type name, so the text around them stays aligned.
      */
     inlineNodes?: Record<string, InlineNodeSpec>
+    /**
+     * Block nodes whose *children* the editor lays out inside chrome you
+     * describe: callouts, collapsible `<details>`, asides. Keyed by node type
+     * name. The children are ordinary blocks (paragraphs, lists, nested
+     * containers) laid out into a frame inset by the spec's padding; the editor
+     * paints the box behind them and can mount interactive DOM over a header
+     * strip. A container with no entry is walked through with no chrome.
+     */
+    containerNodes?: Record<string, ContainerNodeSpec>
     /** Called after every render with timing/cache stats. */
     onRender?: (stats: RenderStats) => void
     /**
@@ -187,6 +196,67 @@ export interface InlineNodeSpec
      * (or a `label`) so the editor knows how much room to reserve.
      */
     render?: NodeViewFn
+}
+
+/** A value fixed for every node of a type, or computed per node. */
+export type PerNode<T> = T | ((node: PMNode) => T)
+
+/** Space between a container's edge and its content, per side. */
+export interface Insets
+{
+    top: number
+    right: number
+    bottom: number
+    left: number
+}
+
+/** How one type of content-holding node is laid out and drawn. See `containerNodes`. */
+export interface ContainerNodeSpec
+{
+    /** Space between the box and its content. A number applies to every side. Default: 12. */
+    padding?: PerNode<number | Partial<Insets>>
+    /**
+     * Height (px) of a header strip above the content, for a title or toggle.
+     * It is reserved even while collapsed. Default: 0.
+     */
+    header?: PerNode<number>
+    /** Box fill. Default: none. */
+    background?: PerNode<string | null>
+    /** 1px outline color. Default: none. */
+    borderColor?: PerNode<string | null>
+    /** Bar down the left edge, e.g. a callout's kind. Default: none. */
+    accentColor?: PerNode<string | null>
+    /** Accent bar width (px). Default: 4. */
+    accentWidth?: number
+    /** Corner radius (px). Default: 6. */
+    radius?: number
+    /**
+     * When true, the children are not laid out: only the header and padding are
+     * reserved. Read it from the node (e.g. an `open` attr) and toggle it with a
+     * transaction, so collapsing is undoable and shared like any other edit.
+     */
+    collapsed?: (node: PMNode) => boolean
+    /** Interactive DOM mounted over the header strip (needs `header` > 0). */
+    renderHeader?: NodeViewFn
+}
+
+/** A laid-out container's box: what painting and the header DOM need. */
+export interface ContainerChrome
+{
+    node: PMNode
+    /** Document position of the container node. */
+    pos: number
+    x: number
+    y: number
+    width: number
+    height: number
+    header: number
+    collapsed: boolean
+    background: string | null
+    borderColor: string | null
+    accentColor: string | null
+    accentWidth: number
+    radius: number
 }
 
 /** Resolved paint data for an inline atom's fragment. */
@@ -480,6 +550,8 @@ export interface BlockDesc
     indent: number
     marker: { text: string, x: number } | null
     leaf: boolean
+    /** A node with a `containerNodes` entry: laid out with its own chrome. */
+    container?: boolean
     /**
      * A table node. Not flattened like other containers: its cells are separate
      * layout frames, so `computeLayout` hands the whole subtree to the table

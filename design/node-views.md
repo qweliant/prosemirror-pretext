@@ -1,7 +1,7 @@
 # Node views: inline atoms & content-holding nodes
 
-Status: **Design 1 (inline atoms) implemented** (2026-11, `inlineNodes`); Design 2
-(content-holding node views) still design only. Written 2026-06.
+Status: **both implemented** (2026-11): Design 1 as `inlineNodes`, Design 2 as
+`containerNodes`. Written 2026-06.
 
 ## What exists today
 

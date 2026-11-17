@@ -18,6 +18,9 @@ import { LIST_INDENT, MARKER_PAD } from '../constants'
 
 /** Whether a node type name has a registered node view. */
 export type HasNodeView = (typeName: string) => boolean
+/** Whether a node type name has a registered container spec. */
+export type IsContainer = (typeName: string) => boolean
+const NO_CONTAINERS: IsContainer = () => false
 
 export function isRuleNode(node: PMNode): boolean
 {
@@ -81,6 +84,7 @@ export function collectBlocks(
     marker: BlockDesc['marker'],
     out: BlockDesc[],
     hasNodeView: HasNodeView,
+    isContainer: IsContainer = NO_CONTAINERS,
 ): void
 {
     let pending = marker
@@ -98,7 +102,7 @@ export function collectBlocks(
             {
                 const itemPos = pos + 1 + itemOffset
                 const text = ordered ? `${n}.` : '•'
-                collectBlocks(item, itemPos + 1, depth + 1, { text, x: markerX }, out, hasNodeView)
+                collectBlocks(item, itemPos + 1, depth + 1, { text, x: markerX }, out, hasNodeView, isContainer)
                 n++
             })
             pending = null
@@ -119,6 +123,16 @@ export function collectBlocks(
             })
             pending = null
         }
+        else if (!child.isTextblock && !child.isLeaf && isContainer(child.type.name))
+        {
+            // Emitted whole, like a table: its children lay out into a frame
+            // inset by its chrome, which flattening here would lose.
+            out.push({
+                node: child, pos, indent: depth * LIST_INDENT,
+                marker: pending, leaf: false, container: true,
+            })
+            pending = null
+        }
         else if (isLeafBlock(child, hasNodeView))
         {
             out.push({ node: child, pos, indent: depth * LIST_INDENT, marker: pending, leaf: true })
@@ -127,7 +141,7 @@ export function collectBlocks(
         else if (child.isBlock)
         {
             // A generic block container (e.g. nesting blockquote): descend.
-            collectBlocks(child, pos + 1, depth, pending, out, hasNodeView)
+            collectBlocks(child, pos + 1, depth, pending, out, hasNodeView, isContainer)
             pending = null
         }
     })

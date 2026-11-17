@@ -19,7 +19,7 @@
  */
 
 import type { Node as PMNode } from 'prosemirror-model'
-import type { BlockLayout, LayoutFrame, TableCellBox, TableChrome } from '../types'
+import type { BlockLayout, ContainerChrome, LayoutFrame, TableCellBox, TableChrome } from '../types'
 import { isHeaderCell } from './blocks'
 import { buildGrid, type TableGrid } from './table-map'
 import { CELL_PAD_X, CELL_PAD_Y, MIN_COL_WIDTH, TABLE_BORDER } from '../constants'
@@ -32,6 +32,8 @@ export interface TableLayoutResult
     height: number
     /** Chrome for any tables nested inside this one's cells. */
     nested: TableChrome[]
+    /** Boxes of any container nodes (callouts…) inside this one's cells. */
+    containers: ContainerChrome[]
 }
 
 export interface TableLayoutContext
@@ -49,7 +51,7 @@ export interface TableLayoutContext
         contentStart: number,
         originY: number,
         frame: LayoutFrame,
-    ) => { blocks: BlockLayout[], tables: TableChrome[], height: number }
+    ) => { blocks: BlockLayout[], tables: TableChrome[], containers: ContainerChrome[], height: number }
 }
 
 /** Total space a cell spends on borders and padding, per axis. */
@@ -114,6 +116,7 @@ export function layoutTable(
             },
             height: 0,
             nested: [],
+            containers: [],
         }
     }
 
@@ -174,6 +177,7 @@ export function layoutTable(
     // ── Pass 3: place ──
     const blocks: BlockLayout[] = []
     const tables: TableChrome[] = []
+    const containers: ContainerChrome[] = []
     const cells: TableCellBox[] = []
 
     for (const m of measured)
@@ -187,8 +191,10 @@ export function layoutTable(
         const dy = top + TABLE_BORDER + CELL_PAD_Y
         for (const b of flow.blocks) shiftBlock(b, dy)
         for (const t of flow.tables) shiftChrome(t, dy)
+        for (const c of flow.containers) c.y += dy
         blocks.push(...flow.blocks)
         tables.push(...flow.tables)
+        containers.push(...flow.containers)
 
         cells.push({
             x: colX[cell.col],
@@ -216,7 +222,7 @@ export function layoutTable(
         cols: colX.map((x, i) => ({ x, width: widths[i] })),
         cells: cells.sort((a, b) => a.pos - b.pos),
     }
-    return { blocks, chrome, height, nested: tables }
+    return { blocks, chrome, height, nested: tables, containers }
 }
 
 /** Move a laid-out block (and its lines) down by `dy`. */

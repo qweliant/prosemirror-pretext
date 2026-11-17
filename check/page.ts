@@ -35,6 +35,9 @@ const schema = new Schema({
             parseDOM: [1, 2, 3].map((l) => ({ tag: `h${l}`, attrs: { level: l } })),
         },
         blockquote: { group: 'block', content: 'block+', toDOM: () => ['blockquote', 0], parseDOM: [{ tag: 'blockquote' }] },
+        // A content-holding node: its paragraphs wrap inside a padded frame,
+        // so their limit is the frame's edge, not the column's.
+        callout: { group: 'block', content: 'block+', toDOM: () => ['aside', 0] },
         // An inline atom: Pretext lays it out as one unbreakable box whose
         // width the editor sets, so it is a third way for a line to overrun.
         mention: {
@@ -83,6 +86,8 @@ function markedDoc(paragraphs: number): PMNode {
         }
         blocks.push(p % 7 === 3
             ? schema.node('blockquote', null, [schema.node('paragraph', null, inline)])
+            : p % 5 === 2
+            ? schema.node('callout', null, [schema.node('paragraph', null, inline)])
             : schema.node('paragraph', null, inline))
     }
     blocks.push(schema.node('heading', { level: 1 }, [schema.text('A heading that is quite long and will itself need to wrap somewhere')]))
@@ -146,13 +151,17 @@ function overrun(widths: number[], paragraphs = 24): OverrunReport {
             font: '16px Georgia, serif',
             lineHeight: 26,
             autofocus: false,
+            containerNodes: { callout: { padding: { top: 10, right: 14, bottom: 10, left: 18 } } },
         })
         ed.flush()
 
         for (const block of (ed as unknown as { lastLayouts: BlockLayout[] }).lastLayouts) {
             // Blocks laid into a narrower frame (table cells) are bounded by the
             // frame, not the column; this document has none, so skip defensively.
-            if (block.frame || block.isAtom) continue
+            if (block.isAtom) continue
+            // A framed block (callout content) may not paint past its frame;
+            // everything else is held to the column.
+            const limit = block.frame ? block.frame.x + block.frame.width : width
             for (const line of block.lines) {
                 report.lines++
                 const marked = !!line.fragments?.length
@@ -175,16 +184,16 @@ function overrun(widths: number[], paragraphs = 24): OverrunReport {
                 }
                 if (right === 0) continue
 
-                const pastColumn = right - width
+                const pastColumn = right - limit
                 if (pastColumn > report.worstPastColumn) {
                     report.worstPastColumn = pastColumn
                     report.worstPastColumnMarked = marked
                 }
                 // Trailing whitespace pushed the line's own `width` past the
-                // column but paints nothing — the harmless majority.
-                if (line.width > width && pastColumn <= 0) report.whitespaceOnly++
+                // column (or frame) but paints nothing — the harmless majority.
+                if (line.x + line.width > limit && pastColumn <= 0) report.whitespaceOnly++
 
-                const over = right - (width + TEXT_BLEED)
+                const over = right - (limit + TEXT_BLEED)
                 if (over > 0.01) {
                     report.clipped.push({
                         width, blockType: block.type, over, right, marked,

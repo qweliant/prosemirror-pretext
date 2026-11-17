@@ -13,6 +13,10 @@ export type {
     NodeViewFn,
     InlineNodeSpec,
     InlineAtomBox,
+    ContainerNodeSpec,
+    ContainerChrome,
+    Insets,
+    PerNode,
     EditorHandlers,
     CanvasGeometry,
 } from './editor'

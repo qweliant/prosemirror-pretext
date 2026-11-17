@@ -4985,3 +4985,202 @@ describe('inline atoms (mentions / chips)', () =>
         ed.destroy()
     })
 })
+
+
+describe('container nodes (callouts / details)', () =>
+{
+    const cschema = new Schema({
+        nodes: {
+            doc: { content: 'block+' },
+            paragraph: { content: 'text*', group: 'block', toDOM: () => ['p', 0] },
+            callout: {
+                content: 'block+', group: 'block', attrs: { kind: { default: 'info' } },
+                toDOM: () => ['aside', 0],
+            },
+            details: {
+                content: 'block+', group: 'block', attrs: { open: { default: true } },
+                toDOM: () => ['details', 0],
+            },
+            text: {},
+        },
+        marks: markSpecs,
+    })
+    const p = (t: string) => cschema.node('paragraph', null, t ? [cschema.text(t)] : [])
+
+    function containerEditor(blocks: any[], containerNodes: any)
+    {
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        const ed = new CanvasEditor({
+            state: EditorState.create({ doc: cschema.node('doc', null, blocks), schema: cschema }),
+            container,
+            containerNodes,
+        })
+        const L = () => (ed as any).lastLayouts as any[]
+        const C = () => (ed as any).lastContainers as any[]
+        const gap = (ed as any).blockGap as number
+        return { ed, container, L, C, gap }
+    }
+
+    test('children lay out inside the padded frame, and the box spans them', () =>
+    {
+        const { ed, L, C, gap } = containerEditor(
+            [p('above'), cschema.node('callout', null, [p('inside'), p('two')]), p('below')],
+            { callout: { padding: 12, background: '#eef' } },
+        )
+        const [above, in1, in2, below] = L()
+        const box = C()[0]
+        expect(C().length).toBe(1)
+        expect(box.y).toBe(above.yOffset + above.height + gap)
+        expect(in1.yOffset).toBe(box.y + 12)
+        expect(in1.lines[0].x).toBe(12)
+        expect(in1.frame).toEqual({ x: 12, width: (ed as any).containerWidth - 24 })
+        expect(box.height).toBe(12 + (in2.yOffset + in2.height - in1.yOffset) + 12)
+        expect(box.background).toBe('#eef')
+        expect(below.yOffset).toBe(box.y + box.height + gap)
+        ed.destroy()
+    })
+
+    test('a header strip is reserved above the content', () =>
+    {
+        const { ed, L, C } = containerEditor(
+            [cschema.node('details', null, [p('body')])],
+            { details: { padding: { left: 8, top: 4, bottom: 4 }, header: 30 } },
+        )
+        expect(L()[0].yOffset).toBe(C()[0].y + 30 + 4)
+        expect(L()[0].lines[0].x).toBe(8)
+        ed.destroy()
+    })
+
+    test('a collapsed container lays out no children and keeps only its header', () =>
+    {
+        const { ed, L, C, gap } = containerEditor(
+            [cschema.node('details', { open: false }, [p('hidden')]), p('after')],
+            { details: { header: 30, collapsed: (n: any) => !n.attrs.open } },
+        )
+        expect(L().map((b: any) => b.text)).toEqual(['after'])
+        expect(C()[0].height).toBe(30)
+        expect(C()[0].collapsed).toBe(true)
+        expect(L()[0].yOffset).toBe(30 + gap)
+        ed.destroy()
+    })
+
+    test('containers nest: the inner box sits in the outer one\'s frame, painted after it', () =>
+    {
+        const { ed, L, C } = containerEditor(
+            [cschema.node('callout', null, [cschema.node('details', null, [p('deep')])])],
+            { callout: { padding: 10 }, details: { padding: 6 } },
+        )
+        const [outer, inner] = C()
+        expect(outer.node.type.name).toBe('callout')
+        expect(inner.node.type.name).toBe('details')
+        expect(inner.x).toBe(10)
+        expect(inner.y).toBe(10)
+        expect(L()[0].lines[0].x).toBe(16)
+        expect(outer.height).toBe(10 + inner.height + 10)
+        ed.destroy()
+    })
+
+    test('per-node style: the accent follows the node\'s attrs', () =>
+    {
+        const { ed, C } = containerEditor(
+            [cschema.node('callout', { kind: 'warn' }, [p('x')])],
+            { callout: { accentColor: (n: any) => (n.attrs.kind === 'warn' ? 'orange' : 'blue') } },
+        )
+        expect(C()[0].accentColor).toBe('orange')
+        ed.destroy()
+    })
+
+    test('an edit inside grows the box and moves what follows', () =>
+    {
+        const { ed, L, C, gap } = containerEditor(
+            [cschema.node('callout', null, [p('one')]), p('after')],
+            { callout: { padding: 12 } },
+        )
+        const h0 = C()[0].height
+        // pos 2 = start of the callout's paragraph text; a hard break adds a line.
+        ed.dispatch(ed.state.tr.insertText('a\nb', 2))
+        ed.flush()
+        const lh = (ed as any).lineHeight
+        expect(C()[0].height).toBe(h0 + lh)
+        const after = L().find((b: any) => b.text === 'after')
+        expect(after.yOffset).toBe(C()[0].height + gap)
+        ed.destroy()
+    })
+
+    test('an edit above moves the box with the content (incremental path)', () =>
+    {
+        const { ed, C, container } = containerEditor(
+            [p('top'), cschema.node('callout', null, [p('x')])],
+            { callout: {} },
+        )
+        const y0 = C()[0].y
+        ed.dispatch(ed.state.tr.insertText('\nmore', 4))
+        ed.flush()
+        expect(C()[0].y).toBe(y0 + (ed as any).lineHeight)
+        ed.destroy()
+        container.remove()
+    })
+
+    test('clicking inside the box puts the caret in its content', () =>
+    {
+        const { ed, L } = containerEditor(
+            [cschema.node('callout', null, [p('inside')])],
+            { callout: { padding: 12 } },
+        )
+        const b = L()[0]
+        // x = 12 (frame) + 16 → two chars in.
+        const hit = (ed as any).clickToPos(L(), 28, b.lines[0].y + 5)
+        expect(hit.pos).toBe(b.pmStartPos + 2)
+        ed.destroy()
+    })
+
+    test('renderHeader mounts DOM over the header, survives child edits, rebuilds on attr change', async () =>
+    {
+        let built = 0
+        const { ed, container } = containerEditor(
+            [cschema.node('details', null, [p('body')])],
+            {
+                details: {
+                    header: 28,
+                    collapsed: (n: any) => !n.attrs.open,
+                    renderHeader: (n: any, getPos: () => number) =>
+                    {
+                        built++
+                        const el = document.createElement('button')
+                        el.className = 'toggle'
+                        el.textContent = n.attrs.open ? '▾' : '▸'
+                        el.onclick = () =>
+                            ed.dispatch(ed.state.tr.setNodeMarkup(getPos(), undefined, { open: !n.attrs.open }))
+                        return el
+                    },
+                },
+            },
+        )
+        const first = container.querySelector('.toggle') as HTMLElement
+        expect(first).not.toBeNull()
+        expect((first.parentElement as HTMLElement).style.height).toBe('28px')
+
+        // Typing in the body replaces the details node but keeps its header.
+        ed.dispatch(ed.state.tr.insertText('!', 2))
+        await nextFrame()
+        expect(container.querySelector('.toggle')).toBe(first)
+        expect(built).toBe(1)
+
+        // Toggling changes the attrs: the header is rebuilt, the body hidden.
+        first.click()
+        await nextFrame()
+        expect(built).toBe(2)
+        expect(container.querySelector('.toggle')!.textContent).toBe('▸')
+        expect((ed as any).lastLayouts.length).toBe(0)
+        // The caret was in the body; collapsing selects the details node instead.
+        expect(ed.state.selection instanceof NodeSelection).toBe(true)
+        expect((ed.state.selection as NodeSelection).node.type.name).toBe('details')
+
+        // Deleting the node removes its header.
+        ed.dispatch(ed.state.tr.replaceWith(0, ed.state.doc.content.size, p('gone')))
+        await nextFrame()
+        expect(container.querySelector('.toggle')).toBeNull()
+        ed.destroy()
+    })
+})

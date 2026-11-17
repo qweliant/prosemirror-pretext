@@ -56,7 +56,7 @@ const icon = (name: string) => `<svg viewBox="0 0 24 24" aria-hidden="true">${IC
 
 // ── Schema (the full set of node types the editor supports) ──────────────────
 const nodes: Record<string, NodeSpec> = {
-    doc: { content: '(heading | paragraph | blockquote | code_block | horizontal_rule | bullet_list | ordered_list | image | run_button | table)+' },
+    doc: { content: '(heading | paragraph | blockquote | code_block | horizontal_rule | bullet_list | ordered_list | image | run_button | table | callout | details)+' },
     table: { content: 'table_row+', group: 'block', toDOM: () => ['table', ['tbody', 0]], parseDOM: [{ tag: 'table' }] },
     table_row: { content: '(table_cell | table_header)+', toDOM: () => ['tr', 0], parseDOM: [{ tag: 'tr' }] },
     table_cell: {
@@ -97,6 +97,17 @@ const nodes: Record<string, NodeSpec> = {
         atom: true, group: 'block', attrs: { code: { default: '6 * 7' } },
         toDOM: (n) => ['div', { 'data-run': n.attrs['code'] }, `Run ${n.attrs['code']}`],
         parseDOM: [{ tag: 'div[data-run]', getAttrs: (d) => ({ code: (d as HTMLElement).getAttribute('data-run') }) }],
+    },
+    // Content-holding nodes: their paragraphs are ordinary canvas-laid blocks,
+    // inset into a box the editor paints (see `containerNodes` below).
+    callout: {
+        content: '(paragraph | bullet_list)+', group: 'block',
+        toDOM: () => ['aside', 0], parseDOM: [{ tag: 'aside' }],
+    },
+    details: {
+        content: 'paragraph+', group: 'block', attrs: { open: { default: true }, summary: { default: 'Details' } },
+        toDOM: (n) => ['details', n.attrs['open'] ? { open: '' } : {}, ['summary', n.attrs['summary']], ['div', 0]],
+        parseDOM: [{ tag: 'details', contentElement: 'div', getAttrs: (d) => ({ open: (d as HTMLElement).hasAttribute('open'), summary: (d as HTMLElement).querySelector('summary')?.textContent ?? 'Details' }) }],
     },
     // An inline atom: one position in the text, laid out by Pretext as an
     // unbreakable box and painted as a chip (see `inlineNodes` below).
@@ -145,6 +156,12 @@ const doc = schema.node('doc', null, [
         m('Inline atoms flow with the text: ping '), schema.nodes['mention'].create({ name: 'ada' }),
         m(' or '), schema.nodes['mention'].create({ name: 'grace' }),
         m(' and the chip wraps like a word but never splits. Click one to select it; the caret steps over it in one go.'),
+    ]),
+    schema.node('callout', null, [
+        schema.node('paragraph', null, [m('A callout is a '), m('content-holding', 'em'), m(' node: these words are ordinary canvas-laid blocks, inset into a box the editor paints. Type here and the box grows.')]),
+    ]),
+    schema.node('details', { open: true, summary: 'Collapsible details' }, [
+        schema.node('paragraph', null, [m('The toggle above is real DOM over a header strip the layout reserved. Collapsing skips laying these blocks out at all; it is an attribute change, so Mod-z brings it back.')]),
     ]),
     schema.node('horizontal_rule'),
     // A table: cells are ordinary blocks laid out into their own frames, so
@@ -525,6 +542,14 @@ async function boot(): Promise<void> {
         placeholderColor: '#a9bd9c',
         keymap: { ...buildMarkKeymap(schema), 'Mod-z': undo, 'Mod-y': redo, 'Shift-Mod-z': redo },
         nodeViews: { image: imageView, run_button: runButtonView },
+        containerNodes: {
+            callout: { padding: { top: 10, right: 14, bottom: 10, left: 18 }, background: '#f1f8ec', accentColor: '#7ec14b', radius: 8 },
+            details: {
+                padding: { top: 2, right: 14, bottom: 12, left: 14 }, header: 34, borderColor: '#cfe3c2', radius: 8,
+                collapsed: (n) => !n.attrs['open'],
+                renderHeader: detailsHeaderView,
+            },
+        },
         inlineNodes: { mention: { background: 'rgba(90, 140, 60, 0.16)', color: '#3f6b2a' } },
         floatRect: (n) => n.type.name === 'image' && n.attrs['x'] != null ? { x: n.attrs['x'], y: n.attrs['y'], width: n.attrs['width'] ?? 220 } : null,
         decorations: decorationsFn,
@@ -775,6 +800,22 @@ async function boot(): Promise<void> {
  * DOM inside is entirely ours, and stays interactive (and focusable, so it's
  * left visible to assistive tech rather than deferred to the a11y mirror).
  */
+// The header of a `details` node: a toggle that flips its `open` attr. Built
+// from attrs only; the editor rebuilds it when they change.
+function detailsHeaderView(node: PMNode, getPos: () => number): HTMLElement {
+    const btn = document.createElement('button')
+    btn.className = 'details-toggle'
+    const open = !!node.attrs['open']
+    btn.textContent = `${open ? '▾' : '▸'} ${node.attrs['summary']}`
+    btn.setAttribute('aria-expanded', String(open))
+    btn.addEventListener('mousedown', (e) => { e.stopPropagation(); e.preventDefault() })
+    btn.addEventListener('click', () => {
+        const ed = (window as any).editor as CanvasEditor
+        ed.dispatch(ed.state.tr.setNodeMarkup(getPos(), undefined, { ...node.attrs, open: !open }))
+    })
+    return btn
+}
+
 function runButtonView(node: PMNode): HTMLElement {
     const root = document.createElement('div')
     root.className = 'run-block'

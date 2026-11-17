@@ -129,6 +129,21 @@
   The real-browser gate now puts chips in its document too, and still measures
   0.00px of painted overshoot.
 
+- **Content-holding nodes: callouts, `<details>`, asides.** The new
+  `containerNodes` option gives a block container chrome: padding (fixed or
+  per node), a header strip, a fill, an outline, an accent bar and rounded
+  corners. Its children are ordinary blocks laid out through the same flow as
+  the document, into a frame inset by that padding (the route table cells
+  already take), so marks, lists, tables and nested containers all work inside.
+  `collapsed` skips laying the children out, and `renderHeader` mounts DOM over
+  the header strip. That DOM is rebuilt only when the node's attrs change, so
+  typing in the body doesn't recreate a toggle mid-click. A selection left
+  inside a collapsed container moves to the container. The browser gate now
+  holds callout text to its frame's edge, at 0.00px of overshoot.
+
+  Block backgrounds (a code block's panel, a blockquote's bar) inside a table
+  cell or container now paint across their frame instead of the whole column.
+
 ## 0.3.0
 
 ### Added

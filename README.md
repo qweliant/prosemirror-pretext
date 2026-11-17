@@ -90,6 +90,7 @@ The container element should be an empty block-level element. The editor creates
 | `onFollowLink` | opens in new tab | `(href, event)` run on Cmd/Ctrl-click of a link |
 | `nodeViews` | `{}` | `{ typeName: (node, getPos) => HTMLElement }` — custom DOM for atom blocks |
 | `inlineNodes` | `{}` | `{ typeName: InlineNodeSpec }` — how inline atoms (mentions, chips) are sized and drawn |
+| `containerNodes` | `{}` | `{ typeName: ContainerNodeSpec }` — chrome for content-holding nodes (callouts, `<details>`) |
 | `onRender` | — | Called after every render with cache + timing stats |
 
 Default `markStyles`: `strong` → bold, `em` → italic, `code` → monospace + green,
@@ -236,6 +237,39 @@ inside), arrows step over it in one go, **Backspace** deletes it, and a
 **click** selects it (`NodeSelection`). With `render`, the editor mounts your
 element over exactly the box it reserved and moves it as the text around it
 changes.
+
+### Content-holding nodes (callouts, `<details>`)
+
+A container node (`content: 'block+'`) can wrap its children in chrome the
+editor paints. The children are ordinary blocks (paragraphs, lists, tables,
+other containers) laid out into a frame inset by the spec's padding, so
+everything that works in the document works inside unchanged:
+
+```ts
+const editor = new CanvasEditor({
+  state, container,
+  containerNodes: {
+    callout: {
+      padding: { top: 10, right: 14, bottom: 10, left: 18 },  // or one number
+      background: '#f1f8ec', radius: 8,
+      accentColor: (node) => (node.attrs.kind === 'warn' ? '#e8a33d' : '#7ec14b'),
+    },
+    details: {
+      header: 34, borderColor: '#cfe3c2',
+      collapsed: (node) => !node.attrs.open,    // children skipped while true
+      renderHeader: (node, getPos) => toggleButton(node, getPos),
+    },
+  },
+})
+```
+
+`renderHeader` mounts DOM over the `header` strip. It's built from the node's
+attrs and rebuilt only when they change, so typing in the body doesn't recreate
+it. Collapsing is an attribute change you dispatch, so it's undoable and shared
+like any edit. A selection left inside a collapsed container moves to the
+container itself. Style values may be fixed or computed per node. Typing inside
+a container falls back to a full layout pass (the box has to grow), the same as
+a table cell.
 
 ## Drag & drop
 
@@ -511,7 +545,7 @@ editor needs to implement.
 - [x] **Atom block node views** — interactive DOM (buttons, embeds) positioned over reserved space (`nodeViews`)
 - [x] **Images** — a block atom rendered by a node view (a real `<img>`); drag-to-resize (corner handle), and drag-to-float so text wraps around it (`floatRect`, reusing the float engine — the same obstacle-wrap Pretext's own demos use)
 - [x] **Inline atoms** — mentions/chips as unbreakable boxes in the line (`inlineNodes`), canvas-drawn pills or interactive DOM via `render`. Laid out by Pretext's rich-inline (`break: 'never'` + `extraWidth`), no engine change
-- [ ] **Content-holding node views** — callouts, `<details>`: editable children inside custom chrome. Sketch in [`design/node-views.md`](design/node-views.md)
+- [x] **Content-holding nodes** — callouts, `<details>`: editable children laid out inside painted chrome (`containerNodes`), with optional header DOM and collapsing
 
 ### Selection & affordances
 
