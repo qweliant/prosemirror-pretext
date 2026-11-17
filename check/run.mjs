@@ -63,6 +63,7 @@ const widths = []
 for (let w = 320; w <= 920; w += 10) widths.push(w)
 
 const report = await page.evaluate((ws) => window.__overrun(ws), widths)
+const inc = await page.evaluate(() => window.__incremental())
 await browser.close()
 shutdown()
 
@@ -88,4 +89,14 @@ if (clipped.length) {
     console.error(`\nTEXT_BLEED (${bleed}px) no longer covers the measurement disagreement.`)
     process.exit(1)
 }
-console.log('\n✓ every painted glyph lands inside the canvas\n')
+console.log('\n✓ every painted glyph lands inside the canvas')
+
+console.log(`\nincremental layout — ${inc.edits} seeded edits, ${inc.incremental} without a full pass`)
+if (inc.mismatches.length) {
+    console.error(`\n✗ ${inc.mismatches.length} difference(s) from a full layout pass:\n`)
+    for (const m of inc.mismatches.slice(0, 8)) {
+        console.error(`    step ${m.step} (${m.edit}) ${m.field}:\n      got  ${JSON.stringify(m.got)}\n      want ${JSON.stringify(m.want)}`)
+    }
+    process.exit(1)
+}
+console.log('✓ every incremental layout matches a full pass\n')

@@ -202,9 +202,11 @@ The editor measures the element's height to reserve space (and re-flows when it
 changes via `ResizeObserver`), mounts/positions/destroys it as the doc changes,
 and handles selection: **arrow into** an atom block selects it (`NodeSelection`),
 **click** its chrome selects it, **Backspace** deletes it, and arrows step past
-it. `getPos()` returns the node's live position for commands. Interactive
-children should `stopPropagation()` on mousedown so clicking them doesn't select
-the node. This is the foundation for images, embeds, and runnable blocks. Scope:
+it. `getPos()` returns the node's live position for commands. Pressing an
+interactive element inside the view (a button, link, input, `select`,
+`textarea`, or anything with `tabindex` or `contenteditable`) works that control
+and leaves the editor's selection alone; pressing anywhere else on the view
+selects the node. This is the foundation for images, embeds, and runnable blocks. Scope:
 flat atom blocks (no nesting), and a changed node's view is recreated, not
 diffed.
 
@@ -225,8 +227,7 @@ const editor = new CanvasEditor({
       background: '#e8f0fe', color: '#1a56c4',  // also: paddingX, radius, font, width
     },
     datePicker: {
-      width: () => 96,                          // a DOM chip needs a fixed width
-      render: (node, getPos) => myDateButton(node, getPos),
+      render: (node, getPos) => myDateButton(node, getPos), // sized by its own content
     },
   },
 })
@@ -234,9 +235,16 @@ const editor = new CanvasEditor({
 
 The atom is one document position: the caret sits at either edge (never
 inside), arrows step over it in one go, **Backspace** deletes it, and a
-**click** selects it (`NodeSelection`). With `render`, the editor mounts your
-element over exactly the box it reserved and moves it as the text around it
-changes.
+**click** selects it (`NodeSelection`), highlighted as its own pill. The same
+press can **drag** it to another spot in the text: it moves as one undo step,
+or copies with Alt, and it can be dropped into another application like any
+selection.
+
+With `render`, the editor mounts your element over the box it reserved and
+moves it as the text around it changes. The element sizes itself: the editor
+measures its width and breaks the line again around the real box (the label's
+width stands in until then). Give the spec a `width` to fix the box instead and
+skip the measuring.
 
 ### Content-holding nodes (callouts, `<details>`)
 
@@ -267,9 +275,11 @@ const editor = new CanvasEditor({
 attrs and rebuilt only when they change, so typing in the body doesn't recreate
 it. Collapsing is an attribute change you dispatch, so it's undoable and shared
 like any edit. A selection left inside a collapsed container moves to the
-container itself. Style values may be fixed or computed per node. Typing inside
-a container falls back to a full layout pass (the box has to grow), the same as
-a table cell.
+container itself. Style values may be fixed or computed per node.
+
+Typing inside a container or a table cell re-lays out only that container or
+table (its outermost one, when they nest), then moves what follows, so it costs
+the same whatever the document's length.
 
 ## Drag & drop
 
@@ -283,9 +293,7 @@ view containers take `touch-action: none` so a swipe on a node drags it instead
 of scrolling. On by default — pass `dragDrop: false` to turn it off.
 
 A node view that runs its own pointer gesture (a resize handle, a custom drag)
-opts out per-node by calling `preventDefault()` on `pointerdown`, the same way
-interactive children `stopPropagation()` on `mousedown` to avoid selecting the
-node.
+opts out per-node by calling `preventDefault()` on `pointerdown`.
 
 Reordering isn't only for pointers — `moveNode` is public, so a "move block up"
 keyboard command or a slash menu goes through the same path:

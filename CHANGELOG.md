@@ -4,6 +4,32 @@
 
 ### Fixed
 
+- **A block node view's measured height now reaches the layout.** When a
+  view's element turned out taller or shorter than the space reserved for it,
+  the editor recorded the new height and scheduled a repaint, but the repaint's
+  incremental layout found the document unchanged and kept the stale layout.
+  The text after the view stayed where it was, under or apart from it, until
+  some later edit happened to force a full pass. Fonts finishing loading had
+  the same problem. Both now force a full pass.
+
+- **Container and table positions stay right after typing above them.** The
+  incremental layout moved boxes and table chrome down by the height of an
+  edit above them, but not along by its length. A `<details>` header's
+  `getPos()` then pointed into the text before it, so its toggle failed with
+  "can't construct text nodes", and a cell selection painted the wrong cells.
+
+- **A selection that continues past a line's end stops at its box.** Inside a
+  table cell or a container it used to run on to the right edge of the editor,
+  across the neighbouring cells. A selected block atom inside one is boxed by
+  its frame, not the full width.
+
+- **Pressing a control inside a node view no longer selects the node.** The
+  editor selected the node on any press inside the view, and told consumers to
+  `stopPropagation()` to avoid it. That couldn't work when the control was the
+  view's own root element (a header that is a single toggle button), because
+  the editor's listener is on that same element. Presses on buttons, links,
+  inputs and other focusable elements are now left to them.
+
 - **An inline leaf no longer shifts every offset after it by one.** It takes a
   document position but contributes nothing to `textContent`, which the editor
   used as its offset space. The caret, hit-testing and Backspace all read the
@@ -143,6 +169,22 @@
 
   Block backgrounds (a code block's panel, a blockquote's bar) inside a table
   cell or container now paint across their frame instead of the whole column.
+
+- **Inline atoms can be dragged, and size their own DOM.** One press selects a
+  chip and can drag it, through the same native drag as a text selection: a
+  move within the editor is one undo step, Alt copies, and it can be dropped
+  into another application. The moved chip stays selected. A selected chip is
+  highlighted as its own pill rather than a slab the height of the line. With
+  `render` and no `width`, the editor measures the element and breaks the line
+  around its real width, so a DOM chip no longer needs a fixed size.
+
+- **Typing inside a table cell or container is incremental.** Such an edit
+  used to take a full layout pass of the whole document. It now rebuilds only
+  the outermost table or container around the edit, with the same functions the
+  full pass uses, and moves what follows. The unit suite and the real-browser
+  gate both check every incremental result against a full pass: the gate
+  applies 60 seeded random edits, mostly inside callouts, and compares after
+  each one.
 
 ## 0.3.0
 

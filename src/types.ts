@@ -178,7 +178,10 @@ export interface InlineNodeSpec
      * `leafText`, else its `label` attr, else the type name.
      */
     label?: (node: PMNode) => string
-    /** A fixed box width in px, overriding label + padding (e.g. for `render`). */
+    /**
+     * A fixed box width in px, overriding label + padding. With `render`, it
+     * also skips measuring the element (see `render`).
+     */
     width?: (node: PMNode) => number
     /** Padding (px) on each side of the label. Default: 6. */
     paddingX?: number
@@ -192,8 +195,10 @@ export interface InlineNodeSpec
     font?: string
     /**
      * Interactive DOM mounted over the atom's box instead of the canvas pill.
-     * It gets the box's width and the line's height; give the spec a `width`
-     * (or a `label`) so the editor knows how much room to reserve.
+     * It gets the line's height. Without a `width`, the element sizes itself
+     * and the editor measures it and breaks the line around that width (the
+     * label's width stands in until the first measurement). With one, it is
+     * given exactly that width.
      */
     render?: NodeViewFn
 }

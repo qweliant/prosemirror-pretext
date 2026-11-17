@@ -98,6 +98,42 @@ function scrollbarWidth(): number
     return cachedScrollbarWidth
 }
 
+/**
+ * The span one dispatch changed, as findDiffStart/findDiffEnd report it:
+ * `[from, toPrev)` in the previous document became `[from, toCur)` in the
+ * current one, and every position after it moved by `delta`.
+ */
+interface DocEdit
+{
+    from: number
+    toPrev: number
+    toCur: number
+    delta: number
+}
+
+/** First index in a list where `pred` turns true (it must be monotonic). */
+function lowerBound<T>(list: T[], pred: (item: T) => boolean): number
+{
+    let lo = 0
+    let hi = list.length
+    while (lo < hi)
+    {
+        const mid = (lo + hi) >> 1
+        if (pred(list[mid])) hi = mid
+        else lo = mid + 1
+    }
+    return lo
+}
+
+/**
+ * Insert `items` into a chrome list (kept in document order) where the
+ * entries positioned after `pos` begin.
+ */
+function insertAt<T extends { pos: number }>(list: T[], pos: number, items: T[]): void
+{
+    list.splice(lowerBound(list, (c) => c.pos > pos), 0, ...items)
+}
+
 /** Whether block layouts are non-decreasing in `yOffset`. See
  *  `CanvasEditor.layoutsSortedByY`. */
 function isSortedByY(layouts: BlockLayout[]): boolean
@@ -210,6 +246,8 @@ export class CanvasEditor {
   // legitimately sit in the document twice (a pasted copy shares it); each
   // render pass hands the list's entries out in document order.
   private readonly inlineViews = new Map<PMNode, MountedView[]>();
+  // Measured widths of DOM-rendered atoms whose spec gives no `width`.
+  private readonly inlineWidths = new Map<PMNode, number>();
   // ─── Container nodes (callouts, <details>) ─────────────────────────
   private readonly containerNodes: Record<string, ContainerNodeSpec>;
   private readonly isContainer = (typeName: string): boolean =>
@@ -372,6 +410,8 @@ export class CanvasEditor {
   // start a native drag, so the caret is not moved until the press proves to be
   // an ordinary click.
   private pressInSelection: number | null = null;
+  // The press was on an inline atom it just selected; a click keeps it so.
+  private pressKeepsSelection = false;
   // Edge auto-scroll while dragging. `dy` is px per frame, signed.
   private autoScrollRaf = 0;
   private autoScrollDy = 0;
@@ -1550,8 +1590,11 @@ export class CanvasEditor {
           : node.type.name)
     ).trim();
     const paddingX = spec.paddingX ?? 6;
+    // A DOM atom with no fixed width reserves its element's measured width,
+    // and the label's until it has been measured.
     const width =
       spec.width?.(node) ??
+      (spec.render ? this.inlineWidths.get(node) : undefined) ??
       (label ? this.measureWidth(label, font) : 0) + 2 * paddingX;
     return {
       box: {
@@ -2052,13 +2095,17 @@ export class CanvasEditor {
   }
 
   /**
-   * Incremental layout for the common case: a single textblock's content
-   * changed (typing) without altering document structure. Rebuilds only that
-   * block and shifts the scalar positions of the blocks after it — turning a
-   * per-keystroke O(blocks) walk into O(blocks after the edit) cheap number
-   * updates (and O(1) when typing at the end). Returns false to fall back to a
-   * full `computeLayout` for anything structural (splits, joins, list ops,
-   * floats, atom edits).
+   * Incremental layout: when a dispatch changed one region of the document,
+   * rebuild only that region and move everything after it, instead of walking
+   * the whole document. Two shapes qualify:
+   *
+   * - one top-level-flow textblock changed (typing): `relayoutTextblock`;
+   * - the edit sits inside a table or container: `relayoutFramedUnit` rebuilds
+   *   the outermost such unit around it, whatever happened inside.
+   *
+   * Anything else (an edit spanning blocks in the main flow, a node's attrs
+   * changing, floats) returns false and takes a full `computeLayout`. The test
+   * suite checks every incremental result against a full pass.
    */
   private tryIncrementalLayout(): boolean {
     const prevDoc = this.prevDoc;
@@ -2068,22 +2115,35 @@ export class CanvasEditor {
     if (this.floats.length > 0 || this.floatRectFor || this.hadFloats)
       return false;
 
-    const prev = prevDoc.content;
-    const cur = this.state.doc.content;
-    const ds = prev.findDiffStart(cur);
+    const ds = prevDoc.content.findDiffStart(this.state.doc.content);
     if (ds === null) {
       // Selection-only change: every block's layout is still valid.
       this.cacheHits = this.lastLayouts.length;
       this.cacheMisses = 0;
       return true;
     }
-    const de = prev.findDiffEnd(cur);
+    const de = prevDoc.content.findDiffEnd(this.state.doc.content);
     if (!de) return false;
-    const delta = cur.size - prev.size;
+    // findDiffEnd can overlap findDiffStart when the edit repeats adjacent
+    // content ("aa" → "aaa"); the changed span is whatever both bound.
+    const edit: DocEdit = {
+      from: Math.min(ds, de.a, de.b),
+      toPrev: Math.max(ds, de.a),
+      toCur: Math.max(ds, de.b),
+      delta: this.state.doc.content.size - prevDoc.content.size,
+    };
+    return this.relayoutTextblock(edit) || this.relayoutFramedUnit(edit);
+  }
 
-    // Find the block (in the *previous* layout's coordinates) containing the
-    // change. lastLayouts is sorted by position, so binary-search it.
+  /**
+   * One textblock in the main flow changed without altering structure. Its
+   * blocks after it only move, so this is O(1) layout plus O(blocks after) of
+   * number updates.
+   */
+  private relayoutTextblock(edit: DocEdit): boolean {
     const layouts = this.lastLayouts;
+    // lastLayouts is sorted by position, so binary-search for the block
+    // (in the *previous* document's coordinates) containing the change.
     let lo = 0,
       hi = layouts.length - 1,
       k = -1;
@@ -2092,8 +2152,8 @@ export class CanvasEditor {
       const b = layouts[mid];
       const start = b.isAtom ? b.pmStartPos : b.pmStartPos - 1;
       const end = b.pmEndPos + 1;
-      if (ds < start) hi = mid - 1;
-      else if (ds > end) lo = mid + 1;
+      if (edit.from < start) hi = mid - 1;
+      else if (edit.from > end) lo = mid + 1;
       else {
         k = mid;
         break;
@@ -2101,73 +2161,151 @@ export class CanvasEditor {
     }
     if (k < 0) return false;
     const blk = layouts[k];
-    if (blk.isAtom) return false;
-    // Inside a table cell: a cell's height change only moves the rows below it
-    // when that cell is the tallest in its row, which "shift everything after
-    // by dy" cannot express. Typing *outside* a table is still incremental,
-    // even when the document contains one — that is the common case, and the
-    // table simply shifts with everything else below the edit.
-    if (blk.frame) return false;
+    // An atom changing is structural; a framed block (in a table cell or a
+    // container) can move its siblings in ways "shift what follows" cannot
+    // express, so `relayoutFramedUnit` rebuilds its whole unit instead.
+    if (blk.isAtom || blk.frame) return false;
 
-    // The whole changed range (prev side [ds, de.a]) must stay inside this one
-    // block; otherwise the edit crossed a boundary (split/join) → full rebuild.
-    if (ds < blk.pmStartPos - 1 || de.a > blk.pmEndPos + 1) return false;
+    // The whole change must stay inside this one block; otherwise the edit
+    // crossed a boundary (split/join).
+    if (edit.from < blk.pmStartPos - 1 || edit.toPrev > blk.pmEndPos + 1)
+      return false;
 
-    // The block's start position is unchanged (content before it is identical),
-    // so resolve it in the current doc and confirm it's still a textblock.
+    // Content before the block is identical, so its start position holds.
     const curNode = this.state.doc.resolve(blk.pmStartPos).parent;
     if (!curNode.isTextblock || curNode === blk.node) return false;
 
-    // Structural guard: the whole document delta must be explained by this one
-    // block's text-length change. A split/join/list-op changes the block count,
-    // so the delta won't match — fall back to a full pass.
+    // The whole document delta must be explained by this block's own length
+    // change; a split/join/list op changes the block count, so it won't be.
     const prevTextLen = blk.pmEndPos - blk.pmStartPos;
-    if (delta !== curNode.content.size - prevTextLen) return false;
+    if (edit.delta !== curNode.content.size - prevTextLen) return false;
 
-    const indent = blk.indent ?? 0;
     const rebuilt = this.assembleTextBlock(
       curNode,
-      indent,
+      blk.indent ?? 0,
       blk.yOffset,
       blk.marker,
       blk.pmStartPos - 1,
       false,
     );
     layouts[k] = rebuilt;
+    this.shiftAfterEdit(k + 1, edit, rebuilt.height - blk.height);
+    this.cacheHits = layouts.length - 1;
+    this.cacheMisses = 1;
+    return true;
+  }
 
-    const dy = rebuilt.height - blk.height;
-    // Table chrome carries absolute coordinates of its own, so it has to move
-    // with the cell blocks it frames — otherwise the rules detach from the text
-    // by exactly the height the edit added.
-    if (dy !== 0) {
-      const editedTop = blk.yOffset;
-      for (const t of this.lastTables) {
-        if (t.y <= editedTop) continue;
-        t.y += dy;
-        for (const r of t.rows) r.y += dy;
-        for (const c of t.cells) c.y += dy;
-      }
-      // Container boxes too. An edit *inside* one never gets here (its blocks
-      // carry a frame, which bails above), so every box is wholly below or
-      // wholly above the edited block.
-      for (const c of this.lastContainers) {
-        if (c.y > editedTop) c.y += dy;
-      }
+  /**
+   * The edit sits inside a table or a container. A row's height is its
+   * tallest cell's and a box's is its content's, so one block's change can
+   * move its neighbours in ways a plain shift cannot express. Instead, rebuild
+   * the outermost table or container around the edit with the same functions
+   * the full pass uses, splice it in, and shift what follows. Structure inside
+   * the unit can change freely (splits, joins, a nested table appearing).
+   */
+  private relayoutFramedUnit(edit: DocEdit): boolean {
+    const prevDoc = this.prevDoc!;
+    const doc = this.state.doc;
+
+    // The outermost unit is the one containing the edit with the lowest
+    // position: units nest, so their ranges are nested intervals.
+    let unit: TableChrome | ContainerChrome | null = null;
+    for (const c of [...this.lastTables, ...this.lastContainers]) {
+      if (unit && c.pos >= unit.pos) continue;
+      const before = prevDoc.nodeAt(c.pos);
+      if (before && c.pos < edit.from && edit.toPrev < c.pos + before.nodeSize)
+        unit = c;
     }
-    for (let i = k + 1; i < layouts.length; i++) {
+    if (!unit) return false;
+
+    // Strictly inside means the unit's own open and close tokens are in the
+    // unchanged prefix and suffix, so the same node type still sits at `pos`.
+    const pos = unit.pos;
+    const prevEnd = pos + prevDoc.nodeAt(pos)!.nodeSize;
+    const node = doc.nodeAt(pos);
+    if (!node || edit.toCur >= pos + node.nodeSize) return false;
+
+    // Chrome records exactly the frame it was laid out into.
+    const frame: LayoutFrame = { x: unit.x, width: unit.width };
+    this.cacheHits = 0;
+    this.cacheMisses = 0;
+    let sub: {
+      blocks: BlockLayout[];
+      tables: TableChrome[];
+      containers: ContainerChrome[];
+      height: number;
+    };
+    if ("cells" in unit) {
+      const t = layoutTable(this.tableCx, node, pos, unit.y, frame);
+      sub = {
+        blocks: t.blocks,
+        tables: [t.chrome, ...t.nested],
+        containers: t.containers,
+        height: t.height,
+      };
+    } else {
+      sub = this.layoutContainer(node, pos, unit.y, frame);
+    }
+    const dy = sub.height - unit.height;
+
+    // Swap the unit out: drop its old blocks and chrome, shift what follows,
+    // then insert the rebuilt unit. Shifting before inserting matters: the new
+    // chrome is already in the current document's positions.
+    const layouts = this.lastLayouts;
+    const a = lowerBound(layouts, (l) => l.pmStartPos > pos);
+    const b = lowerBound(layouts, (l) => l.pmStartPos >= prevEnd);
+    layouts.splice(a, b - a);
+    const outside = (c: { pos: number }) => c.pos < pos || c.pos >= prevEnd;
+    this.lastTables = this.lastTables.filter(outside);
+    this.lastContainers = this.lastContainers.filter(outside);
+
+    this.shiftAfterEdit(a, edit, dy);
+
+    layouts.splice(a, 0, ...sub.blocks);
+    insertAt(this.lastTables, pos, sub.tables);
+    insertAt(this.lastContainers, pos, sub.containers);
+    // Cell blocks sit side by side, so the order by Y can change inside.
+    this.layoutsSortedByY = isSortedByY(layouts);
+    this.cacheHits += layouts.length - sub.blocks.length;
+    return true;
+  }
+
+  /**
+   * Carry everything after an edit forward: document positions by the edit's
+   * size delta, and pixels by `dy` (the rebuilt region's height change).
+   * Everything after the edit in the document is also below it on screen,
+   * because both incremental paths rebuild a region in the main flow.
+   *
+   * Chrome keeps its own positions — table cells for painting a CellSelection,
+   * a container's for its header's getPos — so it has to move too.
+   */
+  private shiftAfterEdit(firstBlock: number, edit: DocEdit, dy: number): void {
+    const layouts = this.lastLayouts;
+    for (let i = firstBlock; i < layouts.length; i++) {
       const L = layouts[i];
-      L.pmStartPos += delta;
-      L.pmEndPos += delta;
+      L.pmStartPos += edit.delta;
+      L.pmEndPos += edit.delta;
       if (dy !== 0) {
         L.yOffset += dy;
         for (const ln of L.lines) ln.y += dy;
       }
     }
+    for (const t of this.lastTables) {
+      if (t.pos < edit.toPrev) continue;
+      t.pos += edit.delta;
+      t.y += dy;
+      for (const r of t.rows) r.y += dy;
+      for (const c of t.cells) {
+        c.pos += edit.delta;
+        c.y += dy;
+      }
+    }
+    for (const c of this.lastContainers) {
+      if (c.pos < edit.toPrev) continue;
+      c.pos += edit.delta;
+      c.y += dy;
+    }
     this.lastTotalHeight += dy;
-    // Stats: only this block was re-laid-out; the rest were reused.
-    this.cacheHits = layouts.length - 1;
-    this.cacheMisses = 1;
-    return true;
   }
 
   private computeLayout(): {
@@ -2892,6 +3030,29 @@ export class CanvasEditor {
 
   // ─── Render Loop ───────────────────────────────────────────────────
 
+  /**
+   * Drop every cached layout of one textblock, so the next pass breaks its
+   * lines again: the geometry cache, the positional cache, and its entry in
+   * `lastLayouts`, which positional reuse checks by index before the cache.
+   */
+  private forgetBlockLayout(node: PMNode): void {
+    this.layoutCache.delete(node);
+    this.positionedCache.delete(node);
+    this.lastLayouts = this.lastLayouts.filter((b) => b.node !== node);
+  }
+
+  /**
+   * Force the next layout to be a full pass, and schedule it. The incremental
+   * path finds what changed by diffing documents, so it can't see a change to
+   * one of layout's other inputs — a node view's measured size, a web font
+   * arriving — and would keep the stale layout.
+   */
+  private relayout(): void {
+    this.prevDoc = null;
+    this.layoutDirty = true;
+    this.scheduleRender();
+  }
+
   private scheduleRender(): void {
     if (this.pendingRender) return;
     this.pendingRender = true;
@@ -3034,7 +3195,7 @@ export class CanvasEditor {
       const measured = view.container.offsetHeight;
       if (measured > 0 && this.nodeViewHeights.get(block.node) !== measured) {
         this.nodeViewHeights.set(block.node, measured);
-        this.scheduleRender();
+        this.relayout();
       }
     }
 
@@ -3051,19 +3212,26 @@ export class CanvasEditor {
    * Mount/position/destroy the DOM for inline atoms whose spec has `render`.
    * Each element covers exactly the box the line breaker reserved, so the
    * DOM and the text around it can't drift apart.
+   *
+   * With no fixed `width` in the spec, the element sizes itself and its
+   * measured width is fed back into layout: the line is broken again around
+   * the real box, as block node views feed back their height.
    */
   private syncInlineViews(layouts: BlockLayout[]): void {
     if (this.inlineViews.size === 0 && !this.hasInlineRender()) return;
     const seen = new Map<PMNode, number>();
     const live = new Set<MountedView>();
+    // Measured after every element is placed, so the reads don't interleave
+    // with the writes and force a browser layout per atom.
+    const toMeasure: { view: MountedView; node: PMNode; block: PMNode; reserved: number }[] = [];
     for (const block of layouts) {
       for (const line of block.lines) {
         if (!line.fragments) continue;
         for (const f of line.fragments) {
           if (!f.atom?.dom) continue;
           const node = f.atom.node;
-          const render = this.inlineNodes[node.type.name]?.render;
-          if (!render) continue;
+          const spec = this.inlineNodes[node.type.name];
+          if (!spec?.render) continue;
           const i = seen.get(node) ?? 0;
           seen.set(node, i + 1);
           let list = this.inlineViews.get(node);
@@ -3074,24 +3242,46 @@ export class CanvasEditor {
           const pos = block.pmStartPos + f.pmStart;
           let view = list[i];
           if (!view) {
-            view = this.createNodeView(node, pos, render, false);
+            view = this.createNodeView(node, pos, spec.render, false);
             list.push(view);
           }
           view.pos = pos;
           const r = atomPillRect(line.y, block.fontSize, block.lineHeight);
-          view.container.style.left = `${line.x + f.x}px`;
-          view.container.style.top = `${r.y}px`;
-          view.container.style.width = `${f.width}px`;
-          view.container.style.height = `${r.height}px`;
+          const st = view.container.style;
+          st.left = `${line.x + f.x}px`;
+          st.top = `${r.y}px`;
+          st.height = `${r.height}px`;
+          if (spec.width) {
+            st.width = `${f.width}px`;
+          } else {
+            st.width = "max-content";
+            toMeasure.push({ view, node, block: block.node, reserved: f.width });
+          }
           live.add(view);
         }
       }
     }
+    let changed = false;
+    for (const { view, node, block, reserved } of toMeasure) {
+      const measured = Math.ceil(view.container.getBoundingClientRect().width);
+      // Zero means not rendered (detached, display: none, a test DOM).
+      if (measured <= 0 || measured === reserved) continue;
+      this.inlineWidths.set(node, measured);
+      // The paragraph's cached line breaks assumed the old width.
+      this.forgetBlockLayout(block);
+      changed = true;
+    }
+    if (changed) this.relayout();
+
     for (const [node, list] of this.inlineViews) {
       const keep = list.filter((v) => live.has(v));
       for (const v of list) if (!live.has(v)) v.container.remove();
-      if (keep.length === 0) this.inlineViews.delete(node);
-      else this.inlineViews.set(node, keep);
+      if (keep.length > 0) {
+        this.inlineViews.set(node, keep);
+      } else {
+        this.inlineViews.delete(node);
+        this.inlineWidths.delete(node);
+      }
     }
   }
 
@@ -3197,12 +3387,20 @@ export class CanvasEditor {
     if (this.a11yMirror && !interactive)
       container.setAttribute("aria-hidden", "true");
 
-    // Click on the node view (not an interactive child that stops propagation)
-    // selects the node. Bound to the view element, not the container, so the
-    // container's empty area stays click-through (pointer-events: none above).
+    // Pressing the view selects its node. Bound to the view element, not the
+    // container, so the container's empty area stays click-through
+    // (pointer-events: none above).
     view.dom.addEventListener(
       "mousedown",
       (e) => {
+        // A press on a control inside the view (a toggle, a link, an input)
+        // is the control's: no selection change, and no preventDefault, so it
+        // can take focus. The consumer can't opt out of this listener with
+        // stopPropagation when the control *is* the view's root element, so
+        // the editor has to recognise controls itself.
+        const target = e.target as Element | null;
+        const control = target?.closest?.(FOCUSABLE_SEL);
+        if (control && view.dom.contains(control)) return;
         e.preventDefault();
         this.dispatch(
           this.state.tr.setSelection(
@@ -3238,7 +3436,7 @@ export class CanvasEditor {
         this.layoutCache = new WeakMap();
         this.positionedCache = new WeakMap();
         this.widthCache.clear();
-        this.scheduleRender();
+        this.relayout();
       };
       document.fonts.ready.then(onFontsLoaded);
       document.fonts.addEventListener("loadingdone", onFontsLoaded, { signal });
@@ -3421,13 +3619,18 @@ export class CanvasEditor {
         // mousedown also stops the browser from ever *starting* a drag, and
         // handing content to another application is only possible through one.
         // Modifier presses are excluded: those mean extend or follow-link.
+        const plain = !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey;
         const mayDragSelection =
-          this.dragDrop &&
-          !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey &&
+          this.dragDrop && plain &&
           !sel.empty && hit !== null &&
           hit.pos > sel.from && hit.pos < sel.to;
+        // An inline atom is selected and draggable in the same press, the way a
+        // block node view is: the press can't be inside its selection first,
+        // since the selection is a single position wide.
+        const atomPos = !e.shiftKey && gapPos === null ? this.inlineAtomAt(x, y) : null;
+        const mayDragAtom = this.dragDrop && plain && atomPos !== null;
 
-        if (!mayDragSelection) e.preventDefault();
+        if (!mayDragSelection && !mayDragAtom) e.preventDefault();
         this.touchSelection = false; // mouse in use → hide touch handles
 
         // A click in a block seam (between stacked atoms) sets a gap cursor.
@@ -3460,18 +3663,24 @@ export class CanvasEditor {
         }
 
         // A plain click on an inline atom selects it, like a block atom.
-        if (!e.shiftKey) {
-          const atomPos = this.inlineAtomAt(x, y);
-          if (atomPos !== null) {
-            this.dispatch(
-              this.state.tr.setSelection(
-                NodeSelection.create(this.state.doc, atomPos),
-              ),
-            );
-            this.dragging = false;
-            this.textarea.focus();
+        if (atomPos !== null) {
+          this.dispatch(
+            this.state.tr.setSelection(
+              NodeSelection.create(this.state.doc, atomPos),
+            ),
+          );
+          this.dragging = false;
+          if (mayDragAtom) {
+            // As below, but a press that doesn't become a drag keeps the
+            // atom selected rather than collapsing to a caret.
+            this.pressInSelection = atomPos;
+            this.pressKeepsSelection = true;
+            this.stack.draggable = true;
+            this.textarea.focus({ preventScroll: true });
             return;
           }
+          this.textarea.focus();
+          return;
         }
 
         // A press inside the selection leaves it alone: the browser may be
@@ -3503,9 +3712,11 @@ export class CanvasEditor {
       () => {
         if (this.pressInSelection === null) return;
         const pos = this.pressInSelection;
+        const keep = this.pressKeepsSelection;
         this.pressInSelection = null;
+        this.pressKeepsSelection = false;
         this.stack.draggable = false;
-        if (!this.textDrag) this.setHead(pos, false);
+        if (!this.textDrag && !keep) this.setHead(pos, false);
       },
       { signal },
     );
@@ -3782,6 +3993,7 @@ export class CanvasEditor {
           const d = this.textDrag;
           this.textDrag = null;
           this.pressInSelection = null;
+          this.pressKeepsSelection = false;
           this.stack.draggable = false;
           this.dropTarget = null;
           this.stopAutoScroll();
@@ -4495,10 +4707,14 @@ export class CanvasEditor {
     const before = tr.doc.content.size;
     tr.replaceRange(at, at, slice);
     const added = tr.doc.content.size - before;
-    // `between` tolerates endpoints that aren't valid text positions (the slice
-    // may have landed as whole blocks), unlike TextSelection.create.
+    // A lone inline atom stays selected as itself. Otherwise `between`
+    // tolerates endpoints that aren't valid text positions (the slice may
+    // have landed as whole blocks), unlike TextSelection.create.
+    const moved = tr.doc.nodeAt(at);
     tr.setSelection(
-      TextSelection.between(tr.doc.resolve(at), tr.doc.resolve(at + added)),
+      added === 1 && moved?.isInline && NodeSelection.isSelectable(moved)
+        ? NodeSelection.create(tr.doc, at)
+        : TextSelection.between(tr.doc.resolve(at), tr.doc.resolve(at + added)),
     );
     this.dispatch(tr.scrollIntoView());
   }

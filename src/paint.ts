@@ -14,7 +14,7 @@
  */
 
 import type { Node as PMNode } from 'prosemirror-model'
-import type { Selection } from 'prosemirror-state'
+import { NodeSelection, type Selection } from 'prosemirror-state'
 import type {
     CursorDecoration, Decoration, InlineDecoration, NodeDecoration,
 } from './decoration'
@@ -272,7 +272,7 @@ export function paintToCanvas(
     else if (!sel.empty)
     {
         ctx.fillStyle = cx.selectionColor
-        paintSelectionRects(cx, ctx, layouts, sel.from, sel.to)
+        paintSelectionRects(cx, ctx, layouts, sel)
     }
 
     ctx.font = cx.font
@@ -704,24 +704,52 @@ function forEachRangeRect(
     }
 }
 
-function paintSelectionRects(
-    cx: PaintContext,
-    ctx: CanvasRenderingContext2D,
-    layouts: BlockLayout[],
-    from: number,
-    to: number,
-): void
+/** One rectangle of selection highlight, in document coordinates. */
+export interface SelectionRect
 {
+    x: number
+    y: number
+    w: number
+    h: number
+    /** Corner radius, for a selected inline atom drawn as its own pill. */
+    radius?: number
+}
+
+/**
+ * The rectangles that highlight a text or node selection (a CellSelection is
+ * painted per cell instead). Kept apart from painting so it can be tested.
+ *
+ * A selected inline atom is highlighted as its own pill rather than a slab
+ * the height of the line. A selection that carries past a line's end trails
+ * to the edge of the block's frame, so inside a table cell or a container it
+ * stops at that box rather than running across the neighbours.
+ */
+export function selectionRects(
+    cx: Pick<PaintContext, 'containerWidth' | 'xForOffsetInLine'>,
+    layouts: BlockLayout[],
+    sel: Selection,
+): SelectionRect[]
+{
+    const { from, to } = sel
+    if (sel instanceof NodeSelection && sel.node.isInline)
+    {
+        const pill = inlineAtomRect(layouts, from)
+        if (pill) return [pill]
+    }
+
+    const rects: SelectionRect[] = []
     for (const block of layouts)
     {
         if (block.pmEndPos < from || block.pmStartPos > to) continue
+        const left = block.frame?.x ?? 0
+        const right = block.frame ? block.frame.x + block.frame.width : cx.containerWidth
 
         // Selected atom block: box its whole region (node selection).
         if (block.isAtom)
         {
             if (from <= block.pmStartPos && to >= block.pmEndPos)
             {
-                ctx.fillRect(0, block.yOffset, cx.containerWidth, block.height)
+                rects.push({ x: left, y: block.yOffset, w: right - left, h: block.height })
             }
             continue
         }
@@ -732,7 +760,7 @@ function paintSelectionRects(
             if (from <= block.pmStartPos && to >= block.pmEndPos)
             {
                 const line = block.lines[0]
-                ctx.fillRect(line.x, line.y, block.lineHeight / 3, block.lineHeight)
+                rects.push({ x: line.x, y: line.y, w: block.lineHeight / 3, h: block.lineHeight })
             }
             continue
         }
@@ -750,17 +778,52 @@ function paintSelectionRects(
 
             const a = Math.max(from, lineStart)
             const x1 = cx.xForOffsetInLine(block, line, a - block.pmStartPos)
-
-            // Selection continuing past this line trails to the container
-            // edge; otherwise stop at the selection end on this line.
             const x2 = to > lineEnd
-                ? line.x + cx.containerWidth
+                ? right
                 : cx.xForOffsetInLine(block, line, Math.min(to, lineEnd) - block.pmStartPos)
 
-            if (x2 > x1)
-            {
-                ctx.fillRect(x1, line.y, x2 - x1, block.lineHeight)
-            }
+            if (x2 > x1) rects.push({ x: x1, y: line.y, w: x2 - x1, h: block.lineHeight })
+        }
+    }
+    return rects
+}
+
+/** The pill an inline atom at document position `pos` is painted as, if laid out. */
+function inlineAtomRect(layouts: BlockLayout[], pos: number): SelectionRect | null
+{
+    for (const block of layouts)
+    {
+        if (block.isAtom || pos < block.pmStartPos || pos >= block.pmEndPos) continue
+        const offset = pos - block.pmStartPos
+        for (const line of block.lines)
+        {
+            const f = line.fragments?.find((fr) => fr.atom && fr.pmStart === offset)
+            if (!f) continue
+            const r = atomPillRect(line.y, block.fontSize, block.lineHeight)
+            return { x: line.x + f.x, y: r.y, w: f.width, h: r.height, radius: f.atom!.radius }
+        }
+    }
+    return null
+}
+
+function paintSelectionRects(
+    cx: PaintContext,
+    ctx: CanvasRenderingContext2D,
+    layouts: BlockLayout[],
+    sel: Selection,
+): void
+{
+    for (const r of selectionRects(cx, layouts, sel))
+    {
+        if (r.radius && typeof ctx.roundRect === 'function')
+        {
+            ctx.beginPath()
+            ctx.roundRect(r.x, r.y, r.w, r.h, r.radius)
+            ctx.fill()
+        }
+        else
+        {
+            ctx.fillRect(r.x, r.y, r.w, r.h)
         }
     }
 }

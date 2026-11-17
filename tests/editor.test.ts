@@ -8,7 +8,7 @@ import { GapCursor } from 'prosemirror-gapcursor'
 import { markSpecs, buildMarkKeymap } from '../src/marks'
 import { expandCollapsedWhitespace } from '../src/text'
 import { Decoration, remoteSelection, withAlpha } from '../src/decoration'
-import { visibleRange } from '../src/paint'
+import { visibleRange, selectionRects } from '../src/paint'
 import { TEXT_BLEED } from '../src/constants'
 import { CellSelection } from '../src/table-selection'
 import {
@@ -2579,6 +2579,21 @@ describe('node views (atom blocks)', () =>
         ed.destroy()
     })
 
+    test('a node view\'s measured height reaches layout with no document change', async () =>
+    {
+        const { ed, container } = widgetEditor()
+        ed.flush()
+        const below = () => (ed as any).lastLayouts.find((b: any) => b.text === 'below')
+        const y0 = below().yOffset
+        // happy-dom measures nothing; stand in for the browser's layout.
+        const box = (container.querySelector('.nv') as HTMLElement).parentElement!
+        Object.defineProperty(box, 'offsetHeight', { get: () => 300 })
+        ed.flush() // the sync reads 300 and asks for a layout
+        await nextFrame()
+        expect(below().yOffset).toBe(y0 + 300 - 40)
+        ed.destroy()
+    })
+
     test('clicking an atom region returns a position without crashing', () =>
     {
         const { ed } = widgetEditor()
@@ -4079,16 +4094,20 @@ describe('tables (side-by-side layout)', () =>
         ed.destroy()
     })
 
-    test('an edit inside a cell declines the incremental path', () =>
+    test('an edit inside a cell rebuilds only its table', () =>
     {
         const { ed } = mk(row(cell('aa'), cell('bb')))
         const cellBlock = ((ed as any).lastLayouts as any[])[0]
         expect(cellBlock.frame).toBeTruthy()
+        let fullPasses = 0
+        const full = (ed as any).computeLayout.bind(ed)
+        ;(ed as any).computeLayout = () => { fullPasses++; return full() }
         ;(ed as any).dispatch((ed as any).state.tr.insertText('X', cellBlock.pmStartPos))
-        ;(ed as any).prevDoc = (ed as any).prevDoc // no-op, keep prevDoc as-is
+        ;(ed as any).ensureLayout()
         // A cell's height change only moves rows below when it is its row's
-        // tallest, which the incremental shift cannot express.
-        expect((ed as any).tryIncrementalLayout()).toBe(false)
+        // tallest, so a plain shift can't express it: the whole table is
+        // rebuilt instead, without a full pass.
+        expect(fullPasses).toBe(0)
         ed.destroy()
     })
 })
@@ -4423,14 +4442,17 @@ describe('incremental layout with tables present', () =>
         ed.destroy(); f.destroy()
     })
 
-    test('typing inside a cell falls back, and still matches a full pass', () =>
+    test('typing inside a cell stays incremental, and still matches a full pass', () =>
     {
         const ed = build(docWithTable())
         const cellBlock = ((ed as any).lastLayouts as any[]).find((b: any) => b.text === 'a')
         expect(cellBlock.frame).toBeTruthy()
+        let fullPasses = 0
+        const full = (ed as any).computeLayout.bind(ed)
+        ;(ed as any).computeLayout = () => { fullPasses++; return full() }
         ;(ed as any).dispatch((ed as any).state.tr.insertText('ZZ', cellBlock.pmStartPos))
-        expect((ed as any).tryIncrementalLayout()).toBe(false)
         ;(ed as any).coordsAtPos(0)
+        expect(fullPasses).toBe(0)
         const f = fresh(ed)
         expect(snapshot(ed)).toEqual(snapshot(f))
         ed.destroy(); f.destroy()
@@ -4894,6 +4916,130 @@ describe('inline atoms (mentions / chips)', () =>
         ed.destroy()
     })
 
+    test('a selected atom highlights as its own pill, not a full-line slab', () =>
+    {
+        const { ed } = atomEditor()
+        ed.dispatch(ed.state.tr.setSelection(NodeSelection.create(ed.state.doc, 4)))
+        ed.flush()
+        const s = ed as any
+        const [r, ...rest] = selectionRects(s.paintCx, s.lastLayouts, ed.state.selection)
+        expect(rest).toEqual([])
+        expect([r.x, r.w, r.radius]).toEqual([24, 36, 4])
+        expect(r.h).toBeLessThan(s.lastLayouts[0].lineHeight)
+        // A text range across the same chip keeps the ordinary line-height rect.
+        ed.dispatch(ed.state.tr.setSelection(TextSelection.create(ed.state.doc, 3, 6)))
+        const [t] = selectionRects(s.paintCx, s.lastLayouts, ed.state.selection)
+        expect(t.h).toBe(s.lastLayouts[0].lineHeight)
+        expect(t.radius).toBeUndefined()
+        ed.destroy()
+    })
+
+    test('a DOM atom with no fixed width reserves its element\'s measured width', async () =>
+    {
+        const { ed, container } = atomEditor({
+            mention: {
+                render: () =>
+                {
+                    const el = document.createElement('span')
+                    el.className = 'chip'
+                    return el
+                },
+            },
+        })
+        ed.flush()
+        const frags = () => (ed as any).lastLayouts[0].lines[0].fragments
+        expect(frags()[1].width).toBe(36) // the label's estimate until measured
+        const box = (container.querySelector('.chip') as HTMLElement).parentElement!
+        expect(box.style.width).toBe('max-content')
+        box.getBoundingClientRect = () => ({ width: 99.2 }) as DOMRect
+        ed.flush()
+        await nextFrame()
+        // Rounded up to whole pixels, and the text after moves with it.
+        expect(frags()[1].width).toBe(100)
+        expect(frags()[2].x).toBe(24 + 100)
+        // Settled: a further frame doesn't re-measure into a loop.
+        const passes = (ed as any).cacheMisses
+        ed.flush()
+        expect((ed as any).inlineWidths.get(ed.state.doc.firstChild!.child(1))).toBe(100)
+        expect((ed as any).cacheMisses).toBeLessThanOrEqual(passes)
+        ed.destroy()
+    })
+
+    test('an atom is selected and draggable in one press, and moves on drop', () =>
+    {
+        const { ed } = atomEditor()
+        const s = ed as any
+        s.canvas.getBoundingClientRect = () => ({ left: 0, top: 0 })
+        const press = new MouseEvent('mousedown', {
+            bubbles: true, cancelable: true, button: 0, clientX: 40, clientY: 5,
+        })
+        s.canvas.dispatchEvent(press)
+        expect((ed.state.selection as NodeSelection).node?.type.name).toBe('mention')
+        // Left to the browser, or it could never start the drag.
+        expect(press.defaultPrevented).toBe(false)
+        expect(s.stack.draggable).toBe(true)
+
+        // A release with no drag is a click: the atom stays selected.
+        window.dispatchEvent(new MouseEvent('mouseup'))
+        expect(ed.state.selection instanceof NodeSelection).toBe(true)
+        expect(s.stack.draggable).toBe(false)
+
+        // Press again and drag it to the end of the line.
+        s.canvas.dispatchEvent(new MouseEvent('mousedown', {
+            bubbles: true, cancelable: true, button: 0, clientX: 40, clientY: 5,
+        }))
+        const drag = (type: string, x: number) =>
+        {
+            const ev: any = new Event(type, { bubbles: true, cancelable: true })
+            const store: Record<string, string> = {}
+            Object.assign(ev, {
+                clientX: x, clientY: 5, altKey: false,
+                dataTransfer: {
+                    setData: (t: string, v: string) => { store[t] = v },
+                    getData: (t: string) => store[t] ?? '',
+                    files: [], dropEffect: 'move', effectAllowed: 'none',
+                },
+            })
+            s.stack.dispatchEvent(ev)
+        }
+        drag('dragstart', 40)
+        drag('drop', 200)
+        drag('dragend', 200)
+        const para = ed.state.doc.firstChild!
+        expect(para.lastChild!.type.name).toBe('mention')
+        expect(para.textContent).toBe('hi  there')
+        // Still one atom, still selected as itself.
+        expect((ed.state.selection as NodeSelection).node?.type.name).toBe('mention')
+        ed.destroy()
+    })
+
+    test('with dragDrop off, a press on an atom still just selects it', () =>
+    {
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        const ed = new CanvasEditor({
+            state: EditorState.create({
+                doc: ischema.node('doc', null, [ischema.node('paragraph', null, [
+                    ischema.text('hi '), ischema.nodes['mention'].create({ label: 'bob' }),
+                ])]),
+                schema: ischema,
+            }),
+            container,
+            dragDrop: false,
+        })
+        const s = ed as any
+        s.canvas.getBoundingClientRect = () => ({ left: 0, top: 0 })
+        const press = new MouseEvent('mousedown', {
+            bubbles: true, cancelable: true, button: 0, clientX: 40, clientY: 5,
+        })
+        s.canvas.dispatchEvent(press)
+        expect(ed.state.selection instanceof NodeSelection).toBe(true)
+        expect(press.defaultPrevented).toBe(true)
+        expect(s.stack.draggable).toBeFalsy()
+        ed.destroy()
+        container.remove()
+    })
+
     test('caret sits at the atom\'s edges, never inside it', () =>
     {
         const { ed } = atomEditor()
@@ -5182,5 +5328,256 @@ describe('container nodes (callouts / details)', () =>
         await nextFrame()
         expect(container.querySelector('.toggle')).toBeNull()
         ed.destroy()
+    })
+})
+
+describe('incremental layout inside tables and containers', () =>
+{
+    // The shared table schema, plus framed containers, with blocks allowed
+    // anywhere so units can nest in each other.
+    const fschema = new Schema({
+        nodes: {
+            ...nodes,
+            doc: { content: 'block+' },
+            paragraph: { ...nodes.paragraph, group: 'block' },
+            table_cell: { ...nodes.table_cell, content: 'block+' },
+            table_header: { ...nodes.table_header, content: 'block+' },
+            callout: { content: 'block+', group: 'block', toDOM: () => ['aside', 0] },
+            details: {
+                content: 'block+', group: 'block', attrs: { open: { default: true } },
+                toDOM: () => ['details', 0],
+            },
+        },
+        marks,
+    })
+    const p = (t: string) => fschema.node('paragraph', null, t ? [fschema.text(t)] : [])
+    const callout = (...c: any[]) => fschema.node('callout', null, c)
+    const table = (...cells: string[][]) => fschema.node('table', null, cells.map((row) =>
+        fschema.node('table_row', null, row.map((t) => fschema.node('table_cell', null, [p(t)])))))
+    const containerNodes = {
+        callout: { padding: 12 },
+        details: { header: 24, padding: 8, collapsed: (n: any) => !n.attrs.open },
+    }
+
+    function mount(doc: any)
+    {
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        const ed = new CanvasEditor({
+            state: EditorState.create({ doc, schema: fschema }),
+            container,
+            containerNodes,
+        })
+        let fullPasses = 0
+        const full = (ed as any).computeLayout.bind(ed)
+        ;(ed as any).computeLayout = () => { fullPasses++; return full() }
+        return { ed, container, passes: () => fullPasses }
+    }
+
+    /** Everything layout produces that painting or hit-testing reads. */
+    function snapshot(ed: CanvasEditor)
+    {
+        const s = ed as any
+        s.ensureLayout()
+        return {
+            total: s.lastTotalHeight,
+            blocks: s.lastLayouts.map((b: any) => ({
+                text: b.text, y: b.yOffset, h: b.height, from: b.pmStartPos, to: b.pmEndPos,
+                frame: b.frame ?? null, lines: b.lines.map((l: any) => [l.x, l.y, l.text, l.pmStart]),
+            })),
+            tables: s.lastTables.map((t: any) => ({
+                x: t.x, y: t.y, w: t.width, h: t.height, pos: t.pos,
+                rows: t.rows.map((r: any) => [r.y, r.height]),
+                cells: t.cells.map((c: any) => [c.x, c.y, c.width, c.height, c.pos]),
+            })),
+            containers: s.lastContainers.map((c: any) => ({
+                type: c.node.type.name, pos: c.pos, x: c.x, y: c.y, w: c.width, h: c.height,
+            })),
+        }
+    }
+
+    /** The oracle: a fresh editor on the same document lays it out from scratch. */
+    function fromScratch(ed: CanvasEditor)
+    {
+        const { ed: fresh, container } = mount(ed.state.doc)
+        const snap = snapshot(fresh)
+        fresh.destroy()
+        container.remove()
+        return snap
+    }
+
+    /** Position of the first character of `needle` in the document. */
+    function at(ed: CanvasEditor, needle: string): number
+    {
+        let found = -1
+        ed.state.doc.descendants((n, pos) =>
+        {
+            if (found >= 0) return false
+            if (n.isText && n.text!.includes(needle)) found = pos + n.text!.indexOf(needle)
+            return true
+        })
+        if (found < 0) throw new Error(`no "${needle}" in doc`)
+        return found
+    }
+
+    const doc = () => fschema.node('doc', null, [
+        p('top'),
+        callout(p('in callout'), fschema.node('details', null, [p('deep')]), table(['c1', 'c2'])),
+        table(['t1', 't2'], ['t3', 't4']),
+        callout(p('second box')),
+        p('bottom'),
+    ])
+
+    // Each edit is applied to the result of the one before it, so the chrome
+    // and positions carried forward by earlier incremental passes are checked
+    // again by every later one.
+    const edits: [string, (ed: CanvasEditor) => any, boolean][] = [
+        ['type in a callout', (ed) => ed.state.tr.insertText('!', at(ed, 'in callout') + 10), true],
+        ['grow a callout by a line', (ed) => ed.state.tr.insertText('a\nb', at(ed, 'in callout')), true],
+        ['type in a details nested in it', (ed) => ed.state.tr.insertText('er', at(ed, 'deep') + 4), true],
+        ['grow a table cell in a callout', (ed) => ed.state.tr.insertText('x\ny\nz', at(ed, 'c2')), true],
+        ['split a paragraph inside a callout', (ed) => ed.state.tr.split(at(ed, 'in callout') + 6), true],
+        ['grow a top-level table cell', (ed) => ed.state.tr.insertText('1\n2', at(ed, 't3') + 2), true],
+        ['type above everything', (ed) => ed.state.tr.insertText('more\nlines ', 1), true],
+        ['type below everything', (ed) => ed.state.tr.insertText(' end', at(ed, 'bottom') + 6), true],
+        ['shrink the callout back', (ed) => ed.state.tr.delete(at(ed, 'a\nb'), at(ed, 'a\nb') + 3), true],
+        // Out of scope for the incremental pass: these must take a full pass.
+        ['join across the callout edge', (ed) => ed.state.tr.delete(at(ed, 'top') + 3, at(ed, 'in cal') + 1), false],
+        // The details is nested in the outer callout, so the callout is rebuilt.
+        ['collapse a nested details', (ed) =>
+        {
+            let pos = -1
+            ed.state.doc.descendants((n, p) => { if (n.type.name === 'details') pos = p })
+            return ed.state.tr.setNodeMarkup(pos, undefined, { open: false })
+        }, true],
+        ['retype a top-level callout', (ed) =>
+        {
+            const pos = ed.state.doc.content.size - ed.state.doc.lastChild!.nodeSize
+                - ed.state.doc.child(ed.state.doc.childCount - 2).nodeSize
+            return ed.state.tr.setNodeMarkup(pos, fschema.nodes.details, { open: true })
+        }, false],
+    ]
+
+    test('every edit leaves the same layout a full pass would produce', () =>
+    {
+        const { ed, container, passes } = mount(doc())
+        snapshot(ed)
+        for (const [name, edit, incremental] of edits)
+        {
+            const before = passes()
+            ed.dispatch(edit(ed))
+            const got = snapshot(ed)
+            expect({ name, ...got }).toEqual({ name, ...fromScratch(ed) })
+            expect({ name, full: passes() - before }).toEqual({ name, full: incremental ? 0 : 1 })
+        }
+        ed.destroy()
+        container.remove()
+    })
+
+    test('a selection carried past a line end stops at its box\'s edge', () =>
+    {
+        const { ed, container } = mount(fschema.node('doc', null, [
+            callout(p('first'), p('second')),
+            table(['left', 'right']),
+        ]))
+        const s = ed as any
+        s.ensureLayout()
+        const rectsFor = (from: number, to: number) =>
+            selectionRects(s.paintCx, s.lastLayouts, TextSelection.create(ed.state.doc, from, to))
+        // Across the callout's two paragraphs: the first line trails to the
+        // padded frame's right edge, not the editor's.
+        const [first] = s.lastLayouts
+        const inBox = rectsFor(at(ed, 'first'), at(ed, 'second') + 2)
+        expect(inBox[0].x + inBox[0].w).toBe(first.frame.x + first.frame.width)
+        // From one cell into the next: the left cell's rect stays in its column.
+        const left = s.lastLayouts.find((b: any) => b.text === 'left')
+        const inCell = rectsFor(at(ed, 'left') + 1, at(ed, 'right') + 2)
+        expect(inCell[0].x + inCell[0].w).toBe(left.frame.x + left.frame.width)
+        ed.destroy()
+        container.remove()
+    })
+
+    test('pressing a control in a header operates it without selecting the container', () =>
+    {
+        const c = document.createElement('div')
+        document.body.appendChild(c)
+        const ed = new CanvasEditor({
+            state: EditorState.create({
+                doc: fschema.node('doc', null, [fschema.node('details', null, [p('body')])]),
+                schema: fschema,
+            }),
+            container: c,
+            containerNodes: {
+                details: {
+                    header: 24,
+                    renderHeader: () =>
+                    {
+                        const root = document.createElement('div')
+                        root.className = 'hdr'
+                        const b = document.createElement('button')
+                        b.className = 'toggle'
+                        root.appendChild(b)
+                        return root
+                    },
+                },
+            },
+        })
+        ed.flush()
+        const press = (el: Element) =>
+        {
+            const ev = new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 })
+            el.dispatchEvent(ev)
+            return ev
+        }
+        // The button is the consumer's: no selection change, default intact.
+        const before = ed.state.selection
+        const ev = press(c.querySelector('.toggle')!)
+        expect(ed.state.selection.eq(before)).toBe(true)
+        expect(ev.defaultPrevented).toBe(false)
+        // The header's own surface still selects the container, like a node view.
+        press(c.querySelector('.hdr')!)
+        expect(ed.state.selection instanceof NodeSelection).toBe(true)
+        expect((ed.state.selection as NodeSelection).node.type.name).toBe('details')
+        ed.destroy()
+        c.remove()
+    })
+
+    test('a header\'s getPos stays right after typing above its container', () =>
+    {
+        const { ed, container } = (() =>
+        {
+            const c = document.createElement('div')
+            document.body.appendChild(c)
+            const e = new CanvasEditor({
+                state: EditorState.create({
+                    doc: fschema.node('doc', null, [p('top'), fschema.node('details', null, [p('body')])]),
+                    schema: fschema,
+                }),
+                container: c,
+                containerNodes: {
+                    details: {
+                        header: 24,
+                        collapsed: (n: any) => !n.attrs.open,
+                        renderHeader: (n: any, getPos: () => number) =>
+                        {
+                            const b = document.createElement('button')
+                            b.className = 'toggle'
+                            b.onclick = () => e.dispatch(
+                                e.state.tr.setNodeMarkup(getPos(), undefined, { open: !n.attrs.open }))
+                            return b
+                        },
+                    },
+                },
+            })
+            return { ed: e, container: c }
+        })()
+        ed.flush()
+        ed.dispatch(ed.state.tr.insertText('typed ', 1))
+        ed.flush()
+        ;(container.querySelector('.toggle') as HTMLElement).click()
+        expect(ed.state.doc.lastChild!.type.name).toBe('details')
+        expect(ed.state.doc.lastChild!.attrs.open).toBe(false)
+        ed.destroy()
+        container.remove()
     })
 })

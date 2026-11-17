@@ -808,7 +808,9 @@ function detailsHeaderView(node: PMNode, getPos: () => number): HTMLElement {
     const open = !!node.attrs['open']
     btn.textContent = `${open ? '▾' : '▸'} ${node.attrs['summary']}`
     btn.setAttribute('aria-expanded', String(open))
-    btn.addEventListener('mousedown', (e) => { e.stopPropagation(); e.preventDefault() })
+    // A press on a button is the button's, so the editor won't select the
+    // node; preventDefault only keeps keyboard focus (and the caret) in it.
+    btn.addEventListener('mousedown', (e) => e.preventDefault())
     btn.addEventListener('click', () => {
         const ed = (window as any).editor as CanvasEditor
         ed.dispatch(ed.state.tr.setNodeMarkup(getPos(), undefined, { ...node.attrs, open: !open }))
@@ -830,7 +832,6 @@ function runButtonView(node: PMNode): HTMLElement {
     btn.className = 'run-btn'
     btn.textContent = '▶ Run'
     btn.setAttribute('aria-label', `Run ${node.attrs['code']}`)
-    btn.addEventListener('mousedown', (e) => e.stopPropagation()) // don't select the node
     btn.addEventListener('click', () => {
         // Demo-only eval: the expression is authored by this file, not the user.
         let result: string

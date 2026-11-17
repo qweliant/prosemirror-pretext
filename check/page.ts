@@ -86,6 +86,12 @@ function markedDoc(paragraphs: number): PMNode {
         }
         blocks.push(p % 7 === 3
             ? schema.node('blockquote', null, [schema.node('paragraph', null, inline)])
+            : p % 10 === 7
+            // A callout holding a callout, so edits reach a nested frame.
+            ? schema.node('callout', null, [
+                schema.node('paragraph', null, inline.slice(0, 20)),
+                schema.node('callout', null, [schema.node('paragraph', null, inline.slice(20))]),
+            ])
             : p % 5 === 2
             ? schema.node('callout', null, [schema.node('paragraph', null, inline)])
             : schema.node('paragraph', null, inline))
@@ -148,10 +154,7 @@ function overrun(widths: number[], paragraphs = 24): OverrunReport {
             state: EditorState.create({ doc, schema }),
             container,
             width,
-            font: '16px Georgia, serif',
-            lineHeight: 26,
-            autofocus: false,
-            containerNodes: { callout: { padding: { top: 10, right: 14, bottom: 10, left: 18 } } },
+            ...CHECK_OPTIONS,
         })
         ed.flush()
 
@@ -208,7 +211,120 @@ function overrun(widths: number[], paragraphs = 24): OverrunReport {
     return report
 }
 
+const CHECK_OPTIONS = {
+    font: '16px Georgia, serif',
+    lineHeight: 26,
+    autofocus: false,
+    containerNodes: { callout: { padding: { top: 10, right: 14, bottom: 10, left: 18 } } },
+}
+
+export interface IncrementalReport {
+    edits: number
+    /** Edits the incremental path handled (no full layout pass). */
+    incremental: number
+    /** Edits whose patched layout differed from a full pass — must be empty. */
+    mismatches: { step: number, edit: string, field: string, got: unknown, want: unknown }[]
+}
+
+/** What painting and hit-testing read from a layout, rounded past float noise. */
+function layoutSnapshot(ed: CanvasEditor): Record<string, unknown[]> {
+    const s = ed as unknown as {
+        ensureLayout(): void
+        lastLayouts: BlockLayout[]
+        lastContainers: { pos: number, x: number, y: number, width: number, height: number }[]
+    }
+    s.ensureLayout()
+    const r = (n: number) => Math.round(n * 1000) / 1000
+    return {
+        blocks: s.lastLayouts.map((b) => [b.type, r(b.yOffset), r(b.height), b.pmStartPos, b.pmEndPos,
+            b.lines.map((l) => [r(l.x), r(l.y), l.text, l.pmStart, r(l.width)])]),
+        containers: s.lastContainers.map((c) => [c.pos, r(c.x), r(c.y), r(c.width), r(c.height)]),
+    }
+}
+
+/**
+ * The incremental layout path, checked against real metrics: apply seeded
+ * random edits (half of them inside callouts, some nested), and after each one
+ * compare the patched layout with a full pass over the same document. The
+ * unit suite checks the same thing on mocked metrics; this one sees real line
+ * breaks moving, wrapping and unwrapping.
+ */
+function incremental(steps = 60, width = 560): IncrementalReport {
+    let seed = 0x5eed
+    const rand = () => {
+        seed = (seed + 0x6d2b79f5) | 0
+        let t = Math.imul(seed ^ (seed >>> 15), 1 | seed)
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+    }
+    const host = document.getElementById('stage')!
+    const mount = (doc: PMNode) => {
+        const container = document.createElement('div')
+        host.appendChild(container)
+        const ed = new CanvasEditor({ state: EditorState.create({ doc, schema }), container, width, ...CHECK_OPTIONS })
+        return { ed, container }
+    }
+    const { ed, container } = mount(markedDoc(16))
+    let fullPasses = 0
+    const s = ed as unknown as { computeLayout(): unknown }
+    const full = s.computeLayout.bind(ed)
+    s.computeLayout = () => { fullPasses++; return full() }
+    ed.flush()
+
+    const report: IncrementalReport = { edits: steps, incremental: 0, mismatches: [] }
+    for (let step = 0; step < steps; step++) {
+        // Every textblock's content range, and whether it sits in a callout.
+        const blocks: { from: number, to: number, framed: boolean }[] = []
+        ed.state.doc.descendants((n, pos, parent) => {
+            if (n.isTextblock) {
+                blocks.push({ from: pos + 1, to: pos + 1 + n.content.size, framed: parent?.type.name === 'callout' })
+            }
+            return true
+        })
+        const pool = step % 2 === 0 ? blocks.filter((b) => b.framed) : blocks
+        const b = pool[Math.floor(rand() * pool.length)]!
+        const at = b.from + Math.floor(rand() * (b.to - b.from + 1))
+        let tr = ed.state.tr
+        let edit: string
+        const kind = rand()
+        if (kind < 0.5 || b.to === b.from) {
+            const word = WORDS[Math.floor(rand() * WORDS.length)]!.repeat(1 + Math.floor(rand() * 4)) + ' '
+            tr = tr.insertText(word, at)
+            edit = `insert "${word}" at ${at}`
+        } else if (kind < 0.85) {
+            const end = Math.min(b.to, at + 1 + Math.floor(rand() * 30))
+            const from = Math.min(at, end - 1)
+            tr = tr.delete(from, end)
+            edit = `delete ${from}..${end}`
+        } else {
+            tr = tr.split(at)
+            edit = `split at ${at}`
+        }
+        const before = fullPasses
+        ed.dispatch(tr)
+        const got = layoutSnapshot(ed)
+        if (fullPasses === before) report.incremental++
+
+        const oracle = mount(ed.state.doc)
+        const want = layoutSnapshot(oracle.ed)
+        oracle.ed.destroy()
+        oracle.container.remove()
+        for (const field of Object.keys(want)) {
+            const g = JSON.stringify(got[field])
+            const w = JSON.stringify(want[field])
+            if (g === w) continue
+            // Report the first differing entry, not the whole document.
+            const i = want[field]!.findIndex((x, k) => JSON.stringify(x) !== JSON.stringify(got[field]![k]))
+            report.mismatches.push({ step, edit, field, got: got[field]![i], want: want[field]![i] })
+        }
+    }
+    ed.destroy()
+    container.remove()
+    return report
+}
+
 ;(window as unknown as { __overrun: typeof overrun }).__overrun = overrun
+;(window as unknown as { __incremental: typeof incremental }).__incremental = incremental
 
 // Visible affordance for running it by hand via `bun run dev:check`.
 document.getElementById('run')!.addEventListener('click', () => {

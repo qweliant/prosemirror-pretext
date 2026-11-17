@@ -3,6 +3,14 @@
 Status: **both implemented** (2026-11): Design 1 as `inlineNodes`, Design 2 as
 `containerNodes`. Written 2026-06.
 
+Since implementing: inline atoms can be dragged and size their DOM by
+measurement, and edits inside a container (or table cell) are incremental,
+rebuilding only the outermost framed unit around the edit. Still open: no
+collapse animation (each frame would be a re-layout and repaint of everything
+below; fading the header is the cheap version if it's wanted), and dragging a
+chip runs on native HTML5 drag, so it doesn't work on touch, the same as
+dragging a text selection.
+
 ## What exists today
 
 `prosemirror-pretext` already ships **block-level atom node views**:
