@@ -52,7 +52,7 @@ import type {
 } from './types'
 import {
     HEADING_SCALE, DEFAULT_MARK_STYLES, LIST_INDENT, MARKER_PAD,
-    FOCUSABLE_SEL, SR_ONLY, DRAG_THRESHOLD_PX, TEXT_BLEED,
+    FOCUSABLE_SEL, SR_ONLY, DRAG_THRESHOLD_PX, LONG_PRESS_MS, TOUCH_MOVE_PX, TEXT_BLEED,
     AUTOSCROLL_ZONE_PX, AUTOSCROLL_SPEED_PX,
     MULTI_TAP_MS, MULTI_TAP_SLOP_PX,
     LOUPE_WIDTH, LOUPE_HEIGHT, LOUPE_ZOOM, LOUPE_LIFT, LOUPE_DROP,
@@ -63,7 +63,7 @@ import {
 } from './layout/blocks'
 import { layoutTable, type TableLayoutContext } from './layout/table'
 import { CellSelection } from './table-selection'
-import { applyVirtualLayout, paintToCanvas, atomPillRect, type PaintContext } from './paint'
+import { applyVirtualLayout, paintToCanvas, atomPillRect, canvasScale, type PaintContext } from './paint'
 import {
   BoxTransitions, planComposite, DEFAULT_TRANSITION_MS,
   type Presentation, type Snapshot,
@@ -407,6 +407,16 @@ export class CanvasEditor {
   private readonly dragDrop: boolean;
   // An in-flight node drag. It stays inert until the pointer passes the
   // threshold, so a press that never moves is still just a click/selection.
+  // A touch press on a node view, waiting to see whether it is a hold (pick
+  // the node up) or a swipe (leave it to the page).
+  private nodeDragHold: {
+    pointerId: number;
+    x: number;
+    y: number;
+    timer: ReturnType<typeof setTimeout>;
+  } | null = null;
+  // Long-press duration; a field so tests can shorten it.
+  private longPressMs = LONG_PRESS_MS;
   private nodeDrag: {
     pointerId: number;
     from: number;
@@ -1186,6 +1196,7 @@ export class CanvasEditor {
     }
     this.abortController?.abort();
     this.stopAutoScroll();
+    this.cancelNodeDragHold();
     // An animation in flight would keep scheduling frames.
     this.transitions.reset();
     for (const view of this.mountedViews.values())
@@ -3279,7 +3290,7 @@ export class CanvasEditor {
     return {
       image: copy,
       top: this.paintedTop,
-      scale: window.devicePixelRatio || 1,
+      scale: canvasScale(this.canvas),
     };
   }
 
@@ -3296,7 +3307,7 @@ export class CanvasEditor {
     const canvas = this.canvas;
     const ctx = canvas.getContext("2d");
     if (!ctx || canvas.width === 0 || canvas.height === 0) return;
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = canvasScale(canvas);
     const top = this.paintedTop;
     const height = canvas.height / dpr;
 
@@ -3318,7 +3329,7 @@ export class CanvasEditor {
         canvas: strip,
         ...band,
       });
-      sources.push({ image: strip, top: band.top, scale: dpr });
+      sources.push({ image: strip, top: band.top, scale: canvasScale(strip) });
     }
 
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -3552,12 +3563,9 @@ export class CanvasEditor {
     // meant for the text — or another node — behind it. Only the node view's
     // own element is interactive.
     container.style.pointerEvents = "none";
-    // Dragging the node has to win the vertical swipe on touch; with the
-    // scroller's pan gesture in play the pointer stream is cancelled instead.
-    // Set on the container rather than the view: touch-action is resolved up
-    // the DOM ancestor chain from the hit element, so this still governs
-    // touches landing on the view despite the container being unhittable.
-    if (this.dragDrop) container.style.touchAction = "none";
+    // No touch-action of its own: a swipe on a node view scrolls the page,
+    // and a touch drag starts with a long-press instead (see the pointerdown
+    // listener in setupInput).
     const view: MountedView = {
       container,
       dom: container,
@@ -3988,8 +3996,6 @@ export class CanvasEditor {
     // draggable handles); a swipe scrolls natively. Mouse events aren't used on
     // touch (we preventDefault the tap/selection to suppress the synthesized
     // click), so there's no double-handling.
-    const LONG_PRESS_MS = 500;
-    const TOUCH_MOVE_PX = 10;
 
     this.canvas.addEventListener(
       "touchstart",
@@ -4019,7 +4025,7 @@ export class CanvasEditor {
           this.textarea.focus({ preventScroll: true });
           this.showLoupe({ x, y });
           this.scheduleRender();
-        }, LONG_PRESS_MS);
+        }, this.longPressMs);
       },
       { signal, passive: true },
     );
@@ -4166,7 +4172,26 @@ export class CanvasEditor {
           if (e.defaultPrevented || !this.isEditable) return;
           if (e.pointerType === "mouse" && e.button !== 0) return;
           const block = this.atomBlockForEvent(e);
-          if (block) this.startNodeDrag(block.pmStartPos, e);
+          if (!block) return;
+          if (e.pointerType === "touch") this.holdToDrag(block.pmStartPos, e);
+          else this.startNodeDrag(block.pmStartPos, e);
+        },
+        { signal },
+      );
+      // While a touch carries a node, the finger moves the node, not the page.
+      // Non-passive, and the first touchmove after a hold is still cancelable.
+      this.stack.addEventListener(
+        "touchmove",
+        (e) => {
+          if (this.nodeDrag) e.preventDefault();
+        },
+        { signal, passive: false },
+      );
+      // Android answers a long-press with a context menu; not while dragging.
+      this.stack.addEventListener(
+        "contextmenu",
+        (e) => {
+          if (this.nodeDrag || this.nodeDragHold) e.preventDefault();
         },
         { signal },
       );
@@ -4180,9 +4205,14 @@ export class CanvasEditor {
       window.addEventListener("pointerup", (e) => this.onNodeDragEnd(e), {
         signal,
       });
-      window.addEventListener("pointercancel", () => this.cancelNodeDrag(), {
-        signal,
-      });
+      window.addEventListener(
+        "pointercancel",
+        () => {
+          this.cancelNodeDragHold();
+          this.cancelNodeDrag();
+        },
+        { signal },
+      );
 
       // Dragging a text selection is the one drag we *do* originate natively,
       // because native drag is the only way content can leave for another
@@ -4428,6 +4458,12 @@ export class CanvasEditor {
    * takes over from any text-selection drag the same press started.
    */
   private onNodeDragMove(e: PointerEvent): void {
+    const h = this.nodeDragHold;
+    if (
+      h && e.pointerId === h.pointerId &&
+      Math.hypot(e.clientX - h.x, e.clientY - h.y) > TOUCH_MOVE_PX
+    )
+      this.cancelNodeDragHold();
     const d = this.nodeDrag;
     if (!d || e.pointerId !== d.pointerId) return;
     if (!d.active) {
@@ -4446,11 +4482,43 @@ export class CanvasEditor {
   }
 
   private onNodeDragEnd(e: PointerEvent): void {
+    this.cancelNodeDragHold();
     const d = this.nodeDrag;
     if (!d || e.pointerId !== d.pointerId) return;
     const target = d.active ? this.dropTarget : null;
     this.cancelNodeDrag();
     if (target) this.moveNode(d.from, target.pos);
+  }
+
+  /**
+   * On touch, a node is picked up by holding still on it — the convention
+   * for reordering on phones — so a swipe that starts on a node view still
+   * scrolls the page. Once held, the node is selected (the visible "lift")
+   * and the drag proceeds as for a mouse.
+   */
+  private holdToDrag(pos: number, e: PointerEvent): void {
+    this.cancelNodeDragHold();
+    this.nodeDragHold = {
+      pointerId: e.pointerId,
+      x: e.clientX,
+      y: e.clientY,
+      timer: setTimeout(() => {
+        this.nodeDragHold = null;
+        if (!this.startNodeDrag(pos, e)) return;
+        const node = this.state.doc.nodeAt(pos);
+        if (node && NodeSelection.isSelectable(node)) {
+          this.dispatch(
+            this.state.tr.setSelection(NodeSelection.create(this.state.doc, pos)),
+          );
+        }
+      }, this.longPressMs),
+    };
+  }
+
+  private cancelNodeDragHold(): void {
+    if (!this.nodeDragHold) return;
+    clearTimeout(this.nodeDragHold.timer);
+    this.nodeDragHold = null;
   }
 
   private cancelNodeDrag(): void {
@@ -5132,6 +5200,8 @@ export class CanvasEditor {
     const cy = at.y - scrollTop;
 
     const dpr = window.devicePixelRatio || 1;
+    // The editor canvas's own scale, which a pixel cap may have lowered.
+    const src = canvasScale(this.canvas);
     const sw = LOUPE_WIDTH / LOUPE_ZOOM;
     const sh = LOUPE_HEIGHT / LOUPE_ZOOM;
     const ctx = canvas.getContext("2d");
@@ -5140,7 +5210,7 @@ export class CanvasEditor {
     ctx.clearRect(0, 0, LOUPE_WIDTH, LOUPE_HEIGHT);
     ctx.drawImage(
       this.canvas,
-      (cx - sw / 2) * dpr, (cy - sh / 2) * dpr, sw * dpr, sh * dpr,
+      (cx - sw / 2) * src, (cy - sh / 2) * src, sw * src, sh * src,
       0, 0, LOUPE_WIDTH, LOUPE_HEIGHT,
     );
 

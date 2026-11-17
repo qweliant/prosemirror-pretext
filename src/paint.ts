@@ -70,6 +70,36 @@ export interface PaintContext
 }
 
 /**
+ * The most pixels a canvas may hold. Past it, iOS Safari silently draws
+ * nothing at all (the same limit pdf.js caps `maxCanvasPixels` at), and every
+ * browser slows down long before running out.
+ */
+export const MAX_CANVAS_PIXELS = 16_777_216
+
+/**
+ * Backing-store pixels per CSS pixel for a canvas of this CSS size: the
+ * device pixel ratio, lowered just enough to stay under `MAX_CANVAS_PIXELS`.
+ * Only an unvirtualized editor over a long document gets anywhere near it;
+ * there the text goes slightly soft instead of vanishing.
+ */
+export function backingScale(cssWidth: number, cssHeight: number): number
+{
+    const dpr = window.devicePixelRatio || 1
+    const area = Math.max(1, cssWidth * cssHeight)
+    return Math.min(dpr, Math.sqrt(MAX_CANVAS_PIXELS / area))
+}
+
+/**
+ * The scale a painted canvas was actually given (see `backingScale`), for
+ * anything copying pixels out of it.
+ */
+export function canvasScale(canvas: HTMLCanvasElement): number
+{
+    const css = parseFloat(canvas.style.width)
+    return css > 0 && canvas.width > 0 ? canvas.width / css : window.devicePixelRatio || 1
+}
+
+/**
  * Pin the canvas to the viewport and stretch the stack to the full document
  * height when virtualizing, so the scroller's scrollbar spans the whole
  * document while the canvas only ever covers one viewport. Reverts to in-flow,
@@ -123,7 +153,6 @@ export function paintToCanvas(
     // has to consult, and checking for an empty list there is what keeps an
     // undecorated document on the unsplit fast paths.
     const colorDecos = inlineDecos.filter((d) => !!d.style.color)
-    const dpr = window.devicePixelRatio || 1
     // The canvas is a touch wider than the content column so a line that
     // overruns its break width by a pixel or two is drawn rather than clipped.
     // Everything below still measures and paints against `containerWidth`.
@@ -136,6 +165,7 @@ export function paintToCanvas(
     // scroll, so the canvas need only cover the content.
     const cssHeight = view ? view.height : virtualized ? Math.min(viewH, totalHeight) : totalHeight
 
+    const dpr = backingScale(cssWidth, cssHeight)
     const targetW = Math.round(cssWidth * dpr)
     const targetH = Math.round(cssHeight * dpr)
 

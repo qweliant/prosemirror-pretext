@@ -300,9 +300,10 @@ a bar marks the seam it will land in — the same place, and the same look, as a
 gap cursor between those two blocks — and releasing dispatches one transaction,
 so the move is a single undo step and the node ends up selected. `Escape`
 abandons a drag in flight. It runs on **pointer** events, not HTML5 drag, so
-mouse, touch, and pen share one path (native drag never fires on touch); node
-view containers take `touch-action: none` so a swipe on a node drags it instead
-of scrolling. On by default — pass `dragDrop: false` to turn it off.
+mouse, touch, and pen share one path (native drag never fires on touch). On
+touch, a node is picked up the way phones reorder anything: **hold** on it
+until it's selected, then drag. A swipe that starts on a node view scrolls the
+page like any other. On by default — pass `dragDrop: false` to turn it off.
 
 A node view that runs its own pointer gesture (a resize handle, a custom drag)
 opts out per-node by calling `preventDefault()` on `pointerdown`.

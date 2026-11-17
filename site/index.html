@@ -187,6 +187,18 @@
 
         /* Height is a placeholder: `boot()` freezes it to a share of the window
            before anything mounts, for the same reason it freezes the width. */
+        /* ── Phone: a note page instead of a board (see mountNotePage) ──
+           overflow: clip, not hidden, so the toolbar can stick: hidden would
+           make the shell a scroll container, and sticky sticks to that. */
+        .editor-shell.note-shell { overflow: clip; }
+        .note-shell #embed-toolbar {
+            position: sticky; top: 0; z-index: 20;
+            box-shadow: 0 6px 12px -10px rgba(47,110,28,.35);
+        }
+        .note-shell .editor-card { padding: 14px 16px 22px; }
+        .note-page { width: 100%; }
+        .note-shell .brow .hint { display: inline; }
+
         .board { position: relative; height: 560px; overflow: hidden; border-radius: 14px; background: #fdfffa; }
         .board-canvas { position: absolute; inset: 0; touch-action: none; cursor: grab; }
         /* The frame layer takes no hits of its own — only the frames inside it
@@ -426,8 +438,8 @@
                 </div>
             </details>
 
-            <p class="sub" style="margin-top:16px">Headings · <b>bold</b>/<i>italic</i>/<code
-                    class="inline">code</code>/links/<u>underline</u>/strike/color/highlight · lists · blockquote · code
+            <p class="sub" style="margin-top:16px">Headings · <b>bold</b>/<wbr><i>italic</i>/<wbr><code
+                    class="inline">code</code>/<wbr>links/<wbr><u>underline</u>/<wbr>strike/<wbr>color/<wbr>highlight · lists · blockquote · code
                 block · alignment · images that float · interactive node views · rich paste · undo/redo — and it all
                 works on touch.</p>
         </div>

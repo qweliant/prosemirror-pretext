@@ -2,7 +2,26 @@
 
 ## Unreleased
 
+### Changed
+
+- **On touch, a node is dragged with a long-press, and a swipe on it
+  scrolls.** Node view containers took `touch-action: none` so a swipe could
+  drag the node, which made every image or embed a dead zone for scrolling:
+  on a phone, a full-width picture was a patch of page you couldn't scroll
+  past. Now a touch must hold still on the node (500ms) to pick it up, the
+  convention phones use for reordering; it is selected as it lifts, and from
+  then on the finger carries it and the page stays put. Moving first is a
+  scroll. Mouse and pen still drag at once.
+
 ### Fixed
+
+- **A long unvirtualized document no longer goes blank on iOS.** iOS Safari
+  draws nothing at all on a canvas over ~16.7 million pixels, which an editor
+  without `maxHeight` reaches at about 5,000px of document on a 3x phone. The
+  backing store is now scaled down just enough to stay under that (the cap
+  pdf.js uses for the same reason), so text goes slightly soft instead of
+  vanishing. The loupe and the collapse animation read the canvas's actual
+  scale rather than assuming `devicePixelRatio`.
 
 - **An edit away from the caret no longer scrolls to the caret.** Every
   transaction scrolled the caret into view, so toggling a `<details>` far from
@@ -183,6 +202,14 @@
   highlighted as its own pill rather than a slab the height of the line. With
   `render` and no `width`, the editor measures the element and breaks the line
   around its real width, so a DOM chip no longer needs a fixed size.
+
+- **The demo is a note page on phones.** The live board put three scroll
+  surfaces under one finger (the board pans, the document card scrolls, the
+  page scrolls), gave the document a 280px column and a photo that left three
+  words a line, and a run of slash-joined words made the whole page wider than
+  the screen. Under 640px it now mounts the editor the way notes apps do: full
+  width, scrolled by the page, the formatting bar pinned to the top, the photo
+  in the flow, no autofocus. The board stays the desktop pitch.
 
 - **Inline atoms drag on touch, too.** Native drag never fires on touch, and
   a swipe on the canvas is the page's to scroll, so the mobile convention:

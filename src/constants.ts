@@ -114,6 +114,12 @@ export const SR_ONLY: Partial<CSSStyleDeclaration> = {
 /** Travel before a press on a node becomes a drag rather than a click. */
 export const DRAG_THRESHOLD_PX = 6
 
+/** How long a touch must hold still to become a long-press. */
+export const LONG_PRESS_MS = 500
+
+/** Finger travel that makes a touch a swipe rather than a hold or a tap. */
+export const TOUCH_MOVE_PX = 10
+
 /**
  * How close to a scroller's edge a drag must come before the view starts
  * following it, and how fast it moves at the very edge (px per frame).

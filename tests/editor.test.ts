@@ -3090,6 +3090,28 @@ describe('incremental layout correctness', () =>
 
 describe('touch input (mobile)', () =>
 {
+    test('a tall unvirtualized canvas stays under the browser\'s pixel cap', () =>
+    {
+        // iOS silently blanks a canvas over ~16.7M pixels; at 3x that is a
+        // little over 4000 css px of document at this width.
+        const had = window.devicePixelRatio
+        Object.defineProperty(window, 'devicePixelRatio', { value: 3, configurable: true })
+        try
+        {
+            const { ed } = makeEditor(Array.from({ length: 300 }, (_, i) => `paragraph ${i}`))
+            const c = (ed as any).canvas as HTMLCanvasElement
+            expect(c.width * c.height).toBeLessThanOrEqual(16_777_216)
+            // Still sharper than 1x, and the CSS size is the document's.
+            expect(c.width / parseFloat(c.style.width)).toBeGreaterThan(1)
+            expect(parseFloat(c.style.height)).toBe((ed as any).lastTotalHeight)
+            ed.destroy()
+        }
+        finally
+        {
+            Object.defineProperty(window, 'devicePixelRatio', { value: had, configurable: true })
+        }
+    })
+
     // The full touch-event path (tap / long-press / handle drag) is verified in a
     // real mobile browser; these lock in the core logic the handlers call.
     test('the canvas opts into native vertical scroll via touch-action', () =>
@@ -3551,11 +3573,35 @@ describe('drag & drop', () =>
         ed.destroy()
     })
 
-    test('a node view container claims the touch gesture so a swipe can drag', () =>
+    test('a node view leaves a swipe to the page: on touch, a drag starts with a hold', async () =>
     {
         const { ed, container } = dndEditor()
+        ;(ed as any).longPressMs = 20
         const wrap = container.querySelector('.nv')!.parentElement as HTMLElement
-        expect(wrap.style.touchAction).toBe('none')
+        expect(wrap.style.touchAction).toBe('')
+        const view = container.querySelector('.nv')!
+        const touch = (type: string, x: number, y: number) =>
+            pointer(type, { clientX: x, clientY: y, pointerType: 'touch' })
+
+        // A press doesn't pick the node up straight away...
+        view.dispatchEvent(touch('pointerdown', 10, 50))
+        expect((ed as any).nodeDrag).toBeNull()
+        // ...and moving before the hold is a scroll, which cancels it.
+        window.dispatchEvent(touch('pointermove', 10, 80))
+        await new Promise((r) => setTimeout(r, 40))
+        expect((ed as any).nodeDrag).toBeNull()
+        window.dispatchEvent(touch('pointerup', 10, 80))
+
+        // Held still, it is picked up and selected; a touchmove can't scroll.
+        view.dispatchEvent(touch('pointerdown', 10, 50))
+        await new Promise((r) => setTimeout(r, 40))
+        expect((ed as any).nodeDrag).not.toBeNull()
+        expect((ed.state.selection as NodeSelection).node?.type.name).toBe('widget')
+        const tm = new Event('touchmove', { bubbles: true, cancelable: true })
+        view.dispatchEvent(tm)
+        expect(tm.defaultPrevented).toBe(true)
+        window.dispatchEvent(touch('pointerup', 10, 50))
+        expect((ed as any).nodeDrag).toBeNull()
         ed.destroy()
     })
 

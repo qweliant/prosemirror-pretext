@@ -128,15 +128,26 @@ const hl = (s: string) => schema.text(s, [schema.marks['highlight'].create(null)
 const li = (...inline: PMNode[]) => schema.node('list_item', null, [schema.node('paragraph', null, inline)])
 const liNest = (text: string, nested: PMNode) => schema.node('list_item', null, [schema.node('paragraph', null, [schema.text(text)]), nested])
 
+// A phone gets a note page rather than a board (see `mountNotePage`). Decided
+// once at load, like the board's frozen geometry.
+const PHONE = typeof window !== 'undefined' && window.matchMedia('(max-width: 640px)').matches
+
 // Keep the floated photo from eating the whole column on a phone.
 const FLOAT_W = Math.max(150, Math.min(220, Math.round((typeof window !== 'undefined' ? window.innerWidth : 900) * 0.42)))
 const doc = schema.node('doc', null, [
     schema.node('heading', { level: 1 }, [schema.text('hello from the pond 🐸')]),
-    schema.node('image', { src: photo('pondlily', FLOAT_W, Math.round(FLOAT_W * 0.68)), alt: 'a calm pond', x: 0, y: 120, width: FLOAT_W }),
+    PHONE
+        // On a phone, beside the text there is no room for text: it sits in
+        // the flow, full width, instead of floating.
+        ? schema.node('image', { src: photo('pondlily', 720, 490), alt: 'a calm pond' })
+        : schema.node('image', { src: photo('pondlily', FLOAT_W, Math.round(FLOAT_W * 0.68)), alt: 'a calm pond', x: 0, y: 120, width: FLOAT_W }),
     schema.node('paragraph', null, [
         m('Every glyph here is painted by '), m('ctx.fillText()', 'code'),
-        m(' — no contenteditable. The photo to the left is a real '), m('image node', 'em'),
-        m(' you can drag: move its body to float it (text wraps), or drag its corner to resize. Select any text and use the toolbar — '),
+        ...(PHONE
+            ? [m(' — no contenteditable. The photo above is a real '), m('image node', 'em'),
+                m(': long-press it to pick it up and move it. Long-press a word to select it, then use the toolbar — ')]
+            : [m(' — no contenteditable. The photo to the left is a real '), m('image node', 'em'),
+                m(' you can drag: move its body to float it (text wraps), or drag its corner to resize. Select any text and use the toolbar — ')]),
         m('bold', 'strong'), m(', '), m('italic', 'em'), m(', '), m('underline', 'underline'),
         m(', '), m('strikethrough', 'strikethrough'), m(', '), colored('color', '#e0488a'),
         m(', '), hl('highlight'), m(', E=mc'), m('2', 'superscript'), m(', H'), m('2', 'subscript'),
@@ -155,7 +166,9 @@ const doc = schema.node('doc', null, [
     schema.node('paragraph', null, [
         m('Inline atoms flow with the text: ping '), schema.nodes['mention'].create({ name: 'ada' }),
         m(' or '), schema.nodes['mention'].create({ name: 'grace' }),
-        m(' and the chip wraps like a word but never splits. Click one to select it; the caret steps over it in one go.'),
+        m(PHONE
+            ? ' and the chip wraps like a word but never splits. Tap one to select it, long-press to move it; the caret steps over it in one go.'
+            : ' and the chip wraps like a word but never splits. Click one to select it; the caret steps over it in one go.'),
     ]),
     schema.node('callout', null, [
         schema.node('paragraph', null, [m('A callout is a '), m('content-holding', 'em'), m(' node: these words are ordinary canvas-laid blocks, inset into a box the editor paints. Type here and the box grows.')]),
@@ -477,65 +490,11 @@ async function boot(): Promise<void> {
         }
         return decos
     }
-    // ── The board, and the document's frame on it ──
-    // Freeze the shell's width in px before measuring anything inside it. The
-    // stylesheet declares it in vw so it fills the screen; freezing keeps the
-    // board's seeded frame coordinates — which are laid out once, in board
-    // space — agreeing with the surface they sit on. (The editor itself could
-    // follow a live width now that `setWidth` exists; the frames are what would
-    // need re-seeding.)
-    const shell = document.querySelector('.board-shell') as HTMLElement
-    const shellW = Math.round(Math.min(1800, window.innerWidth * 0.96))
-    shell.style.width = `${shellW}px`
-    shell.style.marginLeft = `calc(50% - ${Math.round(shellW / 2)}px)`
-
-    const boardEl = document.getElementById('board')!
-    // Height gets the same treatment: a board is a workspace, not a 560px strip,
-    // so it takes most of the window, and is frozen for the same reason.
-    //
-    // The -60 pays for the shell's own chrome (title bar, two toolbars, status
-    // line) so the whole board still lands above the fold rather than running
-    // off the bottom the moment you scroll to it. The floor keeps it from
-    // coming out *shorter* than the 560px it used to be fixed at, except on
-    // short viewports where 560 would not have fit anyway.
-    const boardH = Math.round(Math.max(
-        Math.min(560, window.innerHeight * 0.6),
-        Math.min(860, window.innerHeight * 0.78 - 60),
-    ))
-    boardEl.style.height = `${boardH}px`
-    // What is left for the document's own scroller once the card's label,
-    // padding, and top offset are taken out.
-    const docHeight = boardH - 130
-    const board = new Board(boardEl, {
-        onCreateNote: (f) => fillNote(f, 'a note ✍️'),
-        onChange: () => syncBoard(),
-    })
-    // The document takes the whole board apart from a strip on the right, kept
-    // clear so the notes beside it stay in view — a board whose contents exactly
-    // fill the viewport reads as a page, which is what this section is fighting.
-    //
-    // SIDE_STRIP is the only thing limiting the editor's width. There is
-    // deliberately no second `Math.min(...)` cap: one used to sit here, and
-    // since the subtraction was already the smaller of the two, raising the cap
-    // changed nothing and read as the edit not having applied.
-    const SIDE_STRIP = 300
-    const editorWidth = Math.max(
-        280,
-        (boardEl.clientWidth || window.innerWidth) - SIDE_STRIP,
-    )
-    const docFrame = board.addFrame({
-        // +36 is the card's own padding: prose that runs to the border of its
-        // card reads as clipped even when every glyph is there.
-        x: 26, y: 22, w: editorWidth + 36, h: docHeight + 60,
-        label: '📄 the document',
-    })
-    const editor = new CanvasEditor({
+    // ── The editor: a note page on a phone, a document on a board otherwise ──
+    // Everything but where it lives and how big it is.
+    const editorOptions = {
         state: EditorState.create({ doc, schema, plugins: [history()] }),
-        container: docFrame.body,
-        // A frame on a board is a window onto a document, not the whole scroll
-        // of it — so the editor virtualizes inside its own card.
-        maxHeight: docHeight,
-        width: editorWidth, font: EDITOR_FONT, ...EDITOR_THEME,
+        font: EDITOR_FONT, ...EDITOR_THEME,
         ariaLabel: 'prosemirror-pretext live demo',
         // Painted only while the document is empty — try "empty the doc" below.
         placeholder: 'Start typing… every glyph lands via ctx.fillText()',
@@ -546,142 +505,236 @@ async function boot(): Promise<void> {
             callout: { padding: { top: 10, right: 14, bottom: 10, left: 18 }, background: '#f1f8ec', accentColor: '#7ec14b', radius: 8 },
             details: {
                 padding: { top: 2, right: 14, bottom: 12, left: 14 }, header: 34, borderColor: '#cfe3c2', radius: 8,
-                collapsed: (n) => !n.attrs['open'],
+                collapsed: (n: PMNode) => !n.attrs['open'],
                 renderHeader: detailsHeaderView,
             },
         },
         inlineNodes: { mention: { background: 'rgba(90, 140, 60, 0.16)', color: '#3f6b2a' } },
-        floatRect: (n) => n.type.name === 'image' && n.attrs['x'] != null ? { x: n.attrs['x'], y: n.attrs['y'], width: n.attrs['width'] ?? 220 } : null,
+        floatRect: (n: PMNode) => n.type.name === 'image' && n.attrs['x'] != null ? { x: n.attrs['x'], y: n.attrs['y'], width: n.attrs['width'] ?? 220 } : null,
         decorations: decorationsFn,
         onRender(s: RenderStats) {
             statsEl.innerHTML = `${s.blockCount} blocks · ${s.lineCount} lines · ${s.renderTimeMs.toFixed(1)}ms · <span class="reflow">0 reflows ✨</span>`
             if (!peek.hidden) renderPeek()
             sync()
         },
-    })
+    }
+    const editor = PHONE ? mountNotePage() : mountBoard()
     ;(window as any).editor = editor
-    ;(window as any).board = board
-    docFrame.onGeometryChange = () => editor.invalidateGeometry()
 
     /**
-     * Sticky notes are CanvasEditors too. That is the whole argument of the
-     * board in one function: there is exactly one kind of text surface here,
-     * and a note differs from the document only in width and font size.
+     * On a phone the board is the wrong metaphor: panning a canvas, scrolling
+     * a document card inside it, and scrolling the page all want the same
+     * finger. So a phone gets the pattern every notes app uses: the document
+     * *is* the page. Full width, no scroller of its own (the page scrolls it),
+     * with the formatting bar pinned to the top while you write.
      */
-    function fillNote(frame: Frame, text: string): CanvasEditor {
-        const note = new CanvasEditor({
-            state: EditorState.create({
-                doc: schema.node('doc', null, [
-                    schema.node('paragraph', null, [schema.text(text)]),
-                ]),
-                schema,
-                plugins: [history()],
-            }),
-            container: frame.body,
-            width: frame.w - 20,
-            // Several editors on one board: only the document claims focus on
-            // arrival, or the last note mounted would steal it.
-            autofocus: false,
-            font: '13.5px Georgia, "Times New Roman", serif',
-            ...EDITOR_THEME,
-            textColor: '#5c4a12', firstLineColor: '#5c4a12', caretColor: '#a08320',
-            selectionColor: 'rgba(224, 190, 60, .35)',
-            ariaLabel: 'sticky note',
-            keymap: { ...buildMarkKeymap(schema), 'Mod-z': undo, 'Mod-y': redo, 'Shift-Mod-z': redo },
-        })
-        // Zooming or panning the board changes where this canvas sits and how
-        // large it is drawn; the editor derives the scale itself but cannot see
-        // the transform change, so it is told.
-        frame.onGeometryChange = () => note.invalidateGeometry()
-        // The note sizes itself to its text, and the board wants the height for
-        // hit-testing and `fit` — but only after layout has actually run.
-        requestAnimationFrame(() => board.remeasure())
-        return note
-    }
-
-    // ── Board chrome: tool palette, zoom readout, and a status line ──
-    // Each tool carries the sentence to show while it is armed. On a surface
-    // where the same drag pans, draws, or selects depending on what is picked,
-    // the mode has to say what it does — an unlabelled icon row is a quiz.
-    const TOOLS: { tool: Tool, glyph: string, label: string, says: string }[] = [
-        {
-            tool: 'select', glyph: '↖', label: 'Select',
-            says: 'Drag the board to pan · click a shape to select it · ⌘/ctrl-scroll to zoom',
-        },
-        {
-            tool: 'note', glyph: '🗒', label: 'Note',
-            says: 'Click anywhere to drop a sticky note — it is a CanvasEditor, so type in it',
-        },
-        { tool: 'rect', glyph: '▭', label: 'Box', says: 'Drag on the board to draw a box' },
-        { tool: 'ellipse', glyph: '◯', label: 'Circle', says: 'Drag on the board to draw an ellipse' },
-        { tool: 'arrow', glyph: '↗', label: 'Arrow', says: 'Drag from the tail to the head' },
-        { tool: 'pen', glyph: '✎', label: 'Draw', says: 'Drag to scribble — the stroke follows your pointer' },
-    ]
-    const toolBtns = TOOLS.map(({ tool, glyph, label, says }) => {
-        const b = document.createElement('button')
-        b.className = 'tl'
-        b.innerHTML = `<span class="g">${glyph}</span><span class="lbl">${label}</span>`
-        b.title = says
-        b.setAttribute('aria-label', `${label} — ${says}`)
-        b.addEventListener('click', () => board.setTool(tool))
-        document.getElementById('board-tools')!.appendChild(b)
-        return { b, tool, says }
-    })
-    const zoomLabel = document.getElementById('board-zoom')!
-    const status = document.getElementById('board-status')!
-    function syncBoard(): void {
-        let says = ''
-        for (const { b, tool, says: s } of toolBtns) {
-            const on = board.currentTool === tool
-            b.classList.toggle('active', on)
-            b.setAttribute('aria-pressed', String(on))
-            if (on) says = s
+    function mountNotePage(): CanvasEditor {
+        const shell = document.querySelector('.board-shell') as HTMLElement
+        shell.classList.add('note-shell')
+        for (const sel of ['.board-bar', '#board-status', '#board']) {
+            (document.querySelector(sel) as HTMLElement).hidden = true
         }
-        zoomLabel.textContent = `${Math.round(board.zoom * 100)}%`
-        // A selected shape is the only state with a destructive action attached,
-        // so it gets to say so rather than leaving Backspace to be discovered.
-        status.innerHTML = board.selectedShape
-            ? 'Shape selected — drag to move it, <b>⌫</b> or <b>clear</b> to remove it'
-            : says
+        shell.querySelector('.brow')!.innerHTML =
+            '<span class="live-dot"></span> live note <span class="hint">tap to type · long-press to select or move</span>'
+        const page = document.createElement('div')
+        page.className = 'note-page'
+        shell.querySelector('.editor-card')!.appendChild(page)
+        return new CanvasEditor({
+            ...editorOptions,
+            container: page,
+            width: Math.max(240, page.clientWidth),
+            // Focus waits for a tap: focusing on load would summon the keyboard
+            // (on Android) for a field the reader hasn't chosen yet.
+            autofocus: false,
+        })
     }
-    document.getElementById('board-fit')!.addEventListener('click', () => board.fitAll())
-    document.getElementById('board-in')!.addEventListener('click', () => board.setZoom(board.zoom + 0.25))
-    document.getElementById('board-out')!.addEventListener('click', () => board.setZoom(board.zoom - 0.25))
-    document.getElementById('board-clear')!.addEventListener('click', () => {
-        if (board.selectedShape) board.deleteSelected()
-        else board.clearShapes()
-    })
-    syncBoard()
 
-    // Seed the board, so it arrives looking like a board rather than an editor
-    // wearing a hat: two notes, an arrow into the prose, and a drawn annotation.
-    // Spread down the right-hand strip in proportion to the board, so a tall
-    // window doesn't leave everything huddled at the top.
-    const rightOf = docFrame.x + docFrame.w
-    const noteX = rightOf + 46
-    fillNote(
-        board.addFrame({ x: noteX, y: 44, w: 212, h: 110, label: 'note', note: true }),
-        'Notes are editors too — same layout engine, smaller font. Type in one.',
-    )
-    fillNote(
-        board.addFrame({
-            x: noteX, y: Math.round(boardH * 0.38), w: 212, h: 110,
-            label: 'note', note: true,
-        }),
-        '⌘-scroll to zoom out — then keep typing. Cards edit at any scale.',
-    )
-    board.addShape({
-        kind: 'arrow', points: [rightOf + 38, 96, rightOf - 4, 140],
-        stroke: '#e0488a', fill: null, width: 2.5,
-    })
-    board.addShape({
-        kind: 'ellipse',
-        points: [
-            rightOf + 34, Math.round(boardH * 0.68),
-            rightOf + 246, Math.round(boardH * 0.68) + 66,
-        ],
-        stroke: '#46a8d8', fill: 'rgba(138,214,242,.16)', width: 2.5,
-    })
+    /** The desktop pitch: the document as one card among others on a board. */
+    function mountBoard(): CanvasEditor {
+        // ── The board, and the document's frame on it ──
+        // Freeze the shell's width in px before measuring anything inside it. The
+        // stylesheet declares it in vw so it fills the screen; freezing keeps the
+        // board's seeded frame coordinates — which are laid out once, in board
+        // space — agreeing with the surface they sit on. (The editor itself could
+        // follow a live width now that `setWidth` exists; the frames are what would
+        // need re-seeding.)
+        const shell = document.querySelector('.board-shell') as HTMLElement
+        const shellW = Math.round(Math.min(1800, window.innerWidth * 0.96))
+        shell.style.width = `${shellW}px`
+        shell.style.marginLeft = `calc(50% - ${Math.round(shellW / 2)}px)`
+
+        const boardEl = document.getElementById('board')!
+        // Height gets the same treatment: a board is a workspace, not a 560px strip,
+        // so it takes most of the window, and is frozen for the same reason.
+        //
+        // The -60 pays for the shell's own chrome (title bar, two toolbars, status
+        // line) so the whole board still lands above the fold rather than running
+        // off the bottom the moment you scroll to it. The floor keeps it from
+        // coming out *shorter* than the 560px it used to be fixed at, except on
+        // short viewports where 560 would not have fit anyway.
+        const boardH = Math.round(Math.max(
+            Math.min(560, window.innerHeight * 0.6),
+            Math.min(860, window.innerHeight * 0.78 - 60),
+        ))
+        boardEl.style.height = `${boardH}px`
+        // What is left for the document's own scroller once the card's label,
+        // padding, and top offset are taken out.
+        const docHeight = boardH - 130
+        const board = new Board(boardEl, {
+            onCreateNote: (f) => fillNote(f, 'a note ✍️'),
+            onChange: () => syncBoard(),
+        })
+        // The document takes the whole board apart from a strip on the right, kept
+        // clear so the notes beside it stay in view — a board whose contents exactly
+        // fill the viewport reads as a page, which is what this section is fighting.
+        //
+        // SIDE_STRIP is the only thing limiting the editor's width. There is
+        // deliberately no second `Math.min(...)` cap: one used to sit here, and
+        // since the subtraction was already the smaller of the two, raising the cap
+        // changed nothing and read as the edit not having applied.
+        const SIDE_STRIP = 300
+        const editorWidth = Math.max(
+            280,
+            (boardEl.clientWidth || window.innerWidth) - SIDE_STRIP,
+        )
+        const docFrame = board.addFrame({
+            // +36 is the card's own padding: prose that runs to the border of its
+            // card reads as clipped even when every glyph is there.
+            x: 26, y: 22, w: editorWidth + 36, h: docHeight + 60,
+            label: '📄 the document',
+        })
+        const editor = new CanvasEditor({
+            ...editorOptions,
+            container: docFrame.body,
+            // A frame on a board is a window onto a document, not the whole scroll
+            // of it — so the editor virtualizes inside its own card.
+            maxHeight: docHeight,
+            width: editorWidth,
+        })
+        ;(window as any).board = board
+        docFrame.onGeometryChange = () => editor.invalidateGeometry()
+
+        /**
+         * Sticky notes are CanvasEditors too. That is the whole argument of the
+         * board in one function: there is exactly one kind of text surface here,
+         * and a note differs from the document only in width and font size.
+         */
+        function fillNote(frame: Frame, text: string): CanvasEditor {
+            const note = new CanvasEditor({
+                state: EditorState.create({
+                    doc: schema.node('doc', null, [
+                        schema.node('paragraph', null, [schema.text(text)]),
+                    ]),
+                    schema,
+                    plugins: [history()],
+                }),
+                container: frame.body,
+                width: frame.w - 20,
+                // Several editors on one board: only the document claims focus on
+                // arrival, or the last note mounted would steal it.
+                autofocus: false,
+                font: '13.5px Georgia, "Times New Roman", serif',
+                ...EDITOR_THEME,
+                textColor: '#5c4a12', firstLineColor: '#5c4a12', caretColor: '#a08320',
+                selectionColor: 'rgba(224, 190, 60, .35)',
+                ariaLabel: 'sticky note',
+                keymap: { ...buildMarkKeymap(schema), 'Mod-z': undo, 'Mod-y': redo, 'Shift-Mod-z': redo },
+            })
+            // Zooming or panning the board changes where this canvas sits and how
+            // large it is drawn; the editor derives the scale itself but cannot see
+            // the transform change, so it is told.
+            frame.onGeometryChange = () => note.invalidateGeometry()
+            // The note sizes itself to its text, and the board wants the height for
+            // hit-testing and `fit` — but only after layout has actually run.
+            requestAnimationFrame(() => board.remeasure())
+            return note
+        }
+
+        // ── Board chrome: tool palette, zoom readout, and a status line ──
+        // Each tool carries the sentence to show while it is armed. On a surface
+        // where the same drag pans, draws, or selects depending on what is picked,
+        // the mode has to say what it does — an unlabelled icon row is a quiz.
+        const TOOLS: { tool: Tool, glyph: string, label: string, says: string }[] = [
+            {
+                tool: 'select', glyph: '↖', label: 'Select',
+                says: 'Drag the board to pan · click a shape to select it · ⌘/ctrl-scroll to zoom',
+            },
+            {
+                tool: 'note', glyph: '🗒', label: 'Note',
+                says: 'Click anywhere to drop a sticky note — it is a CanvasEditor, so type in it',
+            },
+            { tool: 'rect', glyph: '▭', label: 'Box', says: 'Drag on the board to draw a box' },
+            { tool: 'ellipse', glyph: '◯', label: 'Circle', says: 'Drag on the board to draw an ellipse' },
+            { tool: 'arrow', glyph: '↗', label: 'Arrow', says: 'Drag from the tail to the head' },
+            { tool: 'pen', glyph: '✎', label: 'Draw', says: 'Drag to scribble — the stroke follows your pointer' },
+        ]
+        const toolBtns = TOOLS.map(({ tool, glyph, label, says }) => {
+            const b = document.createElement('button')
+            b.className = 'tl'
+            b.innerHTML = `<span class="g">${glyph}</span><span class="lbl">${label}</span>`
+            b.title = says
+            b.setAttribute('aria-label', `${label} — ${says}`)
+            b.addEventListener('click', () => board.setTool(tool))
+            document.getElementById('board-tools')!.appendChild(b)
+            return { b, tool, says }
+        })
+        const zoomLabel = document.getElementById('board-zoom')!
+        const status = document.getElementById('board-status')!
+        function syncBoard(): void {
+            let says = ''
+            for (const { b, tool, says: s } of toolBtns) {
+                const on = board.currentTool === tool
+                b.classList.toggle('active', on)
+                b.setAttribute('aria-pressed', String(on))
+                if (on) says = s
+            }
+            zoomLabel.textContent = `${Math.round(board.zoom * 100)}%`
+            // A selected shape is the only state with a destructive action attached,
+            // so it gets to say so rather than leaving Backspace to be discovered.
+            status.innerHTML = board.selectedShape
+                ? 'Shape selected — drag to move it, <b>⌫</b> or <b>clear</b> to remove it'
+                : says
+        }
+        document.getElementById('board-fit')!.addEventListener('click', () => board.fitAll())
+        document.getElementById('board-in')!.addEventListener('click', () => board.setZoom(board.zoom + 0.25))
+        document.getElementById('board-out')!.addEventListener('click', () => board.setZoom(board.zoom - 0.25))
+        document.getElementById('board-clear')!.addEventListener('click', () => {
+            if (board.selectedShape) board.deleteSelected()
+            else board.clearShapes()
+        })
+        syncBoard()
+
+        // Seed the board, so it arrives looking like a board rather than an editor
+        // wearing a hat: two notes, an arrow into the prose, and a drawn annotation.
+        // Spread down the right-hand strip in proportion to the board, so a tall
+        // window doesn't leave everything huddled at the top.
+        const rightOf = docFrame.x + docFrame.w
+        const noteX = rightOf + 46
+        fillNote(
+            board.addFrame({ x: noteX, y: 44, w: 212, h: 110, label: 'note', note: true }),
+            'Notes are editors too — same layout engine, smaller font. Type in one.',
+        )
+        fillNote(
+            board.addFrame({
+                x: noteX, y: Math.round(boardH * 0.38), w: 212, h: 110,
+                label: 'note', note: true,
+            }),
+            '⌘-scroll to zoom out — then keep typing. Cards edit at any scale.',
+        )
+        board.addShape({
+            kind: 'arrow', points: [rightOf + 38, 96, rightOf - 4, 140],
+            stroke: '#e0488a', fill: null, width: 2.5,
+        })
+        board.addShape({
+            kind: 'ellipse',
+            points: [
+                rightOf + 34, Math.round(boardH * 0.68),
+                rightOf + 246, Math.round(boardH * 0.68) + 66,
+            ],
+            stroke: '#46a8d8', fill: 'rgba(138,214,242,.16)', width: 2.5,
+        })
+        return editor
+    }
 
     // ── Toolbar (grouped icon buttons) ──
     const bar = document.getElementById('embed-toolbar')!
@@ -865,6 +918,17 @@ function hideGuide(): void { if (guideEl) guideEl.style.display = 'none' }
 // it (text wraps). We preview with a transform and commit attrs on release so
 // the node view isn't recreated mid-drag.
 function imageView(node: PMNode, getPos: () => number): HTMLElement {
+    // On a phone it is a plain picture in the flow. Floating, the resize
+    // corner and the hover tools are all pointer gestures that would fight a
+    // finger scrolling the page; the editor's long-press moves it instead.
+    if (PHONE) {
+        const img = document.createElement('img')
+        img.src = node.attrs['src'] as string
+        img.alt = (node.attrs['alt'] as string) ?? ''
+        img.draggable = false
+        img.style.cssText = 'display:block;width:100%;border-radius:12px;box-shadow:0 4px 14px rgba(0,0,0,.18);-webkit-touch-callout:none;user-select:none'
+        return img
+    }
     const wrap = document.createElement('div')
     wrap.style.cssText = 'position:relative;display:inline-block;max-width:100%'
     const img = document.createElement('img')
