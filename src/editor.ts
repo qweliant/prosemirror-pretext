@@ -65,6 +65,10 @@ import { layoutTable, type TableLayoutContext } from './layout/table'
 import { CellSelection } from './table-selection'
 import { applyVirtualLayout, paintToCanvas, atomPillRect, type PaintContext } from './paint'
 import {
+  BoxTransitions, planComposite, DEFAULT_TRANSITION_MS,
+  type Presentation, type Snapshot,
+} from './box-transition'
+import {
     blockHasMarks, resolveRunStyle, resolveBlockStyle, boxFields, blockBase,
     blockContentWidth, type StyleContext,
 } from './layout/style'
@@ -258,6 +262,18 @@ export class CanvasEditor {
   // identity can't be the key; the header is rebuilt only when the node's own
   // markup (attrs) changes, which is all a header should depend on.
   private headerViews: { node: PMNode; view: MountedView }[] = [];
+  // Collapse / expand animation (see ./box-transition). The clock is a field
+  // so tests can drive it.
+  private clock = (): number => performance.now();
+  private readonly transitions = new BoxTransitions(() => this.clock());
+  // Where the last frame was painted, for snapshotting it.
+  private paintedTop = 0;
+  // Scratch canvases for compositing: a copy of the live frame, and the strip
+  // below the viewport an expanding box pulls up into view.
+  private liveCanvas: HTMLCanvasElement | null = null;
+  private stripCanvas: HTMLCanvasElement | null = null;
+  // Whether overlays currently carry a transition's displacement.
+  private overlaysDisplaced = false;
   // Transient decorations: a resolver + the live widget DOM (keyed for reuse).
   private readonly decorationsFor:
     | ((state: EditorState) => Decoration[])
@@ -690,18 +706,43 @@ export class CanvasEditor {
   dispatch(tr: Transaction): void {
     // Read-only: allow selection/navigation transactions, drop edits.
     if (!this.isEditable && tr.docChanged) return;
+    const before = this._state.selection;
     this._state = this._state.apply(tr);
+    if (tr.docChanged) this.transitions.mapThrough(tr.mapping);
     this.liftOutOfCollapsed();
     this.layoutDirty = true;
     this.lastInputTime = performance.now();
     this.caretVisible = true;
-    this.scrollCaretIntoView = true;
+    if (this.movesCaret(tr, before)) this.scrollCaretIntoView = true;
     // Horizontal motion resets the phantom X and caret bias. Click and
     // moveVertical restore them after dispatching.
     this.phantomX = null;
     this.caretBias = -1;
     this.scheduleRender();
     this.syncA11y();
+  }
+
+  /**
+   * Whether a transaction should bring the caret into view: it asked to, or
+   * it moved the selection, or it edited at the caret (typing). Not for an
+   * edit elsewhere — a collaborator's, or a toggle on a box far from the
+   * caret — which would otherwise yank the view back to wherever the caret is.
+   */
+  private movesCaret(tr: Transaction, before: Selection): boolean {
+    if (tr.scrolledIntoView) return true;
+    if (!before.map(tr.doc, tr.mapping).eq(tr.selection)) return true;
+    // Walk the caret through each step, checking whether a step's range
+    // reaches it.
+    let head = before.head;
+    for (const map of tr.mapping.maps) {
+      let touched = false;
+      map.forEach((from, to) => {
+        if (from <= head && head <= to) touched = true;
+      });
+      if (touched) return true;
+      head = map.map(head);
+    }
+    return false;
   }
 
   /**
@@ -896,6 +937,8 @@ export class CanvasEditor {
     const next = Math.max(1, Math.round(width));
     if (next === this.containerWidth) return;
     this.containerWidth = next;
+    // A snapshot of the old column can't be composited into the new one.
+    this.transitions.reset();
 
     this.positionedCache = new WeakMap();
     // `lastLayouts` is the other half of positional reuse: the assembler checks
@@ -2531,9 +2574,10 @@ export class CanvasEditor {
     totalHeight: number,
     virtualized: boolean,
     decorations: Decoration[] = [],
+    target?: { canvas: HTMLCanvasElement; top: number; height: number },
   ): void {
     paintToCanvas(
-      this.paintCx,
+      target ? { ...this.paintCx, canvas: target.canvas } : this.paintCx,
       layouts,
       totalHeight,
       virtualized,
@@ -2541,6 +2585,7 @@ export class CanvasEditor {
       this.lastTables,
       this.layoutsSortedByY,
       this.lastContainers,
+      target,
     );
   }
 
@@ -2841,9 +2886,11 @@ export class CanvasEditor {
     clientY: number;
   }): { x: number; y: number } {
     const g = this.readGeometry();
+    const y = (e.clientY - g.top) / g.scaleY + (this.scroller?.scrollTop ?? 0);
     return {
       x: (e.clientX - g.left) / g.scaleX,
-      y: (e.clientY - g.top) / g.scaleY + (this.scroller?.scrollTop ?? 0),
+      // Mid-transition, what is under the pointer is where it is drawn.
+      y: this.transitions.presentation.unmapY(y),
     };
   }
 
@@ -3101,7 +3148,10 @@ export class CanvasEditor {
     this.layoutDirty = true; // a frame always reflects the latest document
     this.ensureLayout();
     const layouts = this.lastLayouts;
-    const totalHeight = this.lastTotalHeight;
+    // Mid-transition the picture is taller or shorter than the layout; the
+    // canvas and the scroll height follow the picture.
+    const shown = this.presentTransitions();
+    const totalHeight = this.lastTotalHeight + shown.offset;
 
     // Virtualize only when the scroller has a measurable viewport. In
     // headless/zero-height environments we fall back to painting the
@@ -3134,11 +3184,17 @@ export class CanvasEditor {
         : caretCoords,
     );
     this.paintDropIndicator();
+    this.paintedTop = virtualized ? this.scroller!.scrollTop : 0;
+    if (shown.active) {
+      this.compositeTransitions(shown, layouts, decorations);
+    }
     this.syncNodeViews(layouts);
     this.syncInlineViews(layouts);
     this.syncContainerHeaders();
     this.syncWidgets(layouts, decorations);
     this.syncSelectionHandles();
+    this.displaceOverlays(shown);
+    if (shown.active) this.scheduleRender();
 
     if (caretCoords) {
       // Past the preview too, so the IME's candidate window sits under the end
@@ -3162,6 +3218,141 @@ export class CanvasEditor {
       cacheMisses: this.cacheMisses,
       renderTimeMs: dt,
     });
+  }
+
+  // ─── Collapse / expand transitions ──────────────────────────────────
+
+  /**
+   * Advance container transitions to this frame (see ./box-transition). Layout
+   * is already final; this works out how the picture is displaced from it.
+   */
+  private presentTransitions(): Presentation {
+    if (!this.hasCollapsible()) return this.transitions.presentation;
+    return this.transitions.frame(
+      this.lastContainers,
+      (c) => this.transitionMs(c),
+      () => this.snapshotCanvas(),
+    );
+  }
+
+  /** How long a toggle of this container animates; 0 for not at all. */
+  private transitionMs(c: ContainerChrome): number {
+    const spec = this.containerNodes[c.node.type.name];
+    const ms = spec?.animate ?? DEFAULT_TRANSITION_MS;
+    if (!ms) return 0;
+    if (
+      typeof matchMedia === "function" &&
+      matchMedia("(prefers-reduced-motion: reduce)").matches
+    )
+      return 0;
+    // The picture moves in full-width bands, which is only right in a
+    // vertical flow: in a table cell, neighbours sit beside the box.
+    const doc = this.state.doc;
+    for (const t of this.lastTables) {
+      const table = doc.nodeAt(t.pos);
+      if (table && c.pos > t.pos && c.pos < t.pos + table.nodeSize) return 0;
+    }
+    // A float stays put while the flow around it slides, so one level with
+    // or below the box would be drawn in the wrong place. One above it is
+    // untouched by the transition.
+    if (this.activeFloats.some((f) => f.y + f.height > c.y)) return 0;
+    return ms;
+  }
+
+  /** A copy of what is on screen now, before this frame repaints it. */
+  private snapshotCanvas(): Snapshot | null {
+    const { width, height } = this.canvas;
+    if (width === 0 || height === 0) return null;
+    const copy = document.createElement("canvas");
+    copy.width = width;
+    copy.height = height;
+    const ctx = copy.getContext("2d");
+    if (!ctx) return null;
+    ctx.drawImage(this.canvas, 0, 0);
+    return {
+      image: copy,
+      top: this.paintedTop,
+      scale: window.devicePixelRatio || 1,
+    };
+  }
+
+  /**
+   * Rebuild the canvas for a transition frame. The canvas now holds the final
+   * layout, painted as usual (caret and all); recompose it from bands of that
+   * and the snapshots, as `planComposite` lays out.
+   */
+  private compositeTransitions(
+    shown: Presentation,
+    layouts: BlockLayout[],
+    decorations: Decoration[],
+  ): void {
+    const canvas = this.canvas;
+    const ctx = canvas.getContext("2d");
+    if (!ctx || canvas.width === 0 || canvas.height === 0) return;
+    const dpr = window.devicePixelRatio || 1;
+    const top = this.paintedTop;
+    const height = canvas.height / dpr;
+
+    const live = (this.liveCanvas ??= document.createElement("canvas"));
+    live.width = canvas.width;
+    live.height = canvas.height;
+    live.getContext("2d")?.drawImage(canvas, 0, 0);
+    const sources: Snapshot[] = [{ image: live, top, scale: dpr }];
+
+    const ops = planComposite(shown, top, height);
+    // An expanding box pulls up rows from below what was painted: paint
+    // that strip of the final layout too.
+    let need = top + height;
+    for (const op of ops) if (op.source === "live") need = Math.max(need, op.to);
+    if (need > top + height) {
+      const strip = (this.stripCanvas ??= document.createElement("canvas"));
+      const band = { top: top + height, height: Math.ceil(need - top - height) };
+      this.paintToCanvas(layouts, band.top + band.height, true, decorations, {
+        canvas: strip,
+        ...band,
+      });
+      sources.push({ image: strip, top: band.top, scale: dpr });
+    }
+
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    for (const op of ops) {
+      for (const src of op.source === "live" ? sources : [op.source]) {
+        // Each source covers rows [src.top, src.top + its height).
+        const a = Math.max(op.from, src.top);
+        const b = Math.min(op.to, src.top + src.image.height / src.scale);
+        if (b <= a) continue;
+        ctx.drawImage(
+          src.image,
+          0, (a - src.top) * src.scale, src.image.width, (b - a) * src.scale,
+          0, (op.dest + (a - op.from) - top) * dpr, canvas.width, (b - a) * dpr,
+        );
+      }
+    }
+  }
+
+  /**
+   * DOM overlays (node views, chips, headers, widgets, handles) are placed in
+   * final-layout coordinates; mid-transition, move each to where its row is
+   * drawn, and hide those in the part of a box not revealed yet. A CSS
+   * `translate` leaves `top` and any `transform` of their own alone.
+   */
+  private displaceOverlays(shown: Presentation): void {
+    if (!shown.active && !this.overlaysDisplaced) return;
+    const els: HTMLElement[] = [];
+    for (const v of this.mountedViews.values()) els.push(v.container);
+    for (const list of this.inlineViews.values())
+      for (const v of list) els.push(v.container);
+    for (const h of this.headerViews) els.push(h.view.container);
+    for (const el of this.mountedWidgets.values()) els.push(el);
+    if (this.selHandles) els.push(this.selHandles.from, this.selHandles.to);
+    for (const el of els) {
+      const y = parseFloat(el.style.top);
+      const at = shown.active && !Number.isNaN(y) ? shown.mapY(y) : null;
+      el.style.translate = at && at.y !== y ? `0 ${at.y - y}px` : "";
+      el.style.visibility = at?.hidden ? "hidden" : "";
+    }
+    this.overlaysDisplaced = shown.active;
   }
 
   // ─── Node views ────────────────────────────────────────────────────

@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- **An edit away from the caret no longer scrolls to the caret.** Every
+  transaction scrolled the caret into view, so toggling a `<details>` far from
+  it, or a collaborator's edit anywhere, yanked the view back to wherever the
+  caret was. Now only a transaction that asks to (`scrollIntoView()`), moves
+  the selection, or edits at the caret does.
+
 - **A block node view's measured height now reaches the layout.** When a
   view's element turned out taller or shorter than the space reserved for it,
   the editor recorded the new height and scheduled a repaint, but the repaint's
@@ -177,6 +183,21 @@
   highlighted as its own pill rather than a slab the height of the line. With
   `render` and no `width`, the editor measures the element and breaks the line
   around its real width, so a DOM chip no longer needs a fixed size.
+
+- **Collapsing and expanding a container animates.** Layout switches to the
+  final state at once, as before; the picture animates, View Transitions
+  style. The frame on screen at the toggle is kept as a bitmap, and for 220ms
+  each frame paints the final layout once and recomposes the canvas from
+  horizontal bands of the two: the box's interior revealed or hidden down to
+  its animated height (from the new frame when expanding, the snapshot when
+  collapsing), its bottom edge kept whole as a separate slice, and everything
+  below slid by the difference. No re-layout per frame. DOM overlays below the
+  box move with it, those not yet revealed are hidden, and clicks map to what
+  is drawn. `ContainerNodeSpec.animate` sets the duration, or `false` turns it
+  off. It's instant under `prefers-reduced-motion`, in table cells, and with a
+  float beside or below the box. The band geometry lives in
+  `src/box-transition.ts`, with a property test that the copies tile the
+  viewport exactly once.
 
 - **Typing inside a table cell or container is incremental.** Such an edit
   used to take a full layout pass of the whole document. It now rebuilds only

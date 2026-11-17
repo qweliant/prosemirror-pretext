@@ -5,9 +5,10 @@ Status: **both implemented** (2026-11): Design 1 as `inlineNodes`, Design 2 as
 
 Since implementing: inline atoms can be dragged and size their DOM by
 measurement, and edits inside a container (or table cell) are incremental,
-rebuilding only the outermost framed unit around the edit. Still open: no
-collapse animation (each frame would be a re-layout and repaint of everything
-below; fading the header is the cheap version if it's wanted), and dragging a
+rebuilding only the outermost framed unit around the edit. Collapsing and
+expanding animate without re-layout: layout jumps to the final state and the
+picture is recomposed per frame from bitmap bands of the old and new frames
+(`src/box-transition.ts`, the View Transitions model). Still open: dragging a
 chip runs on native HTML5 drag, so it doesn't work on touch, the same as
 dragging a text selection.
 

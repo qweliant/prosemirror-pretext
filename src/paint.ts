@@ -108,6 +108,12 @@ export function paintToCanvas(
     tables: TableChrome[] = [],
     sortedByY = false,
     containers: ContainerChrome[] = [],
+    /**
+     * Paint this band of the document instead of the scroller's viewport (or
+     * the whole document). Used for the strip just below the viewport that an
+     * expanding container pulls into view while it animates.
+     */
+    view?: { top: number, height: number },
 ): void
 {
     const inlineDecos = decorations.filter((d): d is InlineDecoration => d.kind === 'inline')
@@ -123,11 +129,12 @@ export function paintToCanvas(
     // Everything below still measures and paints against `containerWidth`.
     const cssWidth = cx.containerWidth + TEXT_BLEED
 
-    const viewH = virtualized ? cx.scroller!.clientHeight : 0
-    const scrollTop = virtualized ? cx.scroller!.scrollTop : 0
+    if (view) virtualized = true
+    const viewH = view ? view.height : virtualized ? cx.scroller!.clientHeight : 0
+    const scrollTop = view ? view.top : virtualized ? cx.scroller!.scrollTop : 0
     // When the doc is shorter than the viewport there is nothing to
     // scroll, so the canvas need only cover the content.
-    const cssHeight = virtualized ? Math.min(viewH, totalHeight) : totalHeight
+    const cssHeight = view ? view.height : virtualized ? Math.min(viewH, totalHeight) : totalHeight
 
     const targetW = Math.round(cssWidth * dpr)
     const targetH = Math.round(cssHeight * dpr)

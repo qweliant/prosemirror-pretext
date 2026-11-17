@@ -281,6 +281,17 @@ Typing inside a container or a table cell re-lays out only that container or
 table (its outermost one, when they nest), then moves what follows, so it costs
 the same whatever the document's length.
 
+Collapsing and expanding animate (`animate: 220` by default, in ms; `false`
+turns it off). Layout doesn't animate: it switches to the final state at once,
+so the selection and clicks are never mid-way between two layouts. The picture
+animates, the way the View Transitions API does it. The frame on screen when you
+toggle is kept as a bitmap, and each animation frame recomposes the canvas from
+bands of that and the newly painted frame: the box opens or closes down to its
+animated height, keeping its bottom edge intact, and everything below slides
+with it. Nothing is laid out again per frame. It's instant under
+`prefers-reduced-motion`, inside a table cell, and when a float sits beside or
+below the box.
+
 ## Drag & drop
 
 **Moving nodes.** Press a leaf/atom block (an image, an embed, a rule) and drag:

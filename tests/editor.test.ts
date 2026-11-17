@@ -5581,3 +5581,160 @@ describe('incremental layout inside tables and containers', () =>
         container.remove()
     })
 })
+
+describe('collapse / expand transitions', () =>
+{
+    const tschema = new Schema({
+        nodes: {
+            ...nodes,
+            doc: { content: 'block+' },
+            paragraph: { ...nodes.paragraph, group: 'block' },
+            widget: { ...nodes.widget, group: 'block' },
+            table_cell: { ...nodes.table_cell, content: 'block+' },
+            details: {
+                content: 'block+', group: 'block', attrs: { open: { default: true } },
+                toDOM: () => ['details', 0],
+            },
+        },
+        marks,
+    })
+    const p = (t: string) => tschema.node('paragraph', null, [tschema.text(t)])
+    const details = (open: boolean, ...c: any[]) => tschema.node('details', { open }, c)
+
+    function mount(blocks: any[], spec: any = {})
+    {
+        const container = document.createElement('div')
+        document.body.appendChild(container)
+        const ed = new CanvasEditor({
+            state: EditorState.create({ doc: tschema.node('doc', null, blocks), schema: tschema }),
+            container,
+            nodeViews: { widget: () => { const el = document.createElement('div'); el.className = 'nv'; return el } },
+            containerNodes: { details: { header: 24, collapsed: (n: any) => !n.attrs.open, ...spec } },
+        })
+        let t = 1000
+        ;(ed as any).clock = () => t
+        ed.flush()
+        const toggle = () =>
+        {
+            let pos = -1
+            ed.state.doc.descendants((n, at) => { if (pos < 0 && n.type.name === 'details') pos = at })
+            ed.dispatch(ed.state.tr.setNodeMarkup(pos, undefined, { open: !ed.state.doc.nodeAt(pos)!.attrs.open }))
+            ed.flush()
+        }
+        const s = ed as any
+        return {
+            ed, container, toggle, s,
+            tick: (ms: number) => { t += ms; ed.flush() },
+            shown: () => s.transitions.presentation,
+            box: () => s.lastContainers[0],
+            nv: () => (container.querySelector('.nv') as HTMLElement).parentElement!,
+            done: () => { ed.destroy(); container.remove() },
+        }
+    }
+
+    test('collapsing animates the picture while the layout is already final', () =>
+    {
+        const m = mount([details(true, p('a'), p('b'), p('c')), tschema.node('widget'), p('after')])
+        const open = m.box().height
+        m.toggle()
+        // Layout: the box is its header, the children are gone.
+        expect(m.box().height).toBe(24)
+        expect(m.s.lastLayouts.map((b: any) => b.text)).toEqual(['', 'after'])
+        // Picture: still as tall as it was, everything below still where it was.
+        expect(m.shown().active).toBe(true)
+        expect(m.shown().offset).toBeCloseTo(open - 24, 6)
+        expect(m.s.canvas.style.height).toBe(`${m.s.lastTotalHeight + open - 24}px`)
+        expect(m.nv().style.translate).toBe(`0 ${open - 24}px`)
+
+        // Partway: the offset shrinks; at the end, everything is home.
+        m.tick(110)
+        const mid = m.shown().offset
+        expect(mid).toBeGreaterThan(0)
+        expect(mid).toBeLessThan(open - 24)
+        m.tick(200)
+        expect(m.shown().active).toBe(false)
+        expect(m.nv().style.translate).toBe('')
+        expect(m.s.canvas.style.height).toBe(`${m.s.lastTotalHeight}px`)
+        m.done()
+    })
+
+    test('expanding hides what isn\'t revealed yet, and a click maps to what is drawn', () =>
+    {
+        const m = mount([details(false, p('a'), tschema.node('widget')), p('after')])
+        m.toggle()
+        expect(m.shown().bands[0].source).toBe('live')
+        // The widget is inside the box, below the header that is all that shows.
+        expect(m.nv().style.visibility).toBe('hidden')
+        // A point drawn just under the box is the 'after' paragraph's row.
+        const after = m.s.lastLayouts.find((b: any) => b.text === 'after')
+        const drawnY = m.shown().mapY(after.yOffset + 2).y
+        expect(drawnY).toBeLessThan(after.yOffset)
+        expect(m.shown().unmapY(drawnY)).toBeCloseTo(after.yOffset + 2, 6)
+        m.tick(400)
+        expect(m.nv().style.visibility).toBe('')
+        m.done()
+    })
+
+    test('animate: false switches instantly', () =>
+    {
+        const m = mount([details(true, p('a')), p('after')], { animate: false })
+        m.toggle()
+        expect(m.shown().active).toBe(false)
+        m.done()
+    })
+
+    test('reduced motion switches instantly', () =>
+    {
+        const had = (globalThis as any).matchMedia
+        ;(globalThis as any).matchMedia = (q: string) => ({ matches: q.includes('reduce') })
+        try
+        {
+            const m = mount([details(true, p('a')), p('after')])
+            m.toggle()
+            expect(m.shown().active).toBe(false)
+            m.done()
+        }
+        finally
+        {
+            ;(globalThis as any).matchMedia = had
+        }
+    })
+
+    test('a container in a table cell switches instantly: its neighbours share its rows', () =>
+    {
+        const cell = (c: any) => tschema.node('table_cell', null, [c])
+        const m = mount([tschema.node('table', null, [tschema.node('table_row', null, [
+            cell(details(true, p('a'), p('b'))), cell(p('beside')),
+        ])])])
+        m.toggle()
+        expect(m.box().height).toBe(24)
+        expect(m.shown().active).toBe(false)
+        m.done()
+    })
+
+    test('toggling a container away from the caret doesn\'t scroll to the caret', () =>
+    {
+        const m = mount([p('top'), details(true, p('a'), p('b')), p('after')])
+        m.s.scrollCaretIntoView = false
+        m.ed.dispatch(m.ed.state.tr.setNodeMarkup(5, undefined, { open: false }))
+        expect(m.s.scrollCaretIntoView).toBe(false)
+        // An edit at the caret, or a move of it, still brings it into view.
+        m.ed.dispatch(m.ed.state.tr.insertText('x', m.ed.state.selection.head))
+        expect(m.s.scrollCaretIntoView).toBe(true)
+        m.s.scrollCaretIntoView = false
+        m.ed.dispatch(m.ed.state.tr.setSelection(TextSelection.create(m.ed.state.doc, 3)))
+        expect(m.s.scrollCaretIntoView).toBe(true)
+        m.done()
+    })
+
+    test('typing elsewhere mid-flight keeps the transition on its box', () =>
+    {
+        const m = mount([p('top'), details(true, p('a'), p('b')), p('after')])
+        m.toggle()
+        m.ed.dispatch(m.ed.state.tr.insertText('xyz', 1))
+        m.tick(50)
+        expect(m.shown().active).toBe(true)
+        expect(m.shown().bands[0].top).toBe(m.box().y)
+        m.done()
+    })
+})

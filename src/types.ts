@@ -241,6 +241,13 @@ export interface ContainerNodeSpec
      * transaction, so collapsing is undoable and shared like any other edit.
      */
     collapsed?: (node: PMNode) => boolean
+    /**
+     * How long collapsing or expanding animates, in ms; `false` or 0 to switch
+     * instantly. Default: 220. Always instant under `prefers-reduced-motion`,
+     * for a container inside a table cell, and with a float beside or below
+     * the container.
+     */
+    animate?: number | false
     /** Interactive DOM mounted over the header strip (needs `header` > 0). */
     renderHeader?: NodeViewFn
 }
