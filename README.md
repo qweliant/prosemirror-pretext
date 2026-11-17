@@ -238,7 +238,8 @@ inside), arrows step over it in one go, **Backspace** deletes it, and a
 **click** selects it (`NodeSelection`), highlighted as its own pill. The same
 press can **drag** it to another spot in the text: it moves as one undo step,
 or copies with Alt, and it can be dropped into another application like any
-selection.
+selection. On touch, **tap** selects it and **long-press** picks it up: drag
+with the finger and lift to drop.
 
 With `render`, the editor mounts your element over the box it reserved and
 moves it as the text around it changes. The element sizes itself: the editor

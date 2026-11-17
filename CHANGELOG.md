@@ -184,6 +184,13 @@
   `render` and no `width`, the editor measures the element and breaks the line
   around its real width, so a DOM chip no longer needs a fixed size.
 
+- **Inline atoms drag on touch, too.** Native drag never fires on touch, and
+  a swipe on the canvas is the page's to scroll, so the mobile convention:
+  a long-press on a chip picks it up (selected), the finger carries it with
+  the drop caret and edge auto-scroll, and lifting drops it as one undo step.
+  A quick tap on a chip now selects it, as a click does, instead of putting
+  the caret beside it.
+
 - **Collapsing and expanding a container animates.** Layout switches to the
   final state at once, as before; the picture animates, View Transitions
   style. The frame on screen at the toggle is kept as a bitmap, and for 220ms
@@ -197,7 +204,9 @@
   off. It's instant under `prefers-reduced-motion`, in table cells, and with a
   float beside or below the box. The band geometry lives in
   `src/box-transition.ts`, with a property test that the copies tile the
-  viewport exactly once.
+  viewport exactly once. `coordsAtPos`, `selectionRect` and `posAtCoords`
+  answer in drawn coordinates mid-animation, so anchored UI moves with the
+  picture.
 
 - **Typing inside a table cell or container is incremental.** Such an edit
   used to take a full layout pass of the whole document. It now rebuilds only

@@ -8,9 +8,9 @@ measurement, and edits inside a container (or table cell) are incremental,
 rebuilding only the outermost framed unit around the edit. Collapsing and
 expanding animate without re-layout: layout jumps to the final state and the
 picture is recomposed per frame from bitmap bands of the old and new frames
-(`src/box-transition.ts`, the View Transitions model). Still open: dragging a
-chip runs on native HTML5 drag, so it doesn't work on touch, the same as
-dragging a text selection.
+(`src/box-transition.ts`, the View Transitions model). Chips drag with the
+mouse through native HTML5 drag, and on touch by long-press. Nothing from
+either design is still open.
 
 ## What exists today
 

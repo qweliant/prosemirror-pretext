@@ -389,7 +389,9 @@ export class CanvasEditor {
   private touchStartY = 0;
   private touchMoved = false;
   private longPressTimer: ReturnType<typeof setTimeout> | null = null;
-  private touchMode: "idle" | "scroll" | "select" = "idle";
+  private touchMode: "idle" | "scroll" | "select" | "atomDrag" = "idle";
+  // A long-press on an inline atom picked it up; this is where it came from.
+  private touchAtomFrom: number | null = null;
   private touchSelection = false;
   private selHandles: { from: HTMLElement; to: HTMLElement } | null = null;
   private draggingHandle: "from" | "to" | null = null;
@@ -969,8 +971,9 @@ export class CanvasEditor {
   }): { pos: number; inside: number } | null {
     const g = this.readGeometry();
     const x = (coords.left - g.left) / g.scaleX;
-    const y =
-      (coords.top - g.top) / g.scaleY + (this.scroller?.scrollTop ?? 0);
+    const y = this.transitions.presentation.unmapY(
+      (coords.top - g.top) / g.scaleY + (this.scroller?.scrollTop ?? 0),
+    );
     const hit = this.clickToPos(this.lastLayouts, x, y);
     if (!hit) return null;
     let inside = -1;
@@ -1090,9 +1093,11 @@ export class CanvasEditor {
     // how large it is being drawn. The scroll offset is in layout px too, so it
     // is subtracted before scaling, not after.
     const g = this.canvasOffset();
+    // Mid-transition, where it is drawn rather than where layout has it.
+    const y = this.transitions.presentation.mapY(coords.y).y;
     return {
       x: g.left + coords.x * g.scaleX,
-      y: g.top + (coords.y - this.lastScrollTop) * g.scaleY,
+      y: g.top + (y - this.lastScrollTop) * g.scaleY,
       height: coords.height * g.scaleY,
     };
   }
@@ -1181,6 +1186,8 @@ export class CanvasEditor {
     }
     this.abortController?.abort();
     this.stopAutoScroll();
+    // An animation in flight would keep scheduling frames.
+    this.transitions.reset();
     for (const view of this.mountedViews.values())
       view.resizeObserver?.disconnect();
     this.mountedViews.clear();
@@ -3200,7 +3207,7 @@ export class CanvasEditor {
       // Past the preview too, so the IME's candidate window sits under the end
       // of what is being composed rather than under its start.
       this.textarea.style.transform =
-        `translate(${caretCoords.x + composingWidth}px, ${caretCoords.y}px)`;
+        `translate(${caretCoords.x + composingWidth}px, ${shown.mapY(caretCoords.y).y}px)`;
     }
 
     // Refresh the cached canvas offset + scroll position once per frame (layout
@@ -4001,11 +4008,12 @@ export class CanvasEditor {
         this.longPressTimer = setTimeout(() => {
           this.longPressTimer = null;
           if (this.touchMoved) return;
-          this.touchMode = "select";
           const { x, y } = this.eventToDocCoords({
             clientX: this.touchStartX,
             clientY: this.touchStartY,
           });
+          if (this.beginTouchAtomDrag(x, y)) return;
+          this.touchMode = "select";
           this.selectWordAt(x, y);
           this.touchSelection = true;
           this.textarea.focus({ preventScroll: true });
@@ -4027,10 +4035,15 @@ export class CanvasEditor {
             TOUCH_MOVE_PX
         ) {
           this.touchMoved = true;
-          if (this.touchMode !== "select") {
+          if (this.touchMode !== "select" && this.touchMode !== "atomDrag") {
             this.touchMode = "scroll";
             this.cancelLongPress();
           }
+        }
+        if (this.touchMode === "atomDrag") {
+          e.preventDefault(); // the finger carries the atom, not the page
+          this.moveTouchAtomDrag(t.clientX, t.clientY);
+          return;
         }
         if (this.touchMode === "select") {
           // Long-press engaged: drag extends the selection, so suppress scroll.
@@ -4052,11 +4065,18 @@ export class CanvasEditor {
     this.canvas.addEventListener(
       "touchend",
       (e) => {
+        const wasAtomDrag = this.touchMode === "atomDrag";
         const wasSelect = this.touchMode === "select";
         const wasScroll = this.touchMode === "scroll" || this.touchMoved;
         this.cancelLongPress();
         this.touchMode = "idle";
         this.showLoupe(null);
+        if (wasAtomDrag) {
+          e.preventDefault();
+          this.endTouchAtomDrag();
+          this.textarea.focus({ preventScroll: true });
+          return;
+        }
         if (wasSelect) {
           e.preventDefault(); // keep the selection + suppress synthesized click
           this.textarea.focus({ preventScroll: true });
@@ -4097,6 +4117,17 @@ export class CanvasEditor {
               this.textarea.focus({ preventScroll: true });
               return;
             }
+            // A tap on an inline atom selects it, as a click does.
+            const atomPos = this.inlineAtomAt(x, y);
+            if (atomPos !== null) {
+              this.dispatch(
+                this.state.tr.setSelection(
+                  NodeSelection.create(this.state.doc, atomPos),
+                ),
+              );
+              this.textarea.focus({ preventScroll: true });
+              return;
+            }
             this.setHead(hit.pos, false);
             this.caretBias = hit.bias;
           }
@@ -4105,6 +4136,21 @@ export class CanvasEditor {
         this.textarea.focus({ preventScroll: true });
       },
       { signal, passive: false },
+    );
+
+    // The system took the touch (a gesture, a call): abandon an atom drag
+    // rather than leave its drop caret behind.
+    this.canvas.addEventListener(
+      "touchcancel",
+      () => {
+        if (this.touchMode !== "atomDrag") return;
+        this.touchMode = "idle";
+        this.touchAtomFrom = null;
+        this.dropTarget = null;
+        this.stopAutoScroll();
+        this.scheduleRender();
+      },
+      { signal },
     );
 
     // ── Drag & drop ──────────────────────────────────────────────────
@@ -4886,8 +4932,13 @@ export class CanvasEditor {
    */
   private moveSelectionTo(pos: number, copy: boolean): void {
     const d = this.textDrag;
-    if (!d) return;
-    // Dropped inside the text being dragged: there is nowhere for it to go.
+    if (d) this.moveRange(d.from, d.to, pos, copy);
+  }
+
+  /** Move (or copy) the content `[from, to)` to `pos`, as one undo step. */
+  private moveRange(from: number, to: number, pos: number, copy: boolean): void {
+    const d = { from, to };
+    // Dropped inside the content being moved: there is nowhere for it to go.
     if (pos >= d.from && pos <= d.to) return;
 
     const slice = this.state.doc.slice(d.from, d.to);
@@ -4908,6 +4959,45 @@ export class CanvasEditor {
         : TextSelection.between(tr.doc.resolve(at), tr.doc.resolve(at + added)),
     );
     this.dispatch(tr.scrollIntoView());
+  }
+
+  /**
+   * Touch drag of an inline atom. Native HTML5 drag, which moves an atom
+   * under a mouse, never fires on touch, and a swipe on the canvas is the
+   * page's to scroll. So the mobile convention: a long-press picks the atom
+   * up (selecting it), the finger carries it with the usual drop caret, and
+   * lifting drops it. Returns false when the long-press isn't on an atom.
+   */
+  private beginTouchAtomDrag(x: number, y: number): boolean {
+    if (!this.dragDrop || !this.isEditable) return false;
+    const pos = this.inlineAtomAt(x, y);
+    if (pos === null) return false;
+    this.touchMode = "atomDrag";
+    this.touchAtomFrom = pos;
+    this.dispatch(
+      this.state.tr.setSelection(NodeSelection.create(this.state.doc, pos)),
+    );
+    this.textarea.focus({ preventScroll: true });
+    return true;
+  }
+
+  private moveTouchAtomDrag(clientX: number, clientY: number): void {
+    const { x, y } = this.eventToDocCoords({ clientX, clientY });
+    const hit = this.clickToPos(this.lastLayouts, x, y);
+    this.dropTarget = hit ? { pos: hit.pos, seam: false } : null;
+    this.updateAutoScroll(clientX, clientY);
+    this.scheduleRender();
+  }
+
+  private endTouchAtomDrag(): void {
+    const from = this.touchAtomFrom;
+    const target = this.dropTarget;
+    this.touchAtomFrom = null;
+    this.dropTarget = null;
+    this.stopAutoScroll();
+    this.scheduleRender();
+    // Lifted without moving: the long-press just selected it.
+    if (from !== null && target) this.moveRange(from, from + 1, target.pos, false);
   }
 
   /**

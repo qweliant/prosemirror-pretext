@@ -5013,6 +5013,41 @@ describe('inline atoms (mentions / chips)', () =>
         ed.destroy()
     })
 
+    test('on touch, a long-press picks an atom up and the finger carries it', () =>
+    {
+        const { ed } = atomEditor()
+        const s = ed as any
+        s.canvas.getBoundingClientRect = () => ({ left: 0, top: 0, width: 0, height: 0 })
+        s.invalidateGeometry()
+        // Long-press on the chip (x 24..60).
+        expect(s.beginTouchAtomDrag(40, 5)).toBe(true)
+        expect((ed.state.selection as NodeSelection).node.type.name).toBe('mention')
+        expect(s.touchMode).toBe('atomDrag')
+        // Carried to the end of the line: the drop caret follows the finger.
+        s.moveTouchAtomDrag(200, 5)
+        expect(s.dropTarget).toEqual({ pos: ed.state.doc.firstChild!.nodeSize - 1, seam: false })
+        s.endTouchAtomDrag()
+        const para = ed.state.doc.firstChild!
+        expect(para.lastChild!.type.name).toBe('mention')
+        expect(para.textContent).toBe('hi  there')
+        expect(s.dropTarget).toBeNull()
+        // A long-press on plain text is still a word select.
+        expect(s.beginTouchAtomDrag(4, 5)).toBe(false)
+        ed.destroy()
+    })
+
+    test('on touch, a long-press lifted in place leaves the atom selected', () =>
+    {
+        const { ed } = atomEditor()
+        const s = ed as any
+        s.beginTouchAtomDrag(40, 5)
+        const before = ed.state.doc
+        s.endTouchAtomDrag()
+        expect(ed.state.doc.eq(before)).toBe(true)
+        expect(ed.state.selection instanceof NodeSelection).toBe(true)
+        ed.destroy()
+    })
+
     test('with dragDrop off, a press on an atom still just selects it', () =>
     {
         const container = document.createElement('div')
@@ -5673,6 +5708,34 @@ describe('collapse / expand transitions', () =>
         m.tick(400)
         expect(m.nv().style.visibility).toBe('')
         m.done()
+    })
+
+    test('the public coordinate API answers in drawn coordinates mid-flight', () =>
+    {
+        const m = mount([details(true, p('a'), p('b'), p('c')), p('after')])
+        m.s.canvas.getBoundingClientRect = () => ({ left: 0, top: 0, width: 0, height: 0 })
+        m.s.invalidateGeometry()
+        const after = () => m.s.lastLayouts.find((b: any) => b.text === 'after')
+        m.toggle()
+        const off = m.shown().offset
+        expect(off).toBeGreaterThan(0)
+        // Drawn where the picture has it, not where layout already put it.
+        const at = m.ed.coordsAtPos(after().pmStartPos)!
+        expect(at.y).toBeCloseTo(after().lines[0].y + off, 6)
+        // And the inverse: that drawn point is the 'after' paragraph.
+        const hit = m.ed.posAtCoords({ left: 2, top: at.y + 2 })!
+        expect(hit.pos).toBe(after().pmStartPos)
+        m.done()
+    })
+
+    test('destroy ends an animation in flight', () =>
+    {
+        const m = mount([details(true, p('a'), p('b')), p('after')])
+        m.toggle()
+        expect(m.shown().active).toBe(true)
+        m.ed.destroy()
+        expect(m.shown().active).toBe(false)
+        m.container.remove()
     })
 
     test('animate: false switches instantly', () =>
